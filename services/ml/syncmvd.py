@@ -31,6 +31,12 @@ NEGATIVE = (
 
 
 def load_pipeline(args, device, dtype):
+    # diffusers 0.31 imports FLAX_WEIGHTS_NAME from transformers.utils, which newer
+    # transformers dropped. Re-add the constant so the import works on any version.
+    import transformers.utils as _tu
+    if not hasattr(_tu, "FLAX_WEIGHTS_NAME"):
+        _tu.FLAX_WEIGHTS_NAME = "flax_model.msgpack"
+
     from diffusers import (
         ControlNetModel,
         DDIMScheduler,
