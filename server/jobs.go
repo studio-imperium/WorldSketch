@@ -4,8 +4,12 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -24,16 +28,18 @@ type Job struct {
 }
 
 type Store struct {
-	root string
-	mu   sync.Mutex
-	jobs map[string]*Job
+	root   string
+	mu     sync.Mutex
+	jobs   map[string]*Job
+	tokens map[string]string // job id -> one-time token guarding its result callback
 }
 
 func NewStore(root string) *Store {
 	os.MkdirAll(root, 0755)
 	return &Store{
-		root: root,
-		jobs: map[string]*Job{},
+		root:   root,
+		jobs:   map[string]*Job{},
+		tokens: map[string]string{},
 	}
 }
 
@@ -78,6 +84,13 @@ func (s *Store) Get(id string) (*Job, bool) {
 func (s *Store) Run(id string) {
 	dir := filepath.Join(s.root, id)
 	scene := readScene(filepath.Join(dir, "scene.json"))
+
+	// Serverless: hand the whole pipeline to the RunPod GPU worker instead of
+	// running ComfyUI + gsplat locally. The worker PUTs world.splat back to us.
+	if runpodConfigured() {
+		s.runRemote(id, dir, scene)
+		return
+	}
 
 	s.set(id, "generating images", "")
 	if err := RunComfy(dir, scene.Prompt); err != nil {
@@ -129,6 +142,12 @@ func writeViews(dir string, views []UploadedView) {
 }
 
 func (s *Store) set(id, status, message string) {
+	if message != "" {
+		log.Printf("[%s] %s: %s", id, status, message)
+	} else {
+		log.Printf("[%s] %s", id, status)
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -167,6 +186,87 @@ func (s *Store) setPreview(id string) {
 	job := s.jobs[id]
 	job.PreviewURL = "/api/jobs/" + id + "/preview.png"
 	job.UpdatedAt = time.Now()
+}
+
+// runRemote submits the job to the RunPod serverless worker and waits for it to
+// finish. The worker PUTs world.splat back to a one-time callback URL (handled in
+// main.go), which marks the job done; we poll RunPod only to surface failures.
+func (s *Store) runRemote(id, dir string, scene Scene) {
+	base := publicBaseURL()
+	if base == "" {
+		s.fail(id, errors.New("WORLDSKETCH_PUBLIC_URL is not set — the GPU worker needs a public URL to return results"))
+		return
+	}
+
+	token := newID()
+	s.mu.Lock()
+	s.tokens[id] = token
+	s.mu.Unlock()
+	resultURL := base + "/api/jobs/" + id + "/result?token=" + token
+
+	s.set(id, "submitting to gpu", "")
+	input, err := buildRunpodInput(dir, scene, resultURL)
+	if err != nil {
+		s.fail(id, err)
+		return
+	}
+	rpID, err := runpodRun(input)
+	if err != nil {
+		s.fail(id, err)
+		return
+	}
+	log.Printf("[%s] runpod job %s queued; awaiting result at %s", id, rpID, resultURL)
+
+	s.set(id, "generating on gpu", "")
+	deadline := time.Now().Add(20 * time.Minute)
+	lastStatus := ""
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		if s.isDone(id) {
+			return // the result callback already completed the job
+		}
+		status, message := runpodStatus(rpID)
+		if status != lastStatus {
+			log.Printf("[%s] runpod status: %s", id, status)
+			lastStatus = status
+		}
+		switch status {
+		case "FAILED", "CANCELLED", "TIMED_OUT":
+			s.fail(id, fmt.Errorf("gpu job %s: %s", strings.ToLower(status), message))
+			return
+		}
+	}
+	if !s.isDone(id) {
+		s.fail(id, errors.New("gpu job timed out (worker never PUT a result — is the tunnel/public URL alive?)"))
+	}
+}
+
+// markDone is called by the result callback once world.splat has been received.
+func (s *Store) markDone(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.jobs[id]
+	if job == nil {
+		return
+	}
+	job.Status = "done"
+	job.SplatURL = "/api/jobs/" + id + "/world.splat"
+	job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
+	job.UpdatedAt = time.Now()
+}
+
+func (s *Store) isDone(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	job := s.jobs[id]
+	return job != nil && job.Status == "done"
+}
+
+func (s *Store) validResultToken(id, token string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	want, ok := s.tokens[id]
+	return ok && token != "" && token == want
 }
 
 func readScene(path string) Scene {

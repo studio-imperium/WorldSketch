@@ -367,7 +367,7 @@ func batchedWorkflow(ckpt, control, depthControl string, jobs []viewJob, positiv
 			"negative":      negative,
 			"control_net":   link("cnet_loader", 0),
 			"image":         link(edgeBatch, 0),
-			"strength":      0.9,
+			"strength":      envFloat("WS_CANNY_STRENGTH", 0.9),
 			"start_percent": 0.0,
 			"end_percent":   0.9,
 		})
@@ -382,7 +382,7 @@ func batchedWorkflow(ckpt, control, depthControl string, jobs []viewJob, positiv
 			"negative":      negative,
 			"control_net":   link("cnet_depth_loader", 0),
 			"image":         link(depthBatch, 0),
-			"strength":      0.6,
+			"strength":      envFloat("WS_DEPTH_STRENGTH", 0.6),
 			"start_percent": 0.0,
 			"end_percent":   0.8,
 		})
@@ -396,11 +396,11 @@ func batchedWorkflow(ckpt, control, depthControl string, jobs []viewJob, positiv
 		"negative":     negative,
 		"latent_image": link("vae_encode", 0),
 		"seed":         seed,
-		"steps":        7,
-		"cfg":          6.5,
+		"steps":        envInt("WS_STEPS", 7),
+		"cfg":          envFloat("WS_CFG", 6.5),
 		"sampler_name": "euler",
 		"scheduler":    "normal",
-		"denoise":      0.5,
+		"denoise":      envFloat("WS_DENOISE", 0.5),
 	})
 	prompt["decode"] = node("VAEDecode", map[string]any{
 		"samples": link("ksampler", 0),

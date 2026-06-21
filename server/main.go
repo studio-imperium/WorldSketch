@@ -24,6 +24,15 @@ func main() {
 	store := NewStore(outputDir)
 	saveDefaultWorkflow(outputDir)
 
+	if runpodConfigured() {
+		log.Printf("RunPod mode: endpoint=%s  results→%s", os.Getenv("RUNPOD_ENDPOINT_ID"), publicBaseURL())
+		if publicBaseURL() == "" {
+			log.Println("  WARNING: WORLDSKETCH_PUBLIC_URL is empty — the worker can't return results")
+		}
+	} else {
+		log.Println("Local pipeline mode (set RUNPOD_ENDPOINT_ID + RUNPOD_API_KEY + WORLDSKETCH_PUBLIC_URL for serverless)")
+	}
+
 	http.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -44,6 +53,29 @@ func main() {
 
 	http.HandleFunc("/api/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
+
+		// Result callback: the GPU worker PUTs world.splat here when it finishes.
+		if r.Method == http.MethodPut && strings.HasSuffix(id, "/result") {
+			id = strings.TrimSuffix(id, "/result")
+			if !store.validResultToken(id, r.URL.Query().Get("token")) {
+				http.Error(w, "forbidden", http.StatusForbidden)
+				return
+			}
+			data, err := io.ReadAll(r.Body)
+			if err != nil || len(data) == 0 {
+				http.Error(w, "empty result body", http.StatusBadRequest)
+				return
+			}
+			if err := os.WriteFile(filepath.Join(outputDir, id, "world.splat"), data, 0644); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			log.Printf("[%s] result received: %d bytes", id, len(data))
+			store.markDone(id)
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": len(data)})
+			return
+		}
+
 		if strings.HasSuffix(id, "/world.ply") {
 			id = strings.TrimSuffix(id, "/world.ply")
 			http.ServeFile(w, r, filepath.Join(outputDir, id, "world.ply"))

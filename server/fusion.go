@@ -6,6 +6,7 @@ import (
 	"image"
 	"image/color"
 	"image/png"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -25,12 +26,14 @@ func WritePLYFromViews(scene Scene, dir, path string) error {
 		points = append(points, pointsFromView(camera, rgb, primitiveDepth, generatedDepth)...)
 	}
 
-	points = dedupe(points, 0.025)
+	points = dedupe(points, envFloat("WS_DEDUPE", 0.025))
 	deduped := len(points)
 	points = cullUnsupportedPoints(points, scene.Primitives)
 	supported := len(points)
-	points = cullSparsePoints(points, 0.1, 8)
-	writeLog(dir, "point_filter.log", fmt.Sprintf("deduped_points=%d\nprimitive_supported_points=%d\nfiltered_points=%d\nprimitive_culled_points=%d\nsparse_culled_points=%d\n", deduped, supported, len(points), deduped-supported, supported-len(points)))
+	points = cullSparsePoints(points, envFloat("WS_SPARSE_VOXEL", 0.1), envInt("WS_SPARSE_MIN_NEIGHBORS", 4))
+	stats := fmt.Sprintf("deduped_points=%d\nprimitive_supported_points=%d\nfiltered_points=%d\nprimitive_culled_points=%d\nsparse_culled_points=%d\n", deduped, supported, len(points), deduped-supported, supported-len(points))
+	writeLog(dir, "point_filter.log", stats)
+	log.Printf("point_filter:\n%s", stats) // surface in the worker log
 	if len(points) == 0 {
 		return os.ErrInvalid
 	}

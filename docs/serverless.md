@@ -33,14 +33,38 @@ Coordinator holds it transiently ── streams to player ── deletes (no sto
 2. **Network volume** — create one, upload models to `models/checkpoints/DreamShaper_8_pruned.safetensors` and `models/controlnet/control_v11p_sd15_canny.pth` + `control_v11f1p_sd15_depth.pth`. The handler points ComfyUI at `/runpod-volume/models`.
 3. **Serverless endpoint** — from the image, attach the volume, **min workers = 0** (pure pay-per-use), max 1–2. Note the **endpoint ID** + your **API key**.
 
-## What's next (coordinator — not built yet)
-The always-on CPU side. It's the existing Go server with the GPU work swapped for RunPod calls:
-- `POST /api/generate` → mint a job id + one-time `resultUrl`, base64 the views, `POST` to `https://api.runpod.ai/v2/<endpoint>/run` with `{input:{scene,views,resultUrl}}`.
-- `PUT /api/jobs/<id>/result` (the `resultUrl`) → receive `world.splat`, mark done.
-- `GET /api/jobs/<id>` poll, `GET /api/jobs/<id>/world.splat` → stream + delete (TTL).
-- `collisions.json` served from the scene as today.
+## Coordinator (built)
+The existing Go server, with generation delegated to RunPod when these env vars are set
+(otherwise it runs the pipeline locally as before):
 
-Needs your **endpoint ID + API key** (env) and a **public URL** the worker can PUT back to (a cheap public CPU box; or ngrok if the coordinator runs on your Mac during dev).
+| Env | Purpose |
+|---|---|
+| `RUNPOD_ENDPOINT_ID` | your serverless endpoint id |
+| `RUNPOD_API_KEY` | RunPod API key (read from env only — never committed) |
+| `WORLDSKETCH_PUBLIC_URL` | externally reachable base URL the worker PUTs results to |
+
+Flow ([runpod.go](../server/runpod.go), [jobs.go](../server/jobs.go)): `POST /api/generate` → base64 the
+views → `POST .../run` with `{scene, views, resultUrl}` → poll `.../status` for failures →
+the worker `PUT`s `world.splat` to `/api/jobs/<id>/result?token=…` → job marked done →
+browser polls `/api/jobs/<id>` → `GET …/world.splat`. `collisions.json` is served from the
+scene by the coordinator (no worker round-trip).
+
+### Run it (dev, from your Mac)
+The worker needs a public URL to PUT results back, so tunnel the coordinator with ngrok:
+```bash
+# terminal 1 — public tunnel to the coordinator's :8067
+ngrok http 8067            # note the https URL
+
+# terminal 2 — the coordinator
+cd server
+export RUNPOD_ENDPOINT_ID=<your endpoint id>
+export RUNPOD_API_KEY=<your key>          # never commit this
+export WORLDSKETCH_PUBLIC_URL=https://<subdomain>.ngrok.app
+go run .
+```
+Open `http://localhost:8067`, build a scene, hit **Generate Splat**. The browser talks to
+localhost; only the worker's result callback uses the ngrok URL. In prod, run the coordinator
+on a cheap public CPU box and set `WORLDSKETCH_PUBLIC_URL` to its address (no tunnel needed).
 
 ## Notes / caveats
 - **Untested live** — Go one-shot builds and the handler passes syntax; the Docker build, model-volume wiring, and a real RunPod run need your account to verify. Most likely fixups: exact base-image tag / wheel index, and the DreamShaper checkpoint source.

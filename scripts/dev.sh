@@ -1,41 +1,58 @@
 #!/usr/bin/env bash
+#
+# One command to run the coordinator in serverless mode:
+#   - loads .env (RUNPOD_ENDPOINT_ID, RUNPOD_API_KEY)
+#   - launches a cloudflare tunnel and auto-captures its public URL
+#   - starts the Go coordinator with WORLDSKETCH_PUBLIC_URL set to that URL
+#   - kills the tunnel when you Ctrl+C
+#
+#   ./scripts/dev-serverless.sh
+#
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PIDS=()
 
-cleanup() {
-	for pid in "${PIDS[@]}"; do
-		kill "$pid" 2>/dev/null || true
-	done
-}
+# --- load .env (KEY=value lines) ---
+if [[ -f "$ROOT/.env" ]]; then
+	set -a
+	# shellcheck disable=SC1091
+	source "$ROOT/.env"
+	set +a
+else
+	echo "No .env found. Copy .env.example to .env and fill in your RunPod creds."
+	exit 1
+fi
 
-running() {
-	lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1
-}
+if [[ -z "${RUNPOD_ENDPOINT_ID:-}" || -z "${RUNPOD_API_KEY:-}" ]]; then
+	echo "RUNPOD_ENDPOINT_ID / RUNPOD_API_KEY missing in .env"
+	exit 1
+fi
 
+command -v cloudflared >/dev/null || { echo "Install cloudflared: brew install cloudflared"; exit 1; }
+
+# --- launch the tunnel and capture its public URL ---
+CF_LOG="$(mktemp)"
+cloudflared tunnel --url http://localhost:8067 >"$CF_LOG" 2>&1 &
+CF_PID=$!
+cleanup() { kill "$CF_PID" 2>/dev/null || true; rm -f "$CF_LOG"; }
 trap cleanup EXIT INT TERM
 
-if running 8188; then
-	echo "ComfyUI already running on 8188"
-else
-	echo "Starting ComfyUI on 8188"
-	"$ROOT/scripts/start-comfy-stable.sh" &
-	PIDS+=("$!")
+echo "Starting cloudflare tunnel..."
+URL=""
+for _ in $(seq 1 30); do
+	URL="$(grep -oE 'https://[a-z0-9-]+\.trycloudflare\.com' "$CF_LOG" | head -1 || true)"
+	[[ -n "$URL" ]] && break
+	kill -0 "$CF_PID" 2>/dev/null || { echo "cloudflared exited:"; cat "$CF_LOG"; exit 1; }
+	sleep 1
+done
+if [[ -z "$URL" ]]; then
+	echo "Could not find tunnel URL in cloudflared output:"
+	cat "$CF_LOG"
+	exit 1
 fi
+export WORLDSKETCH_PUBLIC_URL="$URL"
+echo "Tunnel up: $URL"
 
-if running 8067; then
-	echo "WorldSketch already running on 8067"
-else
-	echo "Starting WorldSketch on 8067"
-	(cd "$ROOT/server" && go run .) &
-	PIDS+=("$!")
-fi
-
-echo
-echo "WorldSketch: http://localhost:8067"
-echo "ComfyUI:     http://127.0.0.1:8188"
-echo
-echo "Press Ctrl+C to stop processes started by this script."
-
-wait
+# --- run the coordinator (foreground; tunnel dies with it via the trap) ---
+cd "$ROOT/server"
+exec go run .

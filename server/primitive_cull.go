@@ -21,9 +21,12 @@ func cullUnsupportedPoints(points []Point, primitives []Primitive) []Point {
 	return out
 }
 
-// colorCullThreshold is the 0-255 RGB distance (~0.6 normalized) above which a
-// point is considered vastly off-colour from its primitive and gets culled.
-const colorCullThreshold = 153.0
+// colorCullThreshold: points farther than this from their primitive's colour are
+// culled. WS_COLOR_CULL_THRESHOLD is normalized 0-1 (default 0.8 = looser); scaled
+// to the 0-255 RGB distance used here.
+func colorCullThreshold() float64 {
+	return envFloat("WS_COLOR_CULL_THRESHOLD", 0.8) * 255
+}
 
 func primitiveColorMatches(point Point, primitive Primitive) bool {
 	target := parseColor(primitive.Color, Color{R: -1})
@@ -33,7 +36,7 @@ func primitiveColorMatches(point Point, primitive Primitive) bool {
 	dr := float64(point.R) - target.R
 	dg := float64(point.G) - target.G
 	db := float64(point.B) - target.B
-	return math.Sqrt(dr*dr+dg*dg+db*db) <= colorCullThreshold
+	return math.Sqrt(dr*dr+dg*dg+db*db) <= colorCullThreshold()
 }
 
 // primitiveSupportDistance returns the signed distance from a point to the
