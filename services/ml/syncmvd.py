@@ -12,7 +12,10 @@ primitive_depth_control), plus camera.json + primitive_depth for the geometry.
 """
 
 import argparse
+import builtins
+import importlib
 import importlib.util
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -30,23 +33,58 @@ NEGATIVE = (
     "text, watermark, blurry, people"
 )
 
+FLASH_ATTN_MODULE_PREFIXES = (
+    "flash_attn",
+    "flash_attn_3",
+    "flash_attn_interface",
+)
+
+
+def is_flash_attn_module(name):
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in FLASH_ATTN_MODULE_PREFIXES)
+
 
 def disable_flash_attn_detection():
     """Force HF/diffusers to use PyTorch SDPA instead of optional flash-attn.
 
-    Some RunPod PyTorch images ship flash-attn builds that register FA3 ops through
-    torch.library.infer_schema with stringized annotations. That can make importing
-    diffusers fail before the pipeline is even constructed. SD1.5 ControlNet does
-    not require flash-attn, so hide it from optional dependency probes.
+    Some RunPod PyTorch images ship FlashAttention 3/Hopper modules that register
+    ops through torch.library.infer_schema with stringized annotations. That can
+    make importing diffusers fail before the pipeline is even constructed. SD1.5
+    ControlNet does not require flash-attn, so hide it from optional dependency
+    probes and direct optional imports.
     """
     original_find_spec = importlib.util.find_spec
+    original_import_module = importlib.import_module
+    original_import = builtins.__import__
+
+    visible = {
+        name: bool(original_find_spec(name))
+        for name in FLASH_ATTN_MODULE_PREFIXES
+    }
+    print(f"[syncmvd] disabling flash-attn modules {visible}", flush=True)
 
     def find_spec_without_flash_attn(name, *args, **kwargs):
-        if name == "flash_attn" or name.startswith("flash_attn."):
+        if is_flash_attn_module(name):
             return None
         return original_find_spec(name, *args, **kwargs)
 
+    def import_module_without_flash_attn(name, package=None):
+        if is_flash_attn_module(name):
+            raise ImportError(f"{name} disabled by WorldSketch")
+        return original_import_module(name, package)
+
+    def import_without_flash_attn(name, globals=None, locals=None, fromlist=(), level=0):
+        if level == 0 and is_flash_attn_module(name):
+            raise ImportError(f"{name} disabled by WorldSketch")
+        return original_import(name, globals, locals, fromlist, level)
+
+    for name in list(sys.modules):
+        if is_flash_attn_module(name):
+            del sys.modules[name]
+
     importlib.util.find_spec = find_spec_without_flash_attn
+    importlib.import_module = import_module_without_flash_attn
+    builtins.__import__ = import_without_flash_attn
 
 
 def load_pipeline(args, device, dtype):

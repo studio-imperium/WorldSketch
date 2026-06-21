@@ -35,9 +35,46 @@ ENV COMFY_DIR=/workspace/ComfyUI
 # that torch 2.4's torch.library.infer_schema can't parse, which crashes
 # `import diffusers...controlnet`. SD1.5 uses sdpa attention and doesn't need it.
 RUN pip uninstall -y flash-attn flash_attn flash-attn-3 flash_attn_3 flash-attn-interface 2>/dev/null || true
+RUN python3 - <<'PY'
+import pathlib
+import site
+import sysconfig
+
+roots = set(site.getsitepackages())
+purelib = sysconfig.get_paths().get("purelib")
+if purelib:
+    roots.add(purelib)
+
+names = (
+    "flash_attn",
+    "flash_attn_3",
+    "flash_attn_interface.py",
+    "flash_attn-",
+    "flash_attn_",
+    "flash-attn-",
+)
+for root in sorted(roots):
+    path = pathlib.Path(root)
+    if not path.exists():
+        continue
+    for child in path.iterdir():
+        if any(child.name.startswith(name) for name in names):
+            print(f"[build] removing {child}")
+            if child.is_dir():
+                import shutil
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+PY
 # Canary: fail the BUILD (visible in 20 min) rather than a run (visible in 40) if the
 # diffusers controlnet import still can't load.
-RUN python3 -c "import diffusers.models.controlnets.controlnet; print('[build] diffusers controlnet import OK')"
+RUN python3 - <<'PY'
+import importlib.util
+for name in ("flash_attn", "flash_attn_3", "flash_attn_interface"):
+    print(f"[build] {name} spec: {importlib.util.find_spec(name)}")
+import diffusers.models.controlnets.controlnet
+print("[build] diffusers controlnet import OK")
+PY
 
 # App: build the server, and point it at the system python (where torch+gsplat live)
 COPY . /workspace/WorldSketch
