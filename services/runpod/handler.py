@@ -22,6 +22,7 @@ import subprocess
 import time
 import urllib.request
 import uuid
+import sys
 
 import runpod
 
@@ -32,6 +33,23 @@ SERVER_BIN = os.path.join(SERVER_DIR, "worldsketch-server")
 VOLUME_MODELS = os.environ.get("MODELS_DIR", "/runpod-volume/models")
 
 _comfy = None
+
+
+def log_python_import_state():
+    script = pathlib.Path(REPO) / "services" / "ml" / "syncmvd.py"
+    try:
+        sys.path.insert(0, str(script.parent))
+        import syncmvd
+
+        syncmvd.disable_flash_attn_detection()
+        import diffusers.models.controlnets.controlnet
+
+        print("[handler] guarded diffusers controlnet import OK", flush=True)
+    except Exception as exc:
+        print(f"[handler] guarded diffusers controlnet import failed: {exc}", flush=True)
+    finally:
+        if str(script.parent) in sys.path:
+            sys.path.remove(str(script.parent))
 
 
 def _model_paths_config():
@@ -128,4 +146,5 @@ def handler(event):
         subprocess.run(["rm", "-rf", job_dir])
 
 
+log_python_import_state()
 runpod.serverless.start({"handler": handler})

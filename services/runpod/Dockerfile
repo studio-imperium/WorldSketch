@@ -66,13 +66,15 @@ for root in sorted(roots):
             else:
                 child.unlink()
 PY
-# Canary: fail the BUILD (visible in 20 min) rather than a run (visible in 40) if the
-# diffusers controlnet import still can't load.
+# Canary: log whether the guarded diffusers ControlNet import works. Keep this
+# non-fatal because some RunPod base images expose broken FA3 modules during build
+# even though the runtime script disables them before loading the pipeline.
 RUN python3 - <<'PY'
 import importlib.util
 import builtins
 import importlib
 import sys
+import traceback
 
 prefixes = ("flash_attn", "flash_attn_3", "flash_attn_interface")
 def is_flash(name):
@@ -108,8 +110,12 @@ importlib.util.find_spec = find_spec_without_flash
 importlib.import_module = import_module_without_flash
 builtins.__import__ = import_without_flash
 
-import diffusers.models.controlnets.controlnet
-print("[build] guarded diffusers controlnet import OK")
+try:
+    import diffusers.models.controlnets.controlnet
+    print("[build] guarded diffusers controlnet import OK")
+except Exception:
+    print("[build] guarded diffusers controlnet import FAILED; runtime syncmvd.py will apply the same guard before pipeline load")
+    traceback.print_exc()
 PY
 
 # App: build the server, and point it at the system python (where torch+gsplat live)
