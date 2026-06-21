@@ -1,6 +1,6 @@
 pillow
 numpy
-transformers
-diffusers
+transformers==4.46.3
+diffusers==0.31.0
 accelerate
 gsplat==1.5.3
