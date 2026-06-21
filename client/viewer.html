@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>WorldSketch PLY Viewer</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="/styles.css">
+	<script type="importmap">
+	{
+		"imports": {
+			"three": "/lib/three.module.js"
+		}
+	}
+	</script>
+</head>
+<body>
+	<div id="canvas"></div>
+	<div class="ui viewer-ui">
+		<section class="panel toolbar">
+			<div class="brand">
+				<strong>PLY Viewer</strong>
+				<span id="stats">No file loaded</span>
+			</div>
+			<label class="btn file-btn">
+				Open PLY
+				<input id="file" type="file" accept=".ply">
+			</label>
+			<label class="btn file-btn">
+				Open Collision
+				<input id="collision_file" type="file" accept=".json,application/json">
+			</label>
+			<button class="btn" id="cull_btn">Apply Cullings</button>
+			<button class="btn" id="frame_btn">Frame</button>
+			<label class="toggle-row">
+				<input id="show_colliders" type="checkbox" checked>
+				Show colliders
+			</label>
+			<label class="range-row">
+				Point size
+				<input id="point_size" type="range" min="0.005" max="0.08" value="0.025" step="0.001">
+			</label>
+			<p class="status" id="status">Drop a WorldSketch ASCII PLY here.</p>
+		</section>
+	</div>
+	<script type="module" src="/scripts/ply-viewer.js"></script>
+</body>
+</html>

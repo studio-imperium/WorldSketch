@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>WorldSketch</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap" rel="stylesheet">
+	<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css">
+	<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+	<link rel="stylesheet" href="/styles.css">
+	<script type="importmap">
+	{
+		"imports": {
+			"three": "/lib/three.module.js"
+		}
+	}
+	</script>
+</head>
+<body>
+	<div id="canvas"></div>
+	<div class="ui">
+		<section class="color-palette card bg-base-100 shadow-xl border border-base-300" id="color_palette" aria-label="Color palette">
+			<div class="card-body p-2">
+				<div class="swatch-grid">
+					<button class="color-swatch btn btn-ghost btn-square active" data-color="#232323" aria-label="Charcoal" title="Charcoal"><span style="background: #232323"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#8f8a80" aria-label="Stone" title="Stone"><span style="background: #8f8a80"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#a7775b" aria-label="Clay" title="Clay"><span style="background: #a7775b"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#c5ad81" aria-label="Sand" title="Sand"><span style="background: #c5ad81"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#b98b42" aria-label="Ochre" title="Ochre"><span style="background: #b98b42"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#8f4d2e" aria-label="Rust" title="Rust"><span style="background: #8f4d2e"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#604733" aria-label="Bark" title="Bark"><span style="background: #604733"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#587553" aria-label="Moss" title="Moss"><span style="background: #587553"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#87906b" aria-label="Sage" title="Sage"><span style="background: #87906b"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#6f7446" aria-label="Olive" title="Olive"><span style="background: #6f7446"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#59686c" aria-label="Slate" title="Slate"><span style="background: #59686c"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#6c7f89" aria-label="Muted blue" title="Muted blue"><span style="background: #6c7f89"></span></button>
+				</div>
+			</div>
+		</section>
+		<section class="generate-panel" aria-label="Generate">
+			<button class="generate-btn btn btn-square btn-primary" id="generate_btn" aria-label="Generate world" title="Generate">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l1.3 3.2l3.2 1.3l-3.2 1.3l-1.3 3.2l-1.3 -3.2l-3.2 -1.3l3.2 -1.3z"></path><path d="M6.5 13l.8 2l2 .8l-2 .8l-.8 2l-.8 -2l-2 -.8l2 -.8z"></path></svg>
+			</button>
+			<button class="world-tile hidden" id="world_tile" type="button" aria-label="Download generated world" title="Download generated world">
+				<span class="loading loading-spinner loading-md world-spinner" id="world_spinner" aria-hidden="true"></span>
+				<img class="world-preview hidden" id="world_preview" alt="">
+				<span class="world-status" id="world_status"></span>
+			</button>
+			<a class="btn btn-sm hidden" id="view_splat_btn" href="#" target="_blank">View Splat</a>
+			<a class="btn btn-sm hidden" id="download_btn" href="#" download="world.splat">Download Splat</a>
+			<a class="btn btn-sm hidden" id="download_ply_btn" href="#" download="world.ply">Download PLY</a>
+			<a class="btn btn-sm hidden" id="download_collision_btn" href="#" download="collisions.json">Download Collision</a>
+			<a class="btn btn-sm hidden" id="download_bundle_btn" href="#" download="worldsketch-training-bundle.zip">Download Training Bundle</a>
+			<p class="status hidden text-sm text-base-content/70" id="status"></p>
+		</section>
+		<dialog class="modal" id="generate_modal">
+			<div class="modal-box generate-modal-box">
+				<form method="dialog">
+					<button class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3 modal-close-btn" aria-label="Close">
+						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6l-12 12"></path><path d="M6 6l12 12"></path></svg>
+					</button>
+				</form>
+				<form id="generate_form">
+					<h2 class="text-lg font-bold">Describe your scene</h2>
+					<textarea class="textarea textarea-bordered scene-prompt" id="scene_prompt" rows="5" placeholder="A mossy ruin in a quiet forest clearing, soft daylight, natural stone and grass"></textarea>
+					<div class="modal-action">
+						<button class="btn" type="button" id="cancel_generate_btn">Cancel</button>
+						<button class="generate-submit btn btn-primary" type="submit">Generate</button>
+					</div>
+				</form>
+			</div>
+			<form method="dialog" class="modal-backdrop">
+				<button>close</button>
+			</form>
+		</dialog>
+		<nav class="tool-dock join bg-base-100 shadow-xl border border-base-300" aria-label="Primitive tools">
+			<button class="tool-btn btn btn-ghost btn-square join-item active" data-tool="pointer" aria-label="Pointer" title="Pointer">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.904 17.563a1.2 1.2 0 0 0 2.228 .308l2.09 -3.093l4.907 4.907a1.067 1.067 0 0 0 1.509 0l1.047 -1.047a1.067 1.067 0 0 0 0 -1.509l-4.907 -4.907l3.113 -2.09a1.2 1.2 0 0 0 -.309 -2.228l-13.582 -3.904l3.904 13.563"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="scale" aria-label="Scale tool" title="Scale">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 4h4v4"></path><path d="M14 10l6 -6"></path><path d="M8 20h-4v-4"></path><path d="M4 20l6 -6"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="rotate" aria-label="Rotate tool" title="Rotate">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4.05 11a8 8 0 1 1 1.95 8"></path><path d="M4 4v7h7"></path><path d="M4.05 11a8.04 8.04 0 0 1 2.35 -4.6"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="eraser" aria-label="Eraser" title="Eraser">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3"></path><path d="M18 13.3l-6.3 -6.3"></path></svg>
+			</button>
+			<span class="dock-divider" aria-hidden="true"></span>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="box" aria-label="Box tool" title="Box">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 16.008v-8.018a1.98 1.98 0 0 0 -1 -1.717l-7 -4.008a2.016 2.016 0 0 0 -2 0l-7 4.008c-.619 .355 -1 1.01 -1 1.718v8.018c0 .709 .381 1.363 1 1.717l7 4.008a2.016 2.016 0 0 0 2 0l7 -4.008c.619 -.355 1 -1.01 1 -1.718"></path><path d="M12 22v-10"></path><path d="M12 12l8.73 -5.04"></path><path d="M3.27 6.96l8.73 5.04"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="sphere" aria-label="Sphere tool" title="Sphere">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12c0 1.657 4.03 3 9 3s9 -1.343 9 -3"></path><path d="M3 12a9 9 0 1 0 18 0a9 9 0 1 0 -18 0"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="cylinder" aria-label="Cylinder tool" title="Cylinder">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 6a7 3 0 1 0 14 0a7 3 0 1 0 -14 0"></path><path d="M5 6v12c0 1.657 3.134 3 7 3s7 -1.343 7 -3v-12"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="cone" aria-label="Cone tool" title="Cone">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 17.998v-.5l-8.13 -14.99a1 1 0 0 0 -1.74 0l-8.13 14.989v.5c0 1.659 4.03 3.003 9 3.003s9 -1.344 9 -3.002"></path></svg>
+			</button>
+		</nav>
+	</div>
+	<script type="module" src="/scripts/renderer.js"></script>
+</body>
+</html>

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>WorldSketch Splat Viewer</title>
+	<link rel="preconnect" href="https://fonts.googleapis.com">
+	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="/styles.css">
+	<script type="importmap">
+	{
+		"imports": {
+			"three": "/lib/three.module.js"
+		}
+	}
+	</script>
+</head>
+<body>
+	<div id="canvas"></div>
+	<div class="ui viewer-ui">
+		<section class="panel toolbar">
+			<div class="brand">
+				<strong>Splat Viewer</strong>
+				<span id="stats">No file loaded</span>
+			</div>
+			<label class="btn file-btn">
+				Open Splat
+				<input id="file" type="file" accept=".splat">
+			</label>
+			<label class="btn file-btn">
+				Open Collision
+				<input id="collision_file" type="file" accept=".json,application/json">
+			</label>
+			<label class="toggle-row">
+				<input id="show_colliders" type="checkbox" checked>
+				Show colliders
+			</label>
+			<p class="status" id="status">Drop a WorldSketch splat here.</p>
+		</section>
+	</div>
+	<script type="module" src="/scripts/splat-viewer.js"></script>
+</body>
+</html>

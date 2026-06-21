@@ -1,0 +1,19 @@
+# OS
+.DS_Store
+
+# Python virtualenvs / caches
+.venv/
+__pycache__/
+*.pyc
+
+# Go build artifacts
+/server/gausy
+/server/worldsketch-server
+/server/tmp/
+*.test
+
+# Generated job output
+/server/output/
+
+# Node
+node_modules/

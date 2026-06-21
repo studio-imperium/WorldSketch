@@ -1,0 +1,4 @@
+pillow
+numpy
+transformers
+gsplat==1.5.3
