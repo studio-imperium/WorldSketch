@@ -31,6 +31,15 @@ NEGATIVE = (
 
 
 def load_pipeline(args, device, dtype):
+    import os
+
+    # Cache HF downloads on the (persistent) volume so they survive cold starts.
+    os.environ.setdefault("HF_HOME", str(Path(args.models).parent / "hf"))
+
+    import diffusers
+    import transformers
+    print(f"[syncmvd] transformers {transformers.__version__} diffusers {diffusers.__version__}", flush=True)
+
     # diffusers 0.31 imports FLAX_WEIGHTS_NAME from transformers.utils, which newer
     # transformers dropped. Re-add the constant so the import works on any version.
     import transformers.utils as _tu
@@ -50,13 +59,20 @@ def load_pipeline(args, device, dtype):
     depth = ControlNetModel.from_single_file(
         str(models / "controlnet" / "control_v11f1p_sd15_depth.pth"), torch_dtype=dtype
     )
-    # A list of controlnets is the version-safe form — diffusers wraps it internally.
-    pipe = StableDiffusionControlNetImg2ImgPipeline.from_single_file(
-        str(models / "checkpoints" / args.checkpoint),
-        controlnet=[canny, depth],
-        torch_dtype=dtype,
-        safety_checker=None,
-    ).to(device)
+
+    # Prefer the single-file checkpoint on the volume; its LDM->diffusers CLIP conversion
+    # is fragile, so fall back to the diffusers-format repo (downloaded + cached) if it fails.
+    try:
+        pipe = StableDiffusionControlNetImg2ImgPipeline.from_single_file(
+            str(models / "checkpoints" / args.checkpoint),
+            controlnet=[canny, depth], torch_dtype=dtype, safety_checker=None,
+        ).to(device)
+    except Exception as exc:
+        print(f"[syncmvd] from_single_file failed ({exc}); using {args.base_model}", flush=True)
+        pipe = StableDiffusionControlNetImg2ImgPipeline.from_pretrained(
+            args.base_model, controlnet=[canny, depth], torch_dtype=dtype, safety_checker=None,
+        ).to(device)
+
     # DDIM gives integer timesteps + epsilon prediction, which the sync loop's x0 math
     # relies on (alphas_cumprod[t]).
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
@@ -217,6 +233,7 @@ def parse_args():
     p.add_argument("--prompt", required=True)
     p.add_argument("--models", default="/runpod-volume/models")
     p.add_argument("--checkpoint", default="DreamShaper_8_pruned.safetensors")
+    p.add_argument("--base-model", default="Lykon/dreamshaper-8", dest="base_model")
     p.add_argument("--size", type=int, default=512)
     p.add_argument("--steps", type=int, default=7)
     p.add_argument("--denoise", type=float, default=0.5)

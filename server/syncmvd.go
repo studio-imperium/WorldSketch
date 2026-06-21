@@ -42,6 +42,7 @@ func RunSyncMVD(dir, scenePrompt string) error {
 		"../services/ml/syncmvd.py", dir,
 		"--prompt", positivePrompt(scenePrompt),
 		"--models", modelsDir(),
+		"--base-model", envStr("WS_BASE_MODEL", "Lykon/dreamshaper-8"),
 		"--size", strconv.Itoa(envInt("WS_SIZE", 512)),
 		"--steps", strconv.Itoa(envInt("WS_STEPS", 7)),
 		"--denoise", fmt.Sprintf("%g", envFloat("WS_DENOISE", 0.5)),
