@@ -19,7 +19,7 @@ ENV PATH=/usr/local/go/bin:$PATH
 # Python deps. The PREBUILT gsplat wheel is the key bit: it ships compiled CUDA
 # kernels so there's NO ~10-minute JIT compile on cold start. Falls back to source.
 ARG GSPLAT_WHEEL_INDEX=https://docs.gsplat.studio/whl/pt24cu124
-RUN pip install --no-cache-dir pillow numpy "transformers==4.45.2" "diffusers==0.31.0" accelerate runpod
+RUN pip install --no-cache-dir pillow numpy "transformers==4.41.2" "diffusers==0.31.0" accelerate runpod
 # The base image's flash-attn registers FA3 kernels via torch.library.infer_schema,
 # which fails on stringized annotations and breaks `import diffusers`. SD1.5 doesn't
 # need it (falls back to sdpa attention), so remove it.
