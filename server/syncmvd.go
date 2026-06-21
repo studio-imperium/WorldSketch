@@ -47,13 +47,15 @@ func RunSyncMVD(dir, scenePrompt string) error {
 		"--denoise", fmt.Sprintf("%g", envFloat("WS_DENOISE", 0.5)),
 		"--cfg", fmt.Sprintf("%g", envFloat("WS_CFG", 6.5)),
 		"--canny", fmt.Sprintf("%g", envFloat("WS_CANNY_STRENGTH", 0.9)),
-		"--depth", fmt.Sprintf("%g", envFloat("WS_DEPTH_STRENGTH", 0.6)),
+		"--depth-scale", fmt.Sprintf("%g", envFloat("WS_DEPTH_STRENGTH", 0.6)),
+		"--sync", strconv.Itoa(envInt("WS_SYNC", 1)),
+		"--sync-weight", fmt.Sprintf("%g", envFloat("WS_SYNC_WEIGHT", 1.0)),
+		"--sync-voxel", fmt.Sprintf("%g", envFloat("WS_SYNC_VOXEL", 0.25)),
+		"--sync-taper", fmt.Sprintf("%g", envFloat("WS_SYNC_TAPER", 0.7)),
 	}
 	cmd := exec.Command(pythonBin(), args...)
 	cmd.Dir = "."
-	out, err := cmd.CombinedOutput()
-	if len(out) > 0 {
-		writeLog(dir, "syncmvd.log", string(out))
-	}
-	return err
+	cmd.Stdout = os.Stdout // stream to worker stdout so tracebacks show in the logs
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }

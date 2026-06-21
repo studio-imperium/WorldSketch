@@ -115,9 +115,11 @@ func runpodStatus(jobID string) (string, string) {
 	}
 	json.NewDecoder(res.Body).Decode(&out)
 
+	// Include the worker's output (handler returns {error, log}) so failures show the
+	// actual traceback in the coordinator console, not just a generic message.
 	message := out.Error
-	if message == "" && len(out.Output) > 0 {
-		message = string(out.Output)
+	if len(out.Output) > 0 {
+		message = strings.TrimSpace(message + " " + string(out.Output))
 	}
 	return out.Status, message
 }

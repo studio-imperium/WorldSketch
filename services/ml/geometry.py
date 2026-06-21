@@ -103,16 +103,18 @@ class VoxelSync:
             self.pixel_voxel.append(pv)
 
     def sync(self, images, weights=None):
-        """images: list of (H, W, 3). Returns list of consensus (H, W, 3): each pixel
-        replaced by the (weighted) average colour of every view that sees its voxel."""
-        sums = np.zeros((self.num_voxels, 3))
+        """images: list of (H, W, C) — works for RGB (C=3) or latents (C=4). Returns the
+        consensus per view: each cell replaced by the (weighted) average of every view
+        that sees its voxel."""
+        C = images[0].shape[-1]
+        sums = np.zeros((self.num_voxels, C))
         counts = np.zeros(self.num_voxels)
         for i, img in enumerate(images):
             pv = self.pixel_voxel[i]
             sel = pv >= 0
             idx = pv[sel]
-            flat = img.reshape(-1, 3)[sel]
-            w = np.ones(sel.sum()) if weights is None else weights[i].reshape(-1)[sel]
+            flat = img.reshape(-1, C)[sel]
+            w = np.ones(int(sel.sum())) if weights is None else weights[i].reshape(-1)[sel]
             np.add.at(sums, idx, flat * w[:, None])
             np.add.at(counts, idx, w)
 
@@ -123,8 +125,8 @@ class VoxelSync:
         out = []
         for i, img in enumerate(images):
             pv = self.pixel_voxel[i]
-            res = img.reshape(-1, 3).copy()
+            res = img.reshape(-1, C).copy()
             sel = pv >= 0
             res[sel] = avg[pv[sel]]
-            out.append(res.reshape(self.hw[i][0], self.hw[i][1], 3))
+            out.append(res.reshape(self.hw[i][0], self.hw[i][1], C))
         return out
