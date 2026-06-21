@@ -22,10 +22,6 @@ ARG GSPLAT_WHEEL_INDEX=https://docs.gsplat.studio/whl/pt24cu124
 # Use the diffusers that matches the base image's (modern) transformers — pinning
 # diffusers old made it incompatible with transformers 5.x. flash-attn is removed below.
 RUN pip install --no-cache-dir pillow numpy diffusers accelerate runpod
-# The base image's flash-attn registers FA3 kernels via torch.library.infer_schema,
-# which fails on stringized annotations and breaks `import diffusers`. SD1.5 doesn't
-# need it (falls back to sdpa attention), so remove it.
-RUN pip uninstall -y flash-attn flash_attn 2>/dev/null || true
 RUN pip install --no-cache-dir gsplat==1.5.3 --index-url "${GSPLAT_WHEEL_INDEX}" \
     || pip install --no-cache-dir gsplat==1.5.3
 
@@ -33,6 +29,15 @@ RUN pip install --no-cache-dir gsplat==1.5.3 --index-url "${GSPLAT_WHEEL_INDEX}"
 RUN git clone --depth 1 https://github.com/comfyanonymous/ComfyUI /workspace/ComfyUI \
     && pip install --no-cache-dir -r /workspace/ComfyUI/requirements.txt
 ENV COMFY_DIR=/workspace/ComfyUI
+
+# Purge flash-attn LAST — after every pip install, so nothing (ComfyUI's reqs, etc.)
+# can pull it back. Its FA3 kernels declare string type-annotations ('float | None')
+# that torch 2.4's torch.library.infer_schema can't parse, which crashes
+# `import diffusers...controlnet`. SD1.5 uses sdpa attention and doesn't need it.
+RUN pip uninstall -y flash-attn flash_attn flash-attn-3 flash_attn_3 flash-attn-interface 2>/dev/null || true
+# Canary: fail the BUILD (visible in 20 min) rather than a run (visible in 40) if the
+# diffusers controlnet import still can't load.
+RUN python3 -c "import diffusers.models.controlnets.controlnet; print('[build] diffusers controlnet import OK')"
 
 # App: build the server, and point it at the system python (where torch+gsplat live)
 COPY . /workspace/WorldSketch

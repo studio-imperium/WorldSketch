@@ -12,6 +12,7 @@ primitive_depth_control), plus camera.json + primitive_depth for the geometry.
 """
 
 import argparse
+import importlib.util
 from pathlib import Path
 
 import numpy as np
@@ -30,11 +31,30 @@ NEGATIVE = (
 )
 
 
+def disable_flash_attn_detection():
+    """Force HF/diffusers to use PyTorch SDPA instead of optional flash-attn.
+
+    Some RunPod PyTorch images ship flash-attn builds that register FA3 ops through
+    torch.library.infer_schema with stringized annotations. That can make importing
+    diffusers fail before the pipeline is even constructed. SD1.5 ControlNet does
+    not require flash-attn, so hide it from optional dependency probes.
+    """
+    original_find_spec = importlib.util.find_spec
+
+    def find_spec_without_flash_attn(name, *args, **kwargs):
+        if name == "flash_attn" or name.startswith("flash_attn."):
+            return None
+        return original_find_spec(name, *args, **kwargs)
+
+    importlib.util.find_spec = find_spec_without_flash_attn
+
+
 def load_pipeline(args, device, dtype):
     import os
 
     # Cache HF downloads on the (persistent) volume so they survive cold starts.
     os.environ.setdefault("HF_HOME", str(Path(args.models).parent / "hf"))
+    disable_flash_attn_detection()
 
     import diffusers
     import transformers
