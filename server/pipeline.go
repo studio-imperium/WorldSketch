@@ -9,7 +9,7 @@ import "path/filepath"
 // before each stage for logging.
 func RunPipeline(dir string, scene Scene, status func(string)) error {
 	status("generating images")
-	if err := RunComfy(dir, scene.Prompt); err != nil {
+	if err := runImageGen(dir, scene.Prompt); err != nil {
 		return err
 	}
 

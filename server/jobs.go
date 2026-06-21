@@ -93,7 +93,7 @@ func (s *Store) Run(id string) {
 	}
 
 	s.set(id, "generating images", "")
-	if err := RunComfy(dir, scene.Prompt); err != nil {
+	if err := runImageGen(dir, scene.Prompt); err != nil {
 		s.fail(id, err)
 		return
 	}

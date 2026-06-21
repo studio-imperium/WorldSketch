@@ -1,4 +1,6 @@
 pillow
 numpy
 transformers
+diffusers
+accelerate
 gsplat==1.5.3

@@ -19,7 +19,7 @@ ENV PATH=/usr/local/go/bin:$PATH
 # Python deps. The PREBUILT gsplat wheel is the key bit: it ships compiled CUDA
 # kernels so there's NO ~10-minute JIT compile on cold start. Falls back to source.
 ARG GSPLAT_WHEEL_INDEX=https://docs.gsplat.studio/whl/pt24cu124
-RUN pip install --no-cache-dir pillow numpy transformers runpod \
+RUN pip install --no-cache-dir pillow numpy transformers diffusers accelerate runpod \
     && ( pip install --no-cache-dir gsplat==1.5.3 --index-url "${GSPLAT_WHEEL_INDEX}" \
          || pip install --no-cache-dir gsplat==1.5.3 )
 
