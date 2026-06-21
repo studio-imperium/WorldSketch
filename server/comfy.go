@@ -16,7 +16,7 @@ import (
 )
 
 const comfyURL = "http://127.0.0.1:8188"
-const defaultPositivePrompt = "stylized realistic game environment, grassy ground, mossy boulder in the centre, pale blue overcast sky, soft ambient diffuse lighting, shadowless albedo material look, no directional sunlight, readable object silhouettes, coherent 3d scene"
+const defaultPositivePrompt = "stylized realistic game environment, pale blue overcast sky, soft ambient diffuse lighting, shadowless albedo material look, no directional sunlight, readable object silhouettes, coherent 3d scene"
 
 func RunComfy(dir, scenePrompt string) error {
 	ckpt, err := firstCheckpoint()
@@ -396,7 +396,7 @@ func batchedWorkflow(ckpt, control, depthControl string, jobs []viewJob, positiv
 		"negative":     negative,
 		"latent_image": link("vae_encode", 0),
 		"seed":         seed,
-		"steps":        5,
+		"steps":        7,
 		"cfg":          6.5,
 		"sampler_name": "euler",
 		"scheduler":    "normal",
@@ -415,6 +415,7 @@ func batchedWorkflow(ckpt, control, depthControl string, jobs []viewJob, positiv
 }
 
 func positivePrompt(scenePrompt string) string {
+	// Always use the base positive prompt; append the player's prompt when present.
 	scenePrompt = strings.TrimSpace(scenePrompt)
 	if scenePrompt == "" {
 		return defaultPositivePrompt
