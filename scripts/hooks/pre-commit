@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+#
+# Doc-freshness drift guard (non-blocking).
+#
+# Warns when a commit changes pipeline/source code but leaves the durable docs
+# (CLAUDE.md, docs/) untouched. It NEVER blocks the commit — it just nudges you to
+# keep the docs in sync in the same change, per the convention in CLAUDE.md.
+#
+# Enabled via:  git config core.hooksPath scripts/hooks   (see docs/ARCHITECTURE.md)
+set -euo pipefail
+
+staged="$(git diff --cached --name-only)"
+
+# Source dirs whose changes usually invalidate the docs.
+src_changed="$(echo "$staged" | grep -E '^(server/|services/|client/scripts/|scripts/)' || true)"
+docs_changed="$(echo "$staged" | grep -E '^(CLAUDE\.md|docs/)' || true)"
+
+if [[ -n "$src_changed" && -z "$docs_changed" ]]; then
+	echo "" >&2
+	echo "⚠  doc drift: this commit changes source but not CLAUDE.md / docs/." >&2
+	echo "   If the pipeline, view contract, run steps, or env knobs changed," >&2
+	echo "   update CLAUDE.md + docs/ARCHITECTURE.md in this commit." >&2
+	echo "   (reminder only — commit proceeds)" >&2
+	echo "" >&2
+fi
+
+exit 0
