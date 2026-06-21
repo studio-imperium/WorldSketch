@@ -70,10 +70,46 @@ PY
 # diffusers controlnet import still can't load.
 RUN python3 - <<'PY'
 import importlib.util
+import builtins
+import importlib
+import sys
+
+prefixes = ("flash_attn", "flash_attn_3", "flash_attn_interface")
+def is_flash(name):
+    return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
+
+original_find_spec = importlib.util.find_spec
+original_import_module = importlib.import_module
+original_import = builtins.__import__
+
 for name in ("flash_attn", "flash_attn_3", "flash_attn_interface"):
     print(f"[build] {name} spec: {importlib.util.find_spec(name)}")
+
+def find_spec_without_flash(name, *args, **kwargs):
+    if is_flash(name):
+        return None
+    return original_find_spec(name, *args, **kwargs)
+
+def import_module_without_flash(name, package=None):
+    if is_flash(name):
+        raise ImportError(f"{name} disabled by WorldSketch build canary")
+    return original_import_module(name, package)
+
+def import_without_flash(name, globals=None, locals=None, fromlist=(), level=0):
+    if level == 0 and is_flash(name):
+        raise ImportError(f"{name} disabled by WorldSketch build canary")
+    return original_import(name, globals, locals, fromlist, level)
+
+for name in list(sys.modules):
+    if is_flash(name):
+        del sys.modules[name]
+
+importlib.util.find_spec = find_spec_without_flash
+importlib.import_module = import_module_without_flash
+builtins.__import__ = import_without_flash
+
 import diffusers.models.controlnets.controlnet
-print("[build] diffusers controlnet import OK")
+print("[build] guarded diffusers controlnet import OK")
 PY
 
 # App: build the server, and point it at the system python (where torch+gsplat live)

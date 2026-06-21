@@ -533,6 +533,11 @@ renderer.domElement.addEventListener("pointerdown", (event) => {
 	} else {
 		primitiveDrag = { pointerId: event.pointerId, mode: "move" }
 	}
+	// Track pointer travel so a real transform deselects on release, but a plain
+	// click-to-select (which also opens a move drag) keeps the piece selected.
+	primitiveDrag.startClientX = event.clientX
+	primitiveDrag.startClientY = event.clientY
+	primitiveDrag.transformed = false
 	renderer.domElement.classList.add("is-dragging")
 }, { capture: true })
 
@@ -541,6 +546,9 @@ renderer.domElement.addEventListener("pointermove", (event) => {
 	if (!primitiveDrag || event.pointerId !== primitiveDrag.pointerId || !selected) return
 	event.preventDefault()
 	event.stopImmediatePropagation()
+	if (Math.abs(event.clientX - primitiveDrag.startClientX) + Math.abs(event.clientY - primitiveDrag.startClientY) > 3) {
+		primitiveDrag.transformed = true
+	}
 	if (primitiveDrag.mode === "scale") {
 		updateScaleDrag(event)
 		return
@@ -558,9 +566,11 @@ renderer.domElement.addEventListener("pointerup", (event) => {
 	if (!primitiveDrag || event.pointerId !== primitiveDrag.pointerId) return
 	event.preventDefault()
 	event.stopImmediatePropagation()
+	const transformed = primitiveDrag.transformed
 	primitiveDrag = null
 	renderer.domElement.classList.remove("is-dragging")
 	renderer.domElement.releasePointerCapture(event.pointerId)
+	if (transformed) select(null) // deselect after an actual move/scale/rotate
 }, { capture: true })
 
 renderer.domElement.addEventListener("pointerup", (event) => {
