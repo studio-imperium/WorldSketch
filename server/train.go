@@ -12,6 +12,7 @@ func RunSplatTraining(dir string) error {
 		"../services/ml/train_splat.py", dir,
 		"--steps", strconv.Itoa(envInt("WS_SPLAT_STEPS", 3000)),
 		"--size", strconv.Itoa(envInt("WS_SPLAT_SIZE", 512)),
+		"--max-points", strconv.Itoa(envInt("WS_SPLAT_MAX_POINTS", 0)),
 		"--max-scale", fmt.Sprintf("%g", envFloat("WS_SPLAT_MAX_SCALE", 0.07)),
 		"--mask-erode", strconv.Itoa(envInt("WS_SPLAT_MASK_ERODE", 1)),
 		"--bg-weight", fmt.Sprintf("%g", envFloat("WS_SPLAT_BG_WEIGHT", 0.5)),

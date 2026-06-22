@@ -182,6 +182,7 @@ locally). Defaults in `.env.example` and read in `server/config.go`.
 | `WS_SPARSE_VOXEL` / `WS_SPARSE_MIN_NEIGHBORS` | 0.1 / 4 | sparse-point cull (lower neighbors = keep more) |
 | `WS_COLOR_CULL_THRESHOLD` | 0.8 | how aggressively to drop off-color points |
 | `WS_SPLAT_STEPS` / `WS_SPLAT_SIZE` | 3000 / 512 | gsplat optimization steps / render target resolution |
+| `WS_SPLAT_MAX_POINTS` | 0 | gaussian budget; 0 means no growth beyond fused PLY count |
 | `WS_SPLAT_MAX_SCALE` / `WS_SPLAT_DENSIFY_FRAC` | 0.07 / 0.1 | gaussian size cap / clone fraction during densification |
 | `WS_SPLAT_REFINE_EVERY` / `WS_SPLAT_DENSIFY_STOP_FRAC` | 100 / 0.6 | densify-prune cadence / when cloning stops |
 | `WS_IMAGEGEN` | (ComfyUI) | `syncmvd` switches to the diffusers path |
