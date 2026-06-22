@@ -54,6 +54,7 @@ let rotationGizmo = null
 const rollQuat = new THREE.Quaternion()
 const rollAxis = new THREE.Vector3()
 const selectionOutlineName = "selection_outline"
+const plotsEnabled = false
 
 renderer.setSize(window.innerWidth, window.innerHeight)
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -123,6 +124,11 @@ const els = {
 	matchPlot: document.getElementById("match_plot"),
 	clearWorld: document.getElementById("clear_world_btn"),
 	statusBadge: document.getElementById("backend_status"),
+}
+
+if (!plotsEnabled) {
+	els.addPlot?.classList.add("hidden")
+	els.plotsPanel?.classList.add("hidden")
 }
 
 function setActiveTool(tool) {
@@ -467,6 +473,16 @@ function serializeSceneForPlot(prompt, plotId, parentJobId) {
 	}
 }
 
+function serializeScene(prompt) {
+	return {
+		version: 1,
+		prompt,
+		parent: "",
+		bounds: worldBounds(),
+		primitives: primitives.map(mesh => ({ ...serializePrimitive(mesh), existing: false })),
+	}
+}
+
 // nextPlotOrigin picks where a new plot tile lands: a cell adjacent to the plot you're in
 // (E/S/W/N), and if those are taken, the nearest free cell spiralling out from the origin —
 // so plots never stack on top of each other (the old modulo cycle re-used cells after 4).
@@ -553,7 +569,7 @@ function isMovablePlotGround(mesh) {
 	// Only an unfrozen (unbuilt) tile, with the pointer tool, and only once there's more than
 	// one plot — so the lone starter plot doesn't hijack camera orbit before you've laid out
 	// more. Built plots stay put (their splat is fixed in world space).
-	return Boolean(mesh?.userData.isGround) && mesh.userData.existing !== true &&
+	return plotsEnabled && Boolean(mesh?.userData.isGround) && mesh.userData.existing !== true &&
 		activeTool === "pointer" && orderedPlotIds().length > 1
 }
 
@@ -747,7 +763,7 @@ function applyJobResult(job) {
 	if (job.splatUrl) {
 		// Compose every plot's splat; collisions come from this (latest) job, whose scene holds
 		// every primitive (existing + new), so one collisions.json already covers the whole world.
-		const src = composedSplatSrc() || job.splatUrl
+		const src = plotsEnabled ? (composedSplatSrc() || job.splatUrl) : job.splatUrl
 		els.viewSplat.href = `/splat-viewer.html?src=${src}&collisions=${encodeURIComponent(job.collisionUrl)}`
 		els.download.href = job.splatUrl
 		els.viewSplat.classList.remove("hidden")
@@ -893,6 +909,13 @@ function promptThenBuild(plotIds) {
 	els.scenePrompt.focus()
 }
 
+function promptThenGenerate() {
+	els.scenePrompt.value = lastPrompt
+	if (els.generateTitle) els.generateTitle.textContent = "Describe your scene"
+	els.generateModal.showModal()
+	els.scenePrompt.focus()
+}
+
 // --- Plots panel: choose which plot(s) to build (one, the checked set, or all) -------
 function syncBuildUi() {
 	els.generate.disabled = building
@@ -919,6 +942,11 @@ function focusPlot(plotId) {
 // renderPlotsPanel rebuilds the plot list: a checkbox (multi-select), a click-to-focus label +
 // vibe, a built/empty/building badge, and a per-plot Build/Rebuild — plus the Match dropdown.
 function renderPlotsPanel() {
+	if (!plotsEnabled) {
+		if (els.plotsPanel) els.plotsPanel.classList.add("hidden")
+		syncBuildUi()
+		return
+	}
 	if (!els.plotsList) return
 	const ids = orderedPlotIds()
 	for (const id of [...selectedPlotIds]) if (!ids.includes(id)) selectedPlotIds.delete(id)
@@ -1090,6 +1118,31 @@ async function captureCurrentViews() {
 	return captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected, captureSubjects)
 }
 
+async function generateSingleWorld(prompt) {
+	if (!primitives.some(primitive => !primitive.userData.locked && !primitive.userData.isGround)) {
+		setStatus("Add at least one primitive.")
+		return
+	}
+
+	lastPrompt = prompt
+	els.generate.disabled = true
+	showWorldLoading()
+	hideWorldButtons()
+	setStatus("Capturing views")
+
+	try {
+		const views = await captureCurrentViews()
+		const job = await generateScene(serializeScene(prompt), views, setStatus)
+		if (job.id && job.status === "done") lastJobId = job.id
+		applyJobResult(job)
+		scheduleSave()
+	} catch (err) {
+		showWorldError(err.message)
+	} finally {
+		els.generate.disabled = false
+	}
+}
+
 async function downloadCaptures() {
 	if (!primitives.some(primitive => !primitive.userData.locked)) {
 		setStatus("Add at least one primitive.")
@@ -1211,18 +1264,24 @@ for (const swatch of els.colorSwatches) {
 	swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
 }
 
-els.generate.addEventListener("click", () => startBuild([activePlotId]))
+els.generate.addEventListener("click", () => {
+	if (plotsEnabled) {
+		startBuild([activePlotId])
+	} else {
+		promptThenGenerate()
+	}
+})
 
 els.cancelGenerate.addEventListener("click", () => {
 	pendingBuildPlots = null
 	els.generateModal.close()
 })
 
-if (els.addPlot) els.addPlot.addEventListener("click", addPlot)
-if (els.buildAll) els.buildAll.addEventListener("click", () => startBuild(orderedPlotIds()))
-if (els.buildSelected) els.buildSelected.addEventListener("click", () => startBuild([...selectedPlotIds].sort((a, b) => a - b)))
-if (els.clearWorld) els.clearWorld.addEventListener("click", clearWorld)
-if (els.matchPlot) els.matchPlot.addEventListener("change", () => {
+if (plotsEnabled && els.addPlot) els.addPlot.addEventListener("click", addPlot)
+if (plotsEnabled && els.buildAll) els.buildAll.addEventListener("click", () => startBuild(orderedPlotIds()))
+if (plotsEnabled && els.buildSelected) els.buildSelected.addEventListener("click", () => startBuild([...selectedPlotIds].sort((a, b) => a - b)))
+if (plotsEnabled && els.clearWorld) els.clearWorld.addEventListener("click", clearWorld)
+if (plotsEnabled && els.matchPlot) els.matchPlot.addEventListener("change", () => {
 	matchPlotId = els.matchPlot.value === "" ? null : Number(els.matchPlot.value)
 	syncBuildUi()
 })
@@ -1235,9 +1294,14 @@ els.generateForm.addEventListener("submit", (event) => {
 	event.preventDefault()
 	const prompt = els.scenePrompt.value.trim()
 	els.generateModal.close()
-	const plots = pendingBuildPlots ?? [activePlotId]
-	pendingBuildPlots = null
-	runBuilds(plots, { prompt })
+	if (plotsEnabled) {
+		const plots = pendingBuildPlots ?? [activePlotId]
+		pendingBuildPlots = null
+		runBuilds(plots, { prompt })
+	} else {
+		pendingBuildPlots = null
+		generateSingleWorld(prompt)
+	}
 })
 
 els.worldTile.addEventListener("click", () => {
@@ -1582,7 +1646,7 @@ function animate() {
 if (new URLSearchParams(location.search).has("new")) {
 	try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
 }
-if (loadState()) {
+if (plotsEnabled && loadState()) {
 	reconcilePlotState() // un-pale any plot that isn't actually built
 	void restoreLastWorld() // re-attach the last generated world (splat viewer + downloads)
 } else {
