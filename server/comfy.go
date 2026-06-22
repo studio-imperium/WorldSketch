@@ -114,6 +114,9 @@ func controlNetNames() ([]string, error) {
 }
 
 func firstControlNet() (string, error) {
+	if name := envStr("WS_CANNY_CONTROLNET", ""); name != "" {
+		return name, nil
+	}
 	names, err := controlNetNames()
 	if err != nil {
 		return "", err
@@ -132,6 +135,9 @@ func firstControlNet() (string, error) {
 // firstDepthControlNet returns an installed SD1.5 depth ControlNet, or "" if none
 // is present (the workflow then falls back to canny-only — no error).
 func firstDepthControlNet() string {
+	if name := envStr("WS_DEPTH_CONTROLNET", ""); name != "" {
+		return name
+	}
 	names, err := controlNetNames()
 	if err != nil {
 		return ""

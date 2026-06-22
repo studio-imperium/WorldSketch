@@ -75,7 +75,7 @@ sun.position.set(4, 7, 3)
 scene.add(sun)
 
 const bounds = new THREE.Box3(new THREE.Vector3(-10, 0, -10), new THREE.Vector3(10, 5, 10))
-const baseplateScale = 0.75
+const baseplateScale = 0.4
 
 // World expansion: new plots are ground tiles laid down next to the current one.
 const tileSize = bounds.max.x - bounds.min.x // 20×20, matches the starting ground

@@ -63,7 +63,7 @@ func comfyCanvasWorkflow(ckpt, control, depthControl, image, edge, depth string)
 			output("CLIP", "CLIP", 1, []int{2, 3}),
 			output("VAE", "VAE", 2, []int{4, 5}),
 		}),
-		uiNode(2, "CLIPTextEncode", 430, 150, 460, 180, []any{"stylized realistic game environment, grassy ground, mossy boulder in the centre, pale blue overcast sky, soft ambient diffuse lighting, shadowless albedo material look, no directional sunlight, readable object silhouettes, coherent 3d scene"}, []any{
+		uiNode(2, "CLIPTextEncode", 430, 150, 460, 180, []any{defaultPositivePrompt}, []any{
 			input("clip", "CLIP", 2),
 		}, []any{
 			output("CONDITIONING", "CONDITIONING", 0, []int{7}),

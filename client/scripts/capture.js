@@ -95,13 +95,14 @@ function poseCamera(camera, name, frames) {
 	const { target, radius } = frame
 	camera.near = 0.05
 	camera.fov = 50
-	const zoom = 0.8
+	const zoom = 0.3
+	const topZoom = zoom * 2
 	const straightDistance = Math.max(18, radius * 2.8) * zoom
 	const height = Math.max(4.8, radius * 0.55) * zoom
 	const cornerDistance = Math.max(12, radius * 1.7) * zoom
 	const highCornerHeight = Math.max(8, radius * 0.9) * zoom
 	const lowCornerHeight = Math.max(2.2, radius * 0.2) * zoom
-	const topDistance = topFitDistance(camera, frame) * zoom
+	const topDistance = topFitDistance(camera, frame) * topZoom
 	const offsets = {
 		front: [0, height, straightDistance],
 		back: [0, height, -straightDistance],
