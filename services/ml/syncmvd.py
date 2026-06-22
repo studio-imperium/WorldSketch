@@ -13,6 +13,7 @@ primitive_depth_control), plus camera.json + primitive_depth for the geometry.
 
 import argparse
 import builtins
+import gc
 import importlib
 import importlib.machinery
 import importlib.util
@@ -231,6 +232,7 @@ def load_pipeline(args, device, dtype):
     # relies on (alphas_cumprod[t]).
     pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
     pipe.set_progress_bar_config(disable=True)
+    pipe.enable_attention_slicing()
     return pipe
 
 
@@ -259,6 +261,7 @@ def gather_views(job, size, latent):
 def run_per_view(pipe, views, args, generator):
     """Phase 1: independent per-view generation via the high-level pipeline."""
     for v in views:
+        torch.cuda.empty_cache()
         img = pipe(
             prompt=args.prompt,
             negative_prompt=NEGATIVE,
@@ -378,7 +381,13 @@ def main():
     if args.sync <= 0:
         run_per_view(pipe, views, args, generator)
     else:
-        run_synced(pipe, views, args, generator, device, dtype)
+        try:
+            run_synced(pipe, views, args, generator, device, dtype)
+        except torch.OutOfMemoryError:
+            print("[syncmvd] synced generation OOM; retrying per-view fallback", flush=True)
+            gc.collect()
+            torch.cuda.empty_cache()
+            run_per_view(pipe, views, args, generator)
 
 
 def parse_args():

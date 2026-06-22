@@ -124,5 +124,6 @@ COPY . /workspace/WorldSketch
 RUN cd /workspace/WorldSketch/server && go build -o worldsketch-server .
 ENV WORLDSKETCH_REPO=/workspace/WorldSketch
 ENV WORLDSKETCH_PYTHON=python3
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 CMD ["python3", "/workspace/WorldSketch/services/runpod/handler.py"]
