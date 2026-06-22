@@ -1,7 +1,7 @@
 # Plan: Context-aware world expansion ("decorate to match the existing plot")
 
 The third plan doc, alongside [generation-pipeline-plan.md](generation-pipeline-plan.md)
-(get to a playable world) and [syncmvd-plan.md](syncmvd-plan.md) (make the 9 views of
+(get to a playable world) and [syncmvd-plan.md](syncmvd-plan.md) (make the 13 views of
 *one* generation agree). This one is about a different axis of consistency: making a
 **second generation agree with the first** so a world can grow.
 
@@ -124,8 +124,11 @@ New env knobs (read where the pipeline runs, like the rest — `config.go`):
   `existing` + locked + dimmed ("baked into the world"). New placements are the delta.
 - `serializeScene` sets `parent: lastJobId` when any `existing` primitive is present,
   and stamps `existing` per primitive.
-- `captureViews` gains a mask pass: in each of the 9 poses, render **only the new
-  primitives** white-on-black → the `<name>_mask` the server inpaints + fuses with.
+- `captureViews` gains a mask pass: in each view, render **only the new
+  primitives** white-on-black → the `<name>_mask` the server inpaints + fuses with. The
+  expansion reuses the **parent plot's camera frame** (`captureFrame`) so its views line
+  up pixel-for-pixel with the parent views being decorated onto (main's framing is per-
+  generation dynamic, so this reuse is what keeps the frozen region aligned).
 - `api.js` uploads `<name>_mask` alongside rgb/depth/camera.
 - A "Expand / Decorate" affordance (the Generate button becomes "Decorate" once a
   world exists and new objects are present). Optional polish: load plot 1's `.splat`
@@ -153,7 +156,7 @@ pulling, cheapest-first:
    change is a frozen-parameter group + a loss mask. Effort: medium.
 
 3. **SyncMVD generalised to cross-plot consistency.** [syncmvd-plan.md](syncmvd-plan.md)
-   syncs the 9 views of one generation through the shared voxel grid. Expansion is the
+   syncs the 13 views of one generation through the shared voxel grid. Expansion is the
    same operation with the parent world as a **fixed consensus**: seed the shared
    surface with plot 1's appearance and only let the new texels move. If/when SyncMVD
    lands (`run_synced` in `syncmvd.py` already does latent-space voxel sync via
