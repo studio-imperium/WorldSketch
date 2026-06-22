@@ -96,7 +96,9 @@ const els = {
 }
 
 function setActiveTool(tool) {
+	const changed = activeTool !== tool
 	activeTool = tool
+	if (changed) select(null)
 	for (const button of els.toolButtons) {
 		button.classList.toggle("active", button.dataset.tool === tool)
 	}
@@ -465,7 +467,7 @@ async function generate(prompt) {
 	setStatus("Capturing views")
 
 	try {
-		const captureSubjects = primitives
+		const captureSubjects = primitives.filter(primitive => !primitive.userData.locked)
 		const views = await captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected, captureSubjects)
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
 		if (job.plyUrl) els.downloadPly.href = job.plyUrl
