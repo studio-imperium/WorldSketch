@@ -85,18 +85,19 @@ func (s *Store) Run(id string) {
 	dir := filepath.Join(s.root, id)
 	scene := readScene(filepath.Join(dir, "scene.json"))
 
-	// Expansion: grow an existing plot by inpainting only the new objects into its
-	// frozen world, then fusing the delta onto the parent point cloud. Local-only for
-	// now (the GPU worker doesn't yet have the parent artifacts).
-	if scene.isExpansion() {
-		s.runExpansion(id, dir, scene)
+	// Serverless: hand the whole pipeline to the RunPod GPU worker instead of running
+	// ComfyUI + gsplat locally. This handles expansion too — buildRunpodInput ships the
+	// per-view masks + the parent's world.ply, and the worker's pipeline fuses the new
+	// tile onto it. The worker PUTs the result bundle back to us.
+	if runpodConfigured() {
+		s.runRemote(id, dir, scene)
 		return
 	}
 
-	// Serverless: hand the whole pipeline to the RunPod GPU worker instead of
-	// running ComfyUI + gsplat locally. The worker PUTs world.splat back to us.
-	if runpodConfigured() {
-		s.runRemote(id, dir, scene)
+	// Local expansion fallback (no RunPod): inpaint the new objects via local ComfyUI and
+	// fuse onto the parent point cloud.
+	if scene.isExpansion() {
+		s.runExpansion(id, dir, scene)
 		return
 	}
 

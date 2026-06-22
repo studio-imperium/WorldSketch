@@ -30,10 +30,13 @@ type runpodView struct {
 	RGB    string          `json:"rgb"`
 	Depth  string          `json:"depth"`
 	Camera json.RawMessage `json:"camera"`
+	Mask   string          `json:"mask,omitempty"` // new-object mask (expansion only)
 }
 
-// buildRunpodInput packs the staged job dir into the worker's input payload:
-// scene + base64 views + the callback URL the worker PUTs world.splat to.
+// buildRunpodInput packs the staged job dir into the worker's input payload: scene +
+// base64 views + the callback URL the worker PUTs the result bundle to. For an expansion
+// it also includes each view's new-object mask and the parent plot's world.ply, so the
+// worker can fuse the new tile onto the existing world.
 func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any, error) {
 	var views []runpodView
 	for _, name := range viewNames {
@@ -44,21 +47,41 @@ func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any
 		}
 		depth, _ := os.ReadFile(filepath.Join(viewDir, "primitive_depth.png"))
 		camera, _ := os.ReadFile(filepath.Join(viewDir, "camera.json"))
-		views = append(views, runpodView{
+		view := runpodView{
 			Name:   name,
 			RGB:    base64.StdEncoding.EncodeToString(rgb),
 			Depth:  base64.StdEncoding.EncodeToString(depth),
 			Camera: json.RawMessage(camera),
-		})
+		}
+		if mask, err := os.ReadFile(filepath.Join(viewDir, "new_mask.png")); err == nil {
+			view.Mask = base64.StdEncoding.EncodeToString(mask)
+		}
+		views = append(views, view)
 	}
 	if len(views) == 0 {
 		return nil, errors.New("no views to submit")
 	}
-	return map[string]any{
-		"scene":     scene,
+
+	input := map[string]any{
 		"views":     views,
 		"resultUrl": resultURL,
-	}, nil
+	}
+
+	if scene.isExpansion() {
+		parentDir := filepath.Join(filepath.Dir(dir), scene.Parent)
+		// Copy the parent's vibe: fall back to its prompt when none was supplied.
+		if strings.TrimSpace(scene.Prompt) == "" {
+			scene.Prompt = readScene(filepath.Join(parentDir, "scene.json")).Prompt
+		}
+		ply, err := os.ReadFile(filepath.Join(parentDir, "world.ply"))
+		if err != nil {
+			return nil, fmt.Errorf("expansion parent %q has no world.ply on the coordinator (generate the parent first): %w", scene.Parent, err)
+		}
+		input["parentPly"] = base64.StdEncoding.EncodeToString(ply)
+	}
+
+	input["scene"] = scene
+	return input, nil
 }
 
 func runpodEndpointURL(path string) string {

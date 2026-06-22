@@ -8,8 +8,10 @@ player and discards it), or returned inline as base64 for small payloads.
 
 Expected input:
     {
-      "scene":  {... scene.json ...},
-      "views":  [{"name","rgb"(b64 png),"depth"(b64 png),"camera"{...}}, ...],
+      "scene":  {... scene.json ...},          # scene.parent set => expansion
+      "views":  [{"name","rgb"(b64 png),"depth"(b64 png),"camera"{...},
+                  "mask"(b64 png, expansion only)}, ...],
+      "parentPly": "<b64 world.ply>",          # expansion only: parent plot's point cloud
       "resultUrl": "https://coordinator/.../result"   # optional; PUT target
     }
 """
@@ -103,6 +105,16 @@ def stage_inputs(job_dir, payload):
         (view_dir / "primitive_rgb.png").write_bytes(base64.b64decode(view["rgb"]))
         (view_dir / "primitive_depth.png").write_bytes(base64.b64decode(view["depth"]))
         (view_dir / "camera.json").write_text(json.dumps(view["camera"]))
+        # Expansion only: the new-object mask the fusion step uses to fuse just the delta.
+        if view.get("mask"):
+            (view_dir / "new_mask.png").write_bytes(base64.b64decode(view["mask"]))
+    # Expansion only: the parent plot's point cloud, which the pipeline merges the new
+    # tile onto (read by WriteExpandedPLY at <job_dir>/parent/world.ply).
+    parent_ply = payload.get("parentPly")
+    if parent_ply:
+        parent_dir = root / "parent"
+        parent_dir.mkdir(parents=True, exist_ok=True)
+        (parent_dir / "world.ply").write_bytes(base64.b64decode(parent_ply))
 
 
 def write_result_bundle(job_dir):
@@ -112,7 +124,11 @@ def write_result_bundle(job_dir):
         for item in path.rglob("*"):
             if not item.is_file() or item == bundle:
                 continue
-            zf.write(item, item.relative_to(path).as_posix())
+            rel = item.relative_to(path)
+            # Don't ship the staged parent point cloud back — the coordinator already has it.
+            if rel.parts and rel.parts[0] == "parent":
+                continue
+            zf.write(item, rel.as_posix())
     return bundle
 
 

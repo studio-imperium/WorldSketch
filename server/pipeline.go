@@ -16,11 +16,20 @@ func RunPipeline(dir string, scene Scene, status func(string)) error {
 	status("estimating depth")
 	RunDepth(dir)
 
-	status("fusing views")
 	plyPath := filepath.Join(dir, "world.ply")
-	if err := WritePLYFromViews(scene, dir, plyPath); err != nil {
-		if err := WritePLY(scene, plyPath, SeedFromString(filepath.Base(dir))); err != nil {
+	if scene.isExpansion() {
+		// Expansion: fuse only the new tile (masked) and merge onto the parent's world.ply,
+		// which the handler staged at <dir>/parent/world.ply.
+		status("fusing into existing world")
+		if err := WriteExpandedPLY(scene, dir, filepath.Join(dir, "parent"), plyPath); err != nil {
 			return err
+		}
+	} else {
+		status("fusing views")
+		if err := WritePLYFromViews(scene, dir, plyPath); err != nil {
+			if err := WritePLY(scene, plyPath, SeedFromString(filepath.Base(dir))); err != nil {
+				return err
+			}
 		}
 	}
 
