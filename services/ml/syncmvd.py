@@ -3,9 +3,11 @@
 Two paths, selected by --sync:
   0: per-view img2img + canny/depth ControlNets via the high-level diffusers pipeline
      (Phase 1 — no cross-view sync; validates the diffusers engine reproduces ComfyUI).
-  1: a custom synchronized denoising loop (Phase 3) — every step, the predicted clean
-     latent of all views is projected onto a shared voxel grid (geometry.py), averaged,
-     and projected back, so the views agree. Latent-space sync (no per-step VAE), DDIM.
+  1: a custom synchronized denoising loop (Phase 3) — every step the predicted clean
+     image of all views is projected onto a shared voxel grid (geometry.py), averaged,
+     and projected back, so the views agree. --sync-space=rgb (default) decodes x0 to
+     full-res RGB and syncs in pixel space (accurate); =latent syncs the x0 latents at
+     1/8 res (fast, fuzzy). DDIM scheduler so the x0 epsilon math holds.
 
 Reads the same per-view inputs as the ComfyUI path (primitive_rgb + primitive_edges +
 primitive_depth_control), plus camera.json + primitive_depth for the geometry.
@@ -243,15 +245,16 @@ def gather_views(job, size, latent):
         if not (d / "primitive_rgb.png").exists():
             continue
         load = lambda p, n=size: Image.open(p).convert("RGB").resize((n, n), Image.Resampling.LANCZOS)
-        depth_small = Image.open(d / "primitive_depth.png").convert("L").resize(
-            (latent, latent), Image.Resampling.NEAREST
-        )
+        depth_img = Image.open(d / "primitive_depth.png").convert("L")
+        depth_small = depth_img.resize((latent, latent), Image.Resampling.NEAREST)
+        depth_full = depth_img.resize((size, size), Image.Resampling.NEAREST)
         views.append({
             "name": name,
             "init": load(d / "primitive_rgb.png"),
             "edge": load(d / "primitive_edges.png"),
             "depth": load(d / "primitive_depth_control.png"),
-            "depth_small": np.asarray(depth_small, np.float32) / 255.0,  # (latent, latent)
+            "depth_small": np.asarray(depth_small, np.float32) / 255.0,  # (latent, latent) — latent-space sync
+            "depth_full": np.asarray(depth_full, np.float32) / 255.0,    # (size, size) — pixel-space sync
             "camera": json.loads((d / "camera.json").read_text()),
             "out": d / "generated_rgb.png",
         })
@@ -291,20 +294,10 @@ def _sync_lambda(step, total, args):
     return args.sync_weight * max(0.0, 1.0 - (p - args.sync_taper) / (1.0 - args.sync_taper))
 
 
-def run_synced(pipe, views, args, generator, device, dtype):
-    """Phase 3: synchronized denoising loop in latent space."""
-    from geometry import unproject, voxel_keys, VoxelSync
-
+def _denoise_setup(pipe, views, args, generator, device, dtype):
+    """Shared img2img setup for the synced loops: CFG embeds, init latents noised to the
+    img2img start step, the canny/depth control conds, and the alphas_cumprod table."""
     n = len(views)
-    latent = args.size // 8
-
-    # Shared voxel index from the (static) per-view geometry at latent resolution.
-    keys, masks = [], []
-    for v in views:
-        world = unproject(v["depth_small"], v["camera"])  # (latent, latent, 3)
-        keys.append(voxel_keys(world, args.sync_voxel))
-        masks.append(v["depth_small"] > 0.01)
-    sync = VoxelSync(keys, masks)
 
     # Prompt embeds (CFG): [neg]*N then [pos]*N.
     pos, neg = pipe.encode_prompt(args.prompt, device, 1, True, NEGATIVE)
@@ -323,28 +316,66 @@ def run_synced(pipe, views, args, generator, device, dtype):
     canny_cond = _control_cond([v["edge"] for v in views], device, dtype)
     depth_cond = _control_cond([v["depth"] for v in views], device, dtype)
     alphas = pipe.scheduler.alphas_cumprod.to(device)
+    return n, embeds, latents, timesteps, canny_cond, depth_cond, alphas
+
+
+def _predict_x0(pipe, latents, t, embeds, canny_cond, depth_cond, alphas, args):
+    """One UNet+ControlNet pass with CFG -> predicted clean latent x0, plus the
+    sqrt(a) / sqrt(1-a) coefficients so the caller can re-derive epsilon after syncing."""
+    lmi = pipe.scheduler.scale_model_input(torch.cat([latents, latents]), t)
+    down, mid = pipe.controlnet(
+        lmi, t, encoder_hidden_states=embeds,
+        controlnet_cond=[canny_cond, depth_cond],
+        conditioning_scale=[args.canny, args.depth_scale],
+        guess_mode=False, return_dict=False,
+    )
+    noise_pred = pipe.unet(
+        lmi, t, encoder_hidden_states=embeds,
+        down_block_additional_residuals=down,
+        mid_block_additional_residual=mid,
+        return_dict=False,
+    )[0]
+    uncond, text = noise_pred.chunk(2)
+    noise_pred = uncond + args.cfg * (text - uncond)
+
+    a = alphas[t]
+    sa, s1 = a ** 0.5, (1 - a) ** 0.5
+    x0 = (latents - s1 * noise_pred) / sa
+    return x0, sa, s1
+
+
+def _decode_and_save(pipe, latents, views):
+    images = pipe.vae.decode(latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
+    pils = pipe.image_processor.postprocess(images, output_type="pil")
+    for v, p in zip(views, pils):
+        p.save(v["out"])
+        print(f"[syncmvd] {v['name']} saved", flush=True)
+
+
+def _build_sync(views, depth_key, voxel):
+    """Shared voxel index from the static per-view geometry. depth_key picks the
+    resolution ('depth_small' for latent sync, 'depth_full' for pixel sync)."""
+    from geometry import unproject, voxel_keys, VoxelSync
+
+    keys, masks = [], []
+    for v in views:
+        world = unproject(v[depth_key], v["camera"])  # (R, R, 3)
+        keys.append(voxel_keys(world, voxel))
+        masks.append(v[depth_key] > 0.01)
+    return VoxelSync(keys, masks)
+
+
+def run_synced_latent(pipe, views, args, generator, device, dtype):
+    """Latent-space sync (fast, fuzzy): voxel-average the x0 *latents* at 1/8 res.
+
+    Cheap (no per-step VAE) but the 8x downsample blurs the consensus geometrically.
+    """
+    sync = _build_sync(views, "depth_small", args.sync_voxel)
+    n, embeds, latents, timesteps, canny_cond, depth_cond, alphas = _denoise_setup(
+        pipe, views, args, generator, device, dtype)
 
     for i, t in enumerate(timesteps):
-        lmi = pipe.scheduler.scale_model_input(torch.cat([latents, latents]), t)
-        down, mid = pipe.controlnet(
-            lmi, t, encoder_hidden_states=embeds,
-            controlnet_cond=[canny_cond, depth_cond],
-            conditioning_scale=[args.canny, args.depth_scale],
-            guess_mode=False, return_dict=False,
-        )
-        noise_pred = pipe.unet(
-            lmi, t, encoder_hidden_states=embeds,
-            down_block_additional_residuals=down,
-            mid_block_additional_residual=mid,
-            return_dict=False,
-        )[0]
-        uncond, text = noise_pred.chunk(2)
-        noise_pred = uncond + args.cfg * (text - uncond)
-
-        # predicted clean latent (epsilon -> x0)
-        a = alphas[t]
-        sa, s1 = a ** 0.5, (1 - a) ** 0.5
-        x0 = (latents - s1 * noise_pred) / sa
+        x0, sa, s1 = _predict_x0(pipe, latents, t, embeds, canny_cond, depth_cond, alphas, args)
 
         lam = _sync_lambda(i, len(timesteps), args)
         if lam > 0:
@@ -356,13 +387,55 @@ def run_synced(pipe, views, args, generator, device, dtype):
         # re-derive epsilon from the synced x0 and step
         noise_corr = (latents - sa * x0) / s1
         latents = pipe.scheduler.step(noise_corr, t, latents, return_dict=False)[0]
-        print(f"[syncmvd] step {i + 1}/{len(timesteps)} lambda {lam:.2f}", flush=True)
+        print(f"[syncmvd] step {i + 1}/{len(timesteps)} lambda {lam:.2f} (latent)", flush=True)
 
-    images = pipe.vae.decode(latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
-    pils = pipe.image_processor.postprocess(images, output_type="pil")
-    for v, p in zip(views, pils):
-        p.save(v["out"])
-        print(f"[syncmvd] {v['name']} saved", flush=True)
+    _decode_and_save(pipe, latents, views)
+
+
+def run_synced_rgb(pipe, views, args, generator, device, dtype):
+    """Phase 3 (accurate): decode x0 -> full-res RGB, voxel-average in pixel space,
+    re-encode. Per synced step: predict x0 latents -> VAE-decode to RGB -> unproject all
+    views onto a shared voxel grid -> average -> reproject -> blend the consensus into
+    each view's RGB with lambda_t -> VAE-encode back to x0. Pixel-space sync avoids the
+    8x latent fuzz of run_synced_latent at the cost of a decode+encode each synced step;
+    --sync-interval k limits that to every k-th step.
+    """
+    sync = _build_sync(views, "depth_full", args.sync_voxel)
+    n, embeds, latents, timesteps, canny_cond, depth_cond, alphas = _denoise_setup(
+        pipe, views, args, generator, device, dtype)
+    scaling = pipe.vae.config.scaling_factor
+    interval = max(args.sync_interval, 1)
+
+    for i, t in enumerate(timesteps):
+        x0, sa, s1 = _predict_x0(pipe, latents, t, embeds, canny_cond, depth_cond, alphas, args)
+
+        lam = _sync_lambda(i, len(timesteps), args)
+        synced = lam > 0 and i % interval == 0
+        if synced:
+            imgs = pipe.vae.decode(x0 / scaling, return_dict=False)[0]   # (N, 3, H, W) in [-1, 1]
+            imgs_np = imgs.float().permute(0, 2, 3, 1).cpu().numpy()     # (N, H, W, 3)
+            consensus = sync.sync([imgs_np[j] for j in range(n)])
+            cons = torch.from_numpy(np.stack(consensus)).permute(0, 3, 1, 2).to(device, dtype)
+            blended = (1 - lam) * imgs + lam * cons
+            # mode() (the distribution mean) re-encodes deterministically — no sampling noise.
+            x0 = pipe.vae.encode(blended).latent_dist.mode() * scaling
+
+        # re-derive epsilon from the (possibly synced) x0 and step
+        noise_corr = (latents - sa * x0) / s1
+        latents = pipe.scheduler.step(noise_corr, t, latents, return_dict=False)[0]
+        tag = "rgb" if synced else "rgb-skip"
+        print(f"[syncmvd] step {i + 1}/{len(timesteps)} lambda {lam:.2f} ({tag})", flush=True)
+
+    _decode_and_save(pipe, latents, views)
+
+
+def run_synced(pipe, views, args, generator, device, dtype):
+    """Synchronized denoising loop. Pixel-space (accurate) by default; latent-space
+    (fast, fuzzy) when --sync-space=latent."""
+    if args.sync_space == "latent":
+        run_synced_latent(pipe, views, args, generator, device, dtype)
+    else:
+        run_synced_rgb(pipe, views, args, generator, device, dtype)
 
 
 def main():
@@ -406,6 +479,8 @@ def parse_args():
     p.add_argument("--seed", type=int, default=1125899906842624)
     # sync controls
     p.add_argument("--sync", type=int, default=1)            # 0 = per-view (Phase 1)
+    p.add_argument("--sync-space", default="rgb", choices=["rgb", "latent"], dest="sync_space")
+    p.add_argument("--sync-interval", type=int, default=1, dest="sync_interval")  # rgb: sync every k steps
     p.add_argument("--sync-weight", type=float, default=1.0, dest="sync_weight")
     p.add_argument("--sync-voxel", type=float, default=0.25, dest="sync_voxel")
     p.add_argument("--sync-taper", type=float, default=0.7, dest="sync_taper")

@@ -55,7 +55,12 @@ Port the projection math to a small reusable module `services/ml/geometry.py` (s
 
 ---
 
-## Phase 3 — Synchronized sampling loop  *(1–2 days, the core)*
+## Phase 3 — Synchronized sampling loop  *(1–2 days, the core)*  ✅ implemented
+Both sync spaces live in `services/ml/syncmvd.py`, selected by `--sync-space`
+(env `WS_SYNC_SPACE`): **`rgb`** is the accurate pixel-space loop below (default);
+**`latent`** is the fast/fuzzy shortcut that voxel-averages the x0 latents at 1/8 res.
+`--sync-interval` (env `WS_SYNC_INTERVAL`) decodes/syncs every k steps to control cost.
+
 Replace `pipeline.__call__` with a custom loop. Per timestep t:
 1. Batched UNet over N latents w/ MultiControlNet → predicted noise → **x̂₀** (predicted clean latent) per view.
 2. **Decode** x̂₀ → RGB per view (handles the 8× latent/pixel mismatch accurately; the main cost).
