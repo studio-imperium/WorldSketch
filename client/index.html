@@ -55,6 +55,24 @@
 			<a class="btn btn-sm hidden" id="download_collision_btn" href="#" download="collisions.json">Download Collision</a>
 			<a class="btn btn-sm hidden" id="download_bundle_btn" href="#" download="worldsketch-training-bundle.zip">Download Training Bundle</a>
 			<p class="status hidden text-sm text-base-content/70" id="status"></p>
+			<p class="backend-status hidden" id="backend_status"></p>
+		</section>
+		<section class="plots-panel card bg-base-100 shadow-xl border border-base-300 hidden" id="plots_panel" aria-label="Plots">
+			<div class="card-body p-2">
+				<div class="plots-head">
+					<span class="plots-title">Plots</span>
+					<div class="plots-actions">
+						<button class="btn btn-xs btn-ghost" id="clear_world_btn" type="button" title="Clear everything and start a fresh world">Clear</button>
+						<button class="btn btn-xs btn-primary" id="build_all_btn" type="button" title="Build every plot, one at a time">Build all</button>
+					</div>
+				</div>
+				<p class="plots-hint">Click a plot to focus · check several to build together · “Match” copies a plot's vibe onto them</p>
+				<ul class="plots-list" id="plots_list"></ul>
+				<div class="plots-foot">
+					<select class="plots-match select select-xs" id="match_plot" title="Build the targets to match this plot's vibe"></select>
+					<button class="btn btn-xs" id="build_selected_btn" type="button" title="Build the checked plots">Build selected</button>
+				</div>
+			</div>
 		</section>
 		<dialog class="modal" id="generate_modal">
 			<div class="modal-box generate-modal-box">
@@ -64,7 +82,7 @@
 					</button>
 				</form>
 				<form id="generate_form">
-					<h2 class="text-lg font-bold">Describe your scene</h2>
+					<h2 class="text-lg font-bold" id="generate_title">Describe your scene</h2>
 					<textarea class="textarea textarea-bordered scene-prompt" id="scene_prompt" rows="5" placeholder="A mossy ruin in a quiet forest clearing, soft daylight, natural stone and grass"></textarea>
 					<div class="modal-action">
 						<button class="btn" type="button" id="cancel_generate_btn">Cancel</button>

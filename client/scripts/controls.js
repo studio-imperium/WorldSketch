@@ -67,6 +67,18 @@ export function createOrbit(canvas, camera) {
 			target.copy(center)
 			spherical.radius = Math.max(5, size.length() * 1.25)
 			update()
-		}
+		},
+		// Persisted across reloads (renderer autosave) so the camera comes back where you left it.
+		getState() {
+			return { target: [target.x, target.y, target.z], radius: spherical.radius, theta: spherical.theta, phi: spherical.phi }
+		},
+		setState(state) {
+			if (!state) return
+			if (Array.isArray(state.target)) target.set(state.target[0] || 0, state.target[1] || 0, state.target[2] || 0)
+			if (Number.isFinite(state.radius)) spherical.radius = state.radius
+			if (Number.isFinite(state.theta)) spherical.theta = state.theta
+			if (Number.isFinite(state.phi)) spherical.phi = state.phi
+			update()
+		},
 	}
 }

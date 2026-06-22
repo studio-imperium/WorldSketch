@@ -70,13 +70,47 @@ window.addEventListener("drop", async event => {
 const params = new URLSearchParams(location.search)
 const src = params.get("src")
 const collisionSrc = params.get("collisions")
-if (src) loadURL(src)
+if (src) {
+	// `src` may be a comma-separated list of splat URLs — one per plot. Each plot
+	// is generated in the same absolute world frame, so they overlay into one world
+	// when loaded together with no per-scene transform.
+	const srcs = src.split(",").map(s => s.trim()).filter(Boolean)
+	loadURLs(srcs)
+}
 if (collisionSrc) {
 	fetchCollision(collisionSrc)
 		.then(data => loadCollision(data, collisionSrc.split("/").pop()))
 		.catch(err => status.textContent = err.message)
 }
 
+// loadURLs composes one or more splats (multi-plot world) in a shared world frame. No
+// per-scene transform — gaussians are in absolute coords. Each splat loads independently so a
+// missing one (e.g. a plot whose GPU build hasn't produced world.splat yet) is skipped with a
+// clear message instead of silently leaving the whole viewer blank.
+async function loadURLs(srcs, format = undefined) {
+	if (!srcs.length) return
+	status.textContent = srcs.length === 1 ? "Loading splat" : `Loading ${srcs.length} plots`
+	let loaded = 0
+	const failed = []
+	for (const path of srcs) {
+		try {
+			await viewer.addSplatScene(path, { format, showLoadingUI: false, splatAlphaRemovalThreshold: 1 })
+			loaded++
+		} catch (err) {
+			console.warn("splat failed to load:", path, err)
+			failed.push(path)
+		}
+	}
+	if (loaded === 0) {
+		status.textContent = "No splat loaded — has it been built on the GPU worker yet?"
+		stats.textContent = `0 / ${srcs.length} (all failed)`
+		return
+	}
+	status.textContent = srcs.length === 1 ? srcs[0].split("/").pop() : `${loaded} of ${srcs.length} plots`
+	stats.textContent = failed.length ? `Loaded ${loaded}; ${failed.length} not built yet` : `Loaded ${loaded}`
+}
+
+// loadURL composes a single splat — used by the file picker and drag-and-drop.
 async function loadURL(src, format = undefined) {
 	status.textContent = "Loading splat"
 	await viewer.addSplatScene(src, {

@@ -79,9 +79,19 @@ const bounds = new THREE.Box3(new THREE.Vector3(-10, 0, -10), new THREE.Vector3(
 // World expansion: new plots are ground tiles laid down next to the current one.
 const tileSize = bounds.max.x - bounds.min.x // 20×20, matches the starting ground
 const tileGap = 0.4 // a hair of seam between tiles so they read as separate plots
-const addPlotDirs = [[1, 0], [0, 1], [-1, 0], [0, -1]] // E, S, W, N — cycled per Add plot
+const addPlotDirs = [[1, 0], [0, 1], [-1, 0], [0, -1]] // E, S, W, N — tried first by nextPlotOrigin
 let activeOrigin = new THREE.Vector3(0, 0, 0) // world-space centre of the plot you're building in
 let addPlotCount = 0
+let plotSeq = 0 // highest plot id handed out; the starting ground is plot 0
+let activePlotId = 0 // the plot you're building in — objects you place join it and move with it
+let plotJobIds = {} // plotId -> jobId of that plot's latest build; the world composes their splats
+let plotPrompts = {} // plotId -> that plot's own "vibe" (prompt); each plot can differ
+let lastPrompt = "" // last vibe typed, used as the default for new plots / batch builds
+let building = false // a build run is in progress (plots build one at a time)
+let pendingBuildPlots = null // plot ids queued by a build button, awaiting the prompt modal
+let matchPlotId = null // "Match" reference: build targets copy this plot's vibe + parent
+const selectedPlotIds = new Set() // plots checked in the panel for "Build selected"
+const plotMovePoint = new THREE.Vector3() // scratch: where a plot-move drag hits the ground plane
 
 const els = {
 	status: document.getElementById("status"),
@@ -95,6 +105,7 @@ const els = {
 	downloadBundle: document.getElementById("download_bundle_btn"),
 	generateModal: document.getElementById("generate_modal"),
 	generateForm: document.getElementById("generate_form"),
+	generateTitle: document.getElementById("generate_title"),
 	cancelGenerate: document.getElementById("cancel_generate_btn"),
 	scenePrompt: document.getElementById("scene_prompt"),
 	worldTile: document.getElementById("world_tile"),
@@ -102,6 +113,13 @@ const els = {
 	worldSpinner: document.getElementById("world_spinner"),
 	worldStatus: document.getElementById("world_status"),
 	addPlot: document.getElementById("add_plot_btn"),
+	plotsPanel: document.getElementById("plots_panel"),
+	plotsList: document.getElementById("plots_list"),
+	buildAll: document.getElementById("build_all_btn"),
+	buildSelected: document.getElementById("build_selected_btn"),
+	matchPlot: document.getElementById("match_plot"),
+	clearWorld: document.getElementById("clear_world_btn"),
+	statusBadge: document.getElementById("backend_status"),
 }
 
 function setActiveTool(tool) {
@@ -127,6 +145,7 @@ function addPrimitive(type, seed) {
 	if (seed?.rotation?.some(value => value !== 0)) mesh.userData.manualRotation = true
 	if (seed?.isGround) mesh.userData.isGround = true
 	if (seed?.existing) mesh.userData.existing = true
+	mesh.userData.plotId = Number.isInteger(seed?.plotId) ? seed.plotId : activePlotId
 	group.add(mesh)
 	primitives.push(mesh)
 	select(mesh)
@@ -391,15 +410,26 @@ function clearScene() {
 	syncRotationGizmo()
 }
 
-// isExpanding: a plot already exists and at least one of its primitives is frozen, so
-// this generation grows that plot rather than starting fresh.
-function isExpanding() {
-	return Boolean(lastJobId) && primitives.some(primitive => primitive.userData.existing)
+// --- Plots ---------------------------------------------------------------------------
+// A plot is a ground tile plus the objects sharing its plotId. Each plot builds into its
+// OWN splat; the world is those splats composed. plotJobIds maps plotId -> its latest build.
+function orderedPlotIds() {
+	const ids = new Set()
+	for (const mesh of primitives) if (mesh.userData.isGround) ids.add(mesh.userData.plotId)
+	return [...ids].sort((a, b) => a - b)
 }
 
-// newPrimitiveMeshes: the meshes added since the last generation — the delta to decorate.
-function newPrimitiveMeshes() {
-	return primitives.filter(primitive => !primitive.userData.existing)
+function plotMeshesOf(plotId) {
+	return primitives.filter(primitive => primitive.userData.plotId === plotId)
+}
+
+function plotIsBuilt(plotId) {
+	return Boolean(plotJobIds[plotId])
+}
+
+// Label/number a plot by its position in creation order (Plot 1, Plot 2, …).
+function plotLabel(plotId) {
+	return `Plot ${orderedPlotIds().indexOf(plotId) + 1}`
 }
 
 // worldBounds is the union of every ground tile (plus the standard 0..5 height), so the
@@ -419,31 +449,59 @@ function worldBounds() {
 	return { min: [minX, 0, minZ], max: [maxX, 5, maxZ] }
 }
 
-function serializeScene(prompt = "") {
+// serializeSceneForPlot builds the payload to generate ONE plot: that plot's meshes are the
+// delta (existing:false → fused), every other mesh is frozen context (existing:true → drawn
+// for occlusion/seam but never fused). parentJobId is for prompt/style inheritance only —
+// the server fuses just this plot's masked points into its own world.ply.
+function serializeSceneForPlot(prompt, plotId, parentJobId) {
+	const subject = new Set(plotMeshesOf(plotId))
 	return {
 		version: 1,
 		prompt,
-		parent: isExpanding() ? lastJobId : "",
+		parent: parentJobId || "",
 		bounds: worldBounds(),
-		primitives: primitives.map(serializePrimitive),
+		primitives: primitives.map(mesh => ({ ...serializePrimitive(mesh), existing: !subject.has(mesh) })),
 	}
 }
 
-// addPlot lays down a fresh ground tile next to the current plot and makes it the active
-// build area. Objects you place there are "new"; the next Generate decorates them to match
-// the existing plot and fuses them into the world (see docs/world-expansion-plan.md).
-function addPlot() {
-	if (!lastJobId) {
-		setStatus("Generate your first plot, then Add plot to extend it.")
-		return
+// nextPlotOrigin picks where a new plot tile lands: a cell adjacent to the plot you're in
+// (E/S/W/N), and if those are taken, the nearest free cell spiralling out from the origin —
+// so plots never stack on top of each other (the old modulo cycle re-used cells after 4).
+function occupiedPlotCells() {
+	const step = tileSize + tileGap
+	const cells = new Set()
+	for (const mesh of primitives) {
+		if (!mesh.userData.isGround) continue
+		cells.add(`${Math.round(mesh.position.x / step)},${Math.round(mesh.position.z / step)}`)
 	}
-	const [dx, dz] = addPlotDirs[addPlotCount % addPlotDirs.length]
+	return cells
+}
+
+function nextPlotOrigin() {
+	const step = tileSize + tileGap
+	const occupied = occupiedPlotCells()
+	const base = { x: Math.round(activeOrigin.x / step), z: Math.round(activeOrigin.z / step) }
+	const candidates = addPlotDirs.map(([dx, dz]) => ({ x: base.x + dx, z: base.z + dz }))
+	for (let radius = 1; radius <= 12; radius++) {
+		for (let dx = -radius; dx <= radius; dx++) {
+			for (let dz = -radius; dz <= radius; dz++) {
+				if (Math.max(Math.abs(dx), Math.abs(dz)) === radius) candidates.push({ x: dx, z: dz })
+			}
+		}
+	}
+	const free = candidates.find(cell => !occupied.has(`${cell.x},${cell.z}`))
+	const cell = free ?? { x: base.x + 1, z: base.z }
+	return new THREE.Vector3(cell.x * step, 0, cell.z * step)
+}
+
+// addPlot lays down a fresh ground tile and makes it the active plot. You can lay out several
+// plots up front (no need to build the first one first) and then build any subset or all of
+// them from the Plots panel — each is its own generation. Drag an unbuilt tile to reposition
+// it (objects follow). See docs/world-expansion-plan.md.
+function addPlot() {
 	addPlotCount++
-	activeOrigin = new THREE.Vector3(
-		activeOrigin.x + dx * (tileSize + tileGap),
-		0,
-		activeOrigin.z + dz * (tileSize + tileGap),
-	)
+	activeOrigin = nextPlotOrigin()
+	activePlotId = ++plotSeq
 
 	const ground = addPrimitive("box", {
 		type: "box",
@@ -452,6 +510,7 @@ function addPlot() {
 		scale: [tileSize, 0.1, tileSize],
 		color: "#587553",
 		isGround: true,
+		locked: true, // a surface you place ON (objects drop at the click point, not the tile centre)
 	})
 	select(null)
 
@@ -462,14 +521,16 @@ function addPlot() {
 	)
 	orbit.frame(box)
 	setActiveTool("box")
-	setStatus("New plot added — build here, then Generate to extend the world.")
+	setStatus("New plot added — build here, or drag the tile to reposition it, then Build.")
+	renderPlotsPanel()
 	void ground
 }
 
-// markGeneratedExisting freezes everything that was just decorated: it becomes the
-// existing world (locked + dimmed) that the next batch of objects is matched against.
-function markGeneratedExisting() {
-	for (const mesh of primitives) {
+// markPlotBuilt freezes a plot once it's generated: it becomes the
+// existing world (locked + dimmed) that the other plots are matched against. Only this plot's
+// meshes are frozen — other plots keep their own built/unbuilt state.
+function markPlotBuilt(plotId) {
+	for (const mesh of plotMeshesOf(plotId)) {
 		mesh.userData.existing = true
 		mesh.userData.locked = true
 		if (mesh.material) {
@@ -479,6 +540,47 @@ function markGeneratedExisting() {
 	}
 	select(null)
 	scheduleSave()
+}
+
+// --- Moving a plot as a unit --------------------------------------------------------
+// A plot is a ground tile plus every primitive sharing its plotId. Dragging the active
+// (unfrozen) tile translates the whole group across the ground plane, so its objects keep
+// their relative layout instead of being stranded when only the tile moved.
+function isMovablePlotGround(mesh) {
+	// Only an unfrozen (unbuilt) tile, with the pointer tool, and only once there's more than
+	// one plot — so the lone starter plot doesn't hijack camera orbit before you've laid out
+	// more. Built plots stay put (their splat is fixed in world space).
+	return Boolean(mesh?.userData.isGround) && mesh.userData.existing !== true &&
+		activeTool === "pointer" && orderedPlotIds().length > 1
+}
+
+function plotMembers(ground) {
+	const id = ground.userData.plotId
+	return primitives.filter(primitive => primitive.userData.plotId === id)
+}
+
+function createPlotMoveDrag(event, ground) {
+	if (!projectPointerToSurface(event, ground.position.y, plotMovePoint)) return null
+	const members = plotMembers(ground)
+	return {
+		pointerId: event.pointerId,
+		mode: "plotMove",
+		ground,
+		groundY: ground.position.y,
+		start: plotMovePoint.clone(),
+		members,
+		origins: members.map(mesh => mesh.position.clone()),
+	}
+}
+
+function updatePlotMoveDrag(event) {
+	if (!projectPointerToSurface(event, primitiveDrag.groundY, plotMovePoint)) return
+	const dx = plotMovePoint.x - primitiveDrag.start.x
+	const dz = plotMovePoint.z - primitiveDrag.start.z
+	primitiveDrag.members.forEach((mesh, index) => {
+		const origin = primitiveDrag.origins[index]
+		mesh.position.set(origin.x + dx, origin.y, origin.z + dz)
+	})
 }
 
 // --- Local autosave: a reload keeps your scene, plots, and parent link ---------------
@@ -492,6 +594,7 @@ function serializeForSave(mesh) {
 		...serializePrimitive(mesh), // id/type/position/rotation/scale/color/existing
 		locked: mesh.userData.locked === true,
 		isGround: mesh.userData.isGround === true,
+		plotId: Number.isInteger(mesh.userData.plotId) ? mesh.userData.plotId : 0,
 	}
 }
 
@@ -502,8 +605,14 @@ function saveState() {
 			v: 1,
 			nextId,
 			lastJobId,
+			plotJobIds,
+			plotPrompts,
+			lastPrompt,
 			addPlotCount,
+			plotSeq,
+			activePlotId,
 			activeOrigin: [activeOrigin.x, activeOrigin.y, activeOrigin.z],
+			camera: orbit.getState(),
 			primitives: primitives.map(serializeForSave),
 		}))
 	} catch (err) {
@@ -525,19 +634,30 @@ function loadState() {
 	}
 	if (!state || !Array.isArray(state.primitives) || state.primitives.length === 0) return false
 
+	// Restore scalars first so primitives loaded without a saved plotId (older saves)
+	// inherit the right active plot, and so addPrimitive's plotId fallback is correct.
+	if (Number.isFinite(state.nextId)) nextId = state.nextId
+	lastJobId = state.lastJobId ?? null
+	plotJobIds = (state.plotJobIds && typeof state.plotJobIds === "object" && !Array.isArray(state.plotJobIds)) ? { ...state.plotJobIds } : {}
+	plotPrompts = (state.plotPrompts && typeof state.plotPrompts === "object" && !Array.isArray(state.plotPrompts)) ? { ...state.plotPrompts } : {}
+	lastPrompt = typeof state.lastPrompt === "string" ? state.lastPrompt : ""
+	addPlotCount = state.addPlotCount ?? 0
+	activePlotId = Number.isInteger(state.activePlotId) ? state.activePlotId : 0
+	if (Array.isArray(state.activeOrigin)) {
+		activeOrigin.set(state.activeOrigin[0] || 0, state.activeOrigin[1] || 0, state.activeOrigin[2] || 0)
+	}
+
+	let maxPlotId = 0
 	for (const seed of state.primitives) {
 		const mesh = addPrimitive(seed.type, seed)
 		if (seed.existing && mesh?.material) {
 			mesh.material.transparent = true
 			mesh.material.opacity = 0.5
 		}
+		if (mesh && Number.isInteger(mesh.userData.plotId)) maxPlotId = Math.max(maxPlotId, mesh.userData.plotId)
 	}
-	if (Number.isFinite(state.nextId)) nextId = state.nextId
-	lastJobId = state.lastJobId ?? null
-	addPlotCount = state.addPlotCount ?? 0
-	if (Array.isArray(state.activeOrigin)) {
-		activeOrigin.set(state.activeOrigin[0] || 0, state.activeOrigin[1] || 0, state.activeOrigin[2] || 0)
-	}
+	plotSeq = Math.max(Number.isInteger(state.plotSeq) ? state.plotSeq : 0, maxPlotId)
+	if (state.camera) orbit.setState(state.camera)
 	return true
 }
 
@@ -573,6 +693,7 @@ function showWorldLoading() {
 }
 
 function showWorldResult(job) {
+	els.worldTile.classList.remove("hidden")
 	els.worldTile.classList.remove("is-loading")
 	els.worldTile.disabled = false
 	els.worldSpinner.classList.add("hidden")
@@ -605,57 +726,338 @@ function downloadWorld() {
 	clickDownload(els.downloadBundle)
 }
 
-async function generate(prompt) {
-	const expanding = isExpanding()
-	const newMeshes = newPrimitiveMeshes()
-	if (expanding && newMeshes.length === 0) {
-		setStatus("Add new objects to decorate into the world.")
-		return
-	}
-	if (!primitives.some(primitive => !primitive.userData.locked)) {
-		setStatus("Add at least one primitive.")
-		return
-	}
+// composedSplatSrc builds the viewer src from every generated plot's splat. Each plot is its
+// own splat in one shared world frame, so the viewer overlays them into the full world — the
+// existing plots are never re-fused or re-trained, the world just grows plot by plot.
+function composedSplatSrc() {
+	const builtJobs = orderedPlotIds().filter(plotIsBuilt).map(id => plotJobIds[id])
+	const ids = builtJobs.length ? builtJobs : (lastJobId ? [lastJobId] : [])
+	return ids.map(jobId => `/api/jobs/${jobId}/world.splat`).join(",")
+}
 
-	els.generate.disabled = true
-	showWorldLoading()
+// applyJobResult wires a finished job's artifacts into the UI (splat viewer link, download
+// buttons, world tile). Shared by a fresh Generate and by restoring the last world on reload.
+function applyJobResult(job) {
+	if (job.plyUrl) els.downloadPly.href = job.plyUrl
+	if (job.collisionUrl) els.downloadCollision.href = job.collisionUrl
+	if (job.bundleUrl) els.downloadBundle.href = job.bundleUrl
+	if (job.splatUrl) {
+		// Compose every plot's splat; collisions come from this (latest) job, whose scene holds
+		// every primitive (existing + new), so one collisions.json already covers the whole world.
+		const src = composedSplatSrc() || job.splatUrl
+		els.viewSplat.href = `/splat-viewer.html?src=${src}&collisions=${encodeURIComponent(job.collisionUrl)}`
+		els.download.href = job.splatUrl
+		els.viewSplat.classList.remove("hidden")
+		els.download.classList.remove("hidden")
+	}
+	els.downloadPly.classList.toggle("hidden", !job.plyUrl)
+	els.downloadCollision.classList.toggle("hidden", !job.collisionUrl)
+	els.downloadBundle.classList.toggle("hidden", !job.bundleUrl)
+	showWorldResult(job)
+}
+
+// restoreLastWorld re-attaches the most recent generated world after a reload: the scene
+// (primitives + lastJobId) comes back from localStorage, and this fetches that job so the
+// splat viewer + downloads work again without regenerating. The server reconstructs a
+// finished job from disk even across a coordinator restart, so this survives that too.
+async function restoreLastWorld() {
+	if (!lastJobId) return
+	try {
+		const res = await fetch(`/api/jobs/${lastJobId}`)
+		if (!res.ok) return // server has no record (output cleared / never finished) — skip quietly
+		const job = await res.json()
+		if (job && job.status === "done") applyJobResult(job)
+	} catch {
+		// offline / server down — the scene still loads; the world tile just stays hidden.
+	}
+}
+
+function hideWorldButtons() {
 	els.viewSplat.classList.add("hidden")
 	els.download.classList.add("hidden")
 	els.downloadPly.classList.add("hidden")
 	els.downloadCollision.classList.add("hidden")
 	els.downloadBundle.classList.add("hidden")
-	setStatus(expanding ? "Capturing new objects" : "Capturing views")
+}
 
-	try {
-		const helpers = [placementPreview, rotationGizmo].filter(Boolean)
-		// Non-expansion frames the whole scene (main's ground+subject framing). Expansion
-		// frames just the new tile + its objects (and masks them) so it's decorated and
-		// fused as the delta, with the existing plot visible at the seam.
-		const captureSubjects = expanding ? newMeshes : primitives
-		const views = await captureViews(renderer, scene, camera, helpers, selected, captureSubjects, {
-			maskMeshes: expanding ? newMeshes : null,
-		})
-		const job = await generateScene(serializeScene(prompt), views, setStatus)
-		if (job.plyUrl) els.downloadPly.href = job.plyUrl
-		if (job.collisionUrl) els.downloadCollision.href = job.collisionUrl
-		if (job.bundleUrl) els.downloadBundle.href = job.bundleUrl
-		if (job.splatUrl) {
-			els.viewSplat.href = `/splat-viewer.html?src=${encodeURIComponent(job.splatUrl)}&collisions=${encodeURIComponent(job.collisionUrl)}`
-			els.download.href = job.splatUrl
-			els.viewSplat.classList.remove("hidden")
-			els.download.classList.remove("hidden")
+// buildPlot generates ONE plot into its own splat: capture framed on that plot (masked when
+// other plots already exist), submit, then record the job and freeze the plot. The parent is
+// any already-built plot — used only for prompt/style inheritance; the server fuses just this
+// plot's masked points into its own world.ply (see docs/world-expansion-plan.md "Shipped v3").
+async function buildPlot(plotId, prompt, parentOverride = null) {
+	const subjectMeshes = plotMeshesOf(plotId)
+	if (!subjectMeshes.length) return null
+	// parentOverride ("Match" a reference plot) wins; otherwise inherit from any built plot,
+	// purely for prompt/style continuity (the server fuses only this plot's points).
+	let parentJobId = parentOverride
+	if (parentJobId == null) {
+		const parentId = orderedPlotIds().find(id => id !== plotId && plotIsBuilt(id))
+		parentJobId = parentId === undefined ? "" : plotJobIds[parentId]
+	}
+	const expanding = Boolean(parentJobId)
+
+	// Capture the plot at full strength even on a rebuild, where its meshes were dimmed to
+	// 0.5 as the "built" cue — a faded silhouette would weaken the ControlNet conditioning.
+	for (const mesh of subjectMeshes) if (mesh.material) mesh.material.opacity = 1
+
+	const scenePayload = serializeSceneForPlot(prompt, plotId, parentJobId)
+	const helpers = [placementPreview, rotationGizmo].filter(Boolean)
+	const views = await captureViews(renderer, scene, camera, helpers, selected, subjectMeshes, {
+		maskMeshes: expanding ? subjectMeshes : null,
+	})
+	const job = await generateScene(scenePayload, views, setStatus)
+	// Only register a plot as built when its splat actually exists (status "done"). A failed
+	// build still returns a job object (so its partial bundle is downloadable) — don't add it,
+	// or the composed View Splat link would point at a world.splat that 404s. The usual cause
+	// of a failed build is splat training: it needs the GPU worker, so run ./scripts/dev.sh.
+	if (job.id && job.status === "done") {
+		plotJobIds[plotId] = job.id
+		lastJobId = job.id
+		applyJobResult(job)
+		markPlotBuilt(plotId) // freeze just this plot
+	} else if (job.status === "failed") {
+		throw new Error(job.error || "build failed before the splat was produced (GPU worker not running?)")
+	}
+	return job
+}
+
+// startBuild is the single entry point for every build button. If a "Match" reference plot is
+// chosen, it builds the targets to match that plot (its vibe + parent) with no prompt step;
+// otherwise it opens the vibe modal first.
+function startBuild(plotIds) {
+	if (building) return
+	const targets = plotIds.filter(id => plotMeshesOf(id).length)
+	if (!targets.length) {
+		setStatus("Add a plot and place some primitives first.")
+		return
+	}
+	if (matchPlotId != null && plotIsBuilt(matchPlotId)) {
+		runBuilds(targets, { matchId: matchPlotId })
+	} else {
+		promptThenBuild(targets)
+	}
+}
+
+// runBuilds generates a set of plots one at a time (each its own splat). With matchId set,
+// every target copies that reference plot's vibe + parent (so they all match it); otherwise a
+// single build uses the typed prompt as that plot's vibe and a batch keeps each plot's own
+// vibe, filling only the unset ones with the typed prompt.
+async function runBuilds(plotIds, { prompt = "", matchId = null } = {}) {
+	if (building) return
+	const targets = plotIds.filter(id => plotMeshesOf(id).length)
+	if (!targets.length) return
+	const matched = matchId != null && plotIsBuilt(matchId)
+	const single = targets.length === 1 && !matched
+	if (!matched) lastPrompt = prompt
+	building = true
+	syncBuildUi()
+	for (const plotId of targets) {
+		const vibe = matched ? (plotPrompts[matchId] || prompt) : (single ? prompt : (plotPrompts[plotId] || prompt))
+		plotPrompts[plotId] = vibe
+		const parentOverride = matched && matchId !== plotId ? plotJobIds[matchId] : null
+		activePlotId = plotId
+		renderPlotsPanel()
+		setStatus(`Building ${plotLabel(plotId)}${matched ? ` to match ${plotLabel(matchId)}` : ""}…`)
+		showWorldLoading()
+		hideWorldButtons()
+		try {
+			await buildPlot(plotId, vibe, parentOverride)
+		} catch (err) {
+			showWorldError(`${plotLabel(plotId)}: ${err.message}`)
 		}
-		els.downloadPly.classList.toggle("hidden", !job.plyUrl)
-		els.downloadCollision.classList.toggle("hidden", !job.collisionUrl)
-		els.downloadBundle.classList.toggle("hidden", !job.bundleUrl)
-		showWorldResult(job)
-		// Freeze this result so the next plot is decorated to match it.
-		if (job.id) lastJobId = job.id
-		markGeneratedExisting()
-		els.generate.disabled = false
-	} catch (err) {
-		showWorldError(err.message)
-		els.generate.disabled = false
+	}
+	building = false
+	syncBuildUi()
+	renderPlotsPanel()
+}
+
+// promptThenBuild opens the vibe modal scoped to what you're building, then builds on submit.
+// Single plot → pre-filled with that plot's own vibe (editing it sets that plot's vibe). Batch
+// → pre-filled with the last vibe, used only to fill plots that don't have their own yet.
+function promptThenBuild(plotIds) {
+	if (building) return
+	pendingBuildPlots = plotIds
+	const single = plotIds.length === 1
+	els.scenePrompt.value = single ? (plotPrompts[plotIds[0]] || lastPrompt) : lastPrompt
+	if (els.generateTitle) {
+		els.generateTitle.textContent = single
+			? `Vibe for ${plotLabel(plotIds[0])}`
+			: plotIds.length >= orderedPlotIds().length
+				? "Vibe for all plots (each keeps its own; this fills the rest)"
+				: "Vibe for selected plots (each keeps its own; this fills the rest)"
+	}
+	els.generateModal.showModal()
+	els.scenePrompt.focus()
+}
+
+// --- Plots panel: choose which plot(s) to build (one, the checked set, or all) -------
+function syncBuildUi() {
+	els.generate.disabled = building
+	if (els.addPlot) els.addPlot.disabled = building
+	if (els.clearWorld) els.clearWorld.disabled = building
+	if (els.matchPlot) els.matchPlot.disabled = building
+	if (els.buildAll) els.buildAll.disabled = building || orderedPlotIds().length === 0
+	if (els.buildSelected) els.buildSelected.disabled = building || selectedPlotIds.size === 0
+}
+
+// focusPlot makes a plot the active one (where new objects land, what Generate builds) and
+// frames the camera on it.
+function focusPlot(plotId) {
+	activePlotId = plotId
+	const ground = plotMeshesOf(plotId).find(mesh => mesh.userData.isGround)
+	if (ground) {
+		select(ground)
+		orbit.frame(new THREE.Box3().setFromObject(ground))
+	}
+	setStatus(`${plotLabel(plotId)} active${plotIsBuilt(plotId) ? " (built)" : ""} — Build it, or add objects then Build.`)
+	renderPlotsPanel()
+}
+
+// renderPlotsPanel rebuilds the plot list: a checkbox (multi-select), a click-to-focus label +
+// vibe, a built/empty/building badge, and a per-plot Build/Rebuild — plus the Match dropdown.
+function renderPlotsPanel() {
+	if (!els.plotsList) return
+	const ids = orderedPlotIds()
+	for (const id of [...selectedPlotIds]) if (!ids.includes(id)) selectedPlotIds.delete(id)
+	if (matchPlotId != null && !ids.includes(matchPlotId)) matchPlotId = null
+
+	els.plotsList.textContent = ""
+	for (const id of ids) {
+		const objectCount = plotMeshesOf(id).filter(mesh => !mesh.userData.isGround).length
+		const state = building && id === activePlotId ? "building" : plotIsBuilt(id) ? "built" : "empty"
+
+		const row = document.createElement("li")
+		row.className = "plot-row" + (id === activePlotId ? " is-active" : "")
+
+		const check = document.createElement("input")
+		check.type = "checkbox"
+		check.className = "plot-check"
+		check.checked = selectedPlotIds.has(id)
+		check.disabled = building
+		check.title = "Select to build several together"
+		check.addEventListener("change", () => {
+			check.checked ? selectedPlotIds.add(id) : selectedPlotIds.delete(id)
+			syncBuildUi()
+		})
+
+		// The label + vibe is a click target → focus this plot on the canvas.
+		const focus = document.createElement("button")
+		focus.type = "button"
+		focus.className = "plot-focus"
+		focus.disabled = building
+		focus.title = "Click to focus this plot"
+		const labelLine = document.createElement("span")
+		labelLine.className = "plot-label"
+		labelLine.textContent = `${plotLabel(id)} · ${objectCount} obj`
+		const vibeLine = document.createElement("span")
+		vibeLine.className = "plot-vibe" + (plotPrompts[id] ? "" : " plot-vibe-empty")
+		vibeLine.textContent = plotPrompts[id] ? `“${plotPrompts[id]}”` : "no vibe yet — tap Build"
+		focus.append(labelLine, vibeLine)
+		focus.addEventListener("click", () => focusPlot(id))
+
+		const badge = document.createElement("span")
+		badge.className = `plot-status plot-status-${state}`
+		badge.textContent = state === "building" ? "building…" : state
+
+		const build = document.createElement("button")
+		build.type = "button"
+		build.className = "plot-build btn btn-xs" + (plotIsBuilt(id) ? "" : " btn-primary")
+		build.disabled = building
+		build.textContent = plotIsBuilt(id) ? "Rebuild" : "Build"
+		build.addEventListener("click", () => startBuild([id]))
+
+		row.append(check, focus, badge, build)
+		els.plotsList.appendChild(row)
+	}
+
+	// Match dropdown: "— none —" then each plot. Choosing one makes a build copy that plot's
+	// vibe + parent onto the targets, so they all match it (e.g. match Plot 1).
+	if (els.matchPlot) {
+		els.matchPlot.textContent = ""
+		els.matchPlot.appendChild(new Option("Match: none", ""))
+		for (const id of ids) {
+			els.matchPlot.appendChild(new Option(`Match: ${plotLabel(id)}${plotIsBuilt(id) ? "" : " (unbuilt)"}`, String(id)))
+		}
+		els.matchPlot.value = matchPlotId == null ? "" : String(matchPlotId)
+	}
+
+	if (els.plotsPanel) els.plotsPanel.classList.toggle("hidden", ids.length <= 1)
+	syncBuildUi()
+}
+
+// clearWorld is the hard reset: wipe the scene + autosave and start from one fresh ground tile.
+function clearWorld() {
+	if (!window.confirm("Clear everything and start a fresh world? This can't be undone.")) return
+	try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
+	for (const mesh of [...primitives]) {
+		clearSelectionOutline(mesh)
+		mesh.geometry.dispose()
+		mesh.material.dispose()
+		mesh.removeFromParent()
+	}
+	primitives.length = 0
+	selected = null
+	nextId = 1
+	lastJobId = null
+	plotJobIds = {}
+	plotPrompts = {}
+	lastPrompt = ""
+	addPlotCount = 0
+	plotSeq = 0
+	activePlotId = 0
+	matchPlotId = null
+	selectedPlotIds.clear()
+	activeOrigin.set(0, 0, 0)
+	hideWorldButtons()
+	els.worldTile.classList.add("hidden")
+	addPrimitive("box", {
+		id: `prim_${String(nextId++).padStart(3, "0")}`,
+		type: "box",
+		position: [0, 0.05, 0],
+		rotation: [0, 0, 0],
+		scale: [bounds.max.x - bounds.min.x, 0.1, bounds.max.z - bounds.min.z],
+		color: "#587553",
+		locked: true,
+		isGround: true,
+	})
+	select(null)
+	setActiveTool("pointer")
+	renderPlotsPanel()
+	setStatus("Cleared — fresh world.")
+	scheduleSave()
+}
+
+// reconcilePlotState un-freezes any plot marked existing/dimmed that was never actually built
+// (no job in plotJobIds) — fixes plots that went pale from an earlier failed build.
+function reconcilePlotState() {
+	for (const id of orderedPlotIds()) {
+		if (plotIsBuilt(id)) continue
+		for (const mesh of plotMeshesOf(id)) {
+			if (!mesh.userData.existing) continue
+			mesh.userData.existing = false
+			if (!mesh.userData.isGround) mesh.userData.locked = false
+			if (mesh.material) { mesh.material.opacity = 1; mesh.material.transparent = false }
+		}
+	}
+}
+
+// fetchBackendStatus shows whether builds will reach the GPU (so a blank splat is explained).
+async function fetchBackendStatus() {
+	if (!els.statusBadge) return
+	try {
+		const res = await fetch("/api/status")
+		const info = await res.json()
+		const labels = {
+			gpu: ["GPU ready", "ok"],
+			gpu_no_url: ["GPU creds — run ./scripts/dev.sh for the tunnel", "warn"],
+			local: ["Local — no GPU (point cloud only)", "warn"],
+		}
+		const [text, kind] = labels[info.mode] || ["", ""]
+		els.statusBadge.textContent = text
+		els.statusBadge.className = `backend-status backend-status-${kind}`
+		els.statusBadge.classList.toggle("hidden", !text)
+	} catch {
+		els.statusBadge.classList.add("hidden")
 	}
 }
 
@@ -667,20 +1069,29 @@ for (const swatch of els.colorSwatches) {
 	swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
 }
 
-els.generate.addEventListener("click", () => {
-	els.generateModal.showModal()
-	els.scenePrompt.focus()
+els.generate.addEventListener("click", () => startBuild([activePlotId]))
+
+els.cancelGenerate.addEventListener("click", () => {
+	pendingBuildPlots = null
+	els.generateModal.close()
 })
 
-els.cancelGenerate.addEventListener("click", () => els.generateModal.close())
-
 if (els.addPlot) els.addPlot.addEventListener("click", addPlot)
+if (els.buildAll) els.buildAll.addEventListener("click", () => startBuild(orderedPlotIds()))
+if (els.buildSelected) els.buildSelected.addEventListener("click", () => startBuild([...selectedPlotIds].sort((a, b) => a - b)))
+if (els.clearWorld) els.clearWorld.addEventListener("click", clearWorld)
+if (els.matchPlot) els.matchPlot.addEventListener("change", () => {
+	matchPlotId = els.matchPlot.value === "" ? null : Number(els.matchPlot.value)
+	syncBuildUi()
+})
 
 els.generateForm.addEventListener("submit", (event) => {
 	event.preventDefault()
 	const prompt = els.scenePrompt.value.trim()
 	els.generateModal.close()
-	generate(prompt)
+	const plots = pendingBuildPlots ?? [activePlotId]
+	pendingBuildPlots = null
+	runBuilds(plots, { prompt })
 })
 
 els.worldTile.addEventListener("click", () => {
@@ -694,7 +1105,27 @@ renderer.domElement.addEventListener("pointerdown", (event) => {
 	// Dragging empty space orbits — with the rotate tool that's how you reposition to
 	// choose the roll axis (e.g. look from above to roll about the vertical / yaw).
 	const hit = hitPrimitive(event)
-	if (!hit || hit.userData.locked) return
+	if (!hit) return
+
+	// A plot moves as a unit: once its (unfrozen) ground tile is selected, dragging it
+	// translates the whole plot — tile + every object on it. The first click only selects,
+	// so an unselected or frozen tile still falls through to camera orbit.
+	if (hit.userData.isGround) {
+		if (!isMovablePlotGround(hit) || selected !== hit) return
+		const plotDrag = createPlotMoveDrag(event, hit)
+		if (!plotDrag) return
+		event.preventDefault()
+		event.stopImmediatePropagation()
+		renderer.domElement.setPointerCapture(event.pointerId)
+		primitiveDrag = plotDrag
+		primitiveDrag.startClientX = event.clientX
+		primitiveDrag.startClientY = event.clientY
+		primitiveDrag.transformed = false
+		renderer.domElement.classList.add("is-dragging")
+		return
+	}
+
+	if (hit.userData.locked) return
 
 	event.preventDefault()
 	event.stopImmediatePropagation()
@@ -723,6 +1154,10 @@ renderer.domElement.addEventListener("pointermove", (event) => {
 	if (Math.abs(event.clientX - primitiveDrag.startClientX) + Math.abs(event.clientY - primitiveDrag.startClientY) > 3) {
 		primitiveDrag.transformed = true
 	}
+	if (primitiveDrag.mode === "plotMove") {
+		updatePlotMoveDrag(event)
+		return
+	}
 	if (primitiveDrag.mode === "scale") {
 		updateScaleDrag(event)
 		return
@@ -740,11 +1175,15 @@ renderer.domElement.addEventListener("pointerup", (event) => {
 	if (!primitiveDrag || event.pointerId !== primitiveDrag.pointerId) return
 	event.preventDefault()
 	event.stopImmediatePropagation()
-	const transformed = primitiveDrag.transformed
+	const drag = primitiveDrag
 	primitiveDrag = null
 	renderer.domElement.classList.remove("is-dragging")
 	renderer.domElement.releasePointerCapture(event.pointerId)
-	if (transformed) {
+	if (drag.transformed) {
+		// A moved plot becomes the new active origin so the next Add plot lands beside it.
+		if (drag.mode === "plotMove" && drag.ground.userData.plotId === activePlotId) {
+			activeOrigin.set(drag.ground.position.x, 0, drag.ground.position.z)
+		}
 		select(null) // deselect after an actual move/scale/rotate
 		scheduleSave()
 	}
@@ -760,6 +1199,7 @@ renderer.domElement.addEventListener("pointerup", (event) => {
 		return
 	}
 	select(hit)
+	if (hit && isMovablePlotGround(hit)) setStatus("Plot selected — drag it to reposition (its objects move with it).")
 })
 
 function hitPrimitive(event) {
@@ -875,7 +1315,9 @@ function placementPositionFromPointer(event, mesh, target, ignored = null) {
 
 function placementPositionFromHit(hit, mesh, target) {
 	const face = hitFaceAxis(hit)
-	if (hit.object.userData.locked) {
+	if (hit.object.userData.locked || hit.object.userData.isGround) {
+		// A ground tile (or any locked surface) is something you place ON: drop the object at
+		// the exact click point. Only unlocked objects use face-centre stacking.
 		placementAnchor.copy(hit.point)
 	} else {
 		const bounds = primitiveGeometryBounds(hit.object)
@@ -994,7 +1436,10 @@ function animate() {
 if (new URLSearchParams(location.search).has("new")) {
 	try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
 }
-if (!loadState()) {
+if (loadState()) {
+	reconcilePlotState() // un-pale any plot that isn't actually built
+	void restoreLastWorld() // re-attach the last generated world (splat viewer + downloads)
+} else {
 	addPrimitive("box", {
 		id: `prim_${String(nextId++).padStart(3, "0")}`,
 		type: "box",
@@ -1009,4 +1454,6 @@ if (!loadState()) {
 window.addEventListener("beforeunload", saveState)
 select(null)
 setActiveTool("pointer")
+renderPlotsPanel()
+void fetchBackendStatus() // show whether builds will reach the GPU
 animate()
