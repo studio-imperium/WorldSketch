@@ -16,6 +16,8 @@ import builtins
 import importlib
 import importlib.util
 import sys
+import traceback
+import typing
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +38,7 @@ NEGATIVE = (
 FLASH_ATTN_MODULE_PREFIXES = (
     "flash_attn",
     "flash_attn_3",
+    "flash_attn3",
     "flash_attn_interface",
 )
 
@@ -85,6 +88,57 @@ def disable_flash_attn_detection():
     importlib.util.find_spec = find_spec_without_flash_attn
     importlib.import_module = import_module_without_flash_attn
     builtins.__import__ = import_without_flash_attn
+    patch_torch_infer_schema_string_annotations()
+
+
+def patch_torch_infer_schema_string_annotations():
+    """Teach torch custom_op schema inference to handle future annotations.
+
+    FA3 packages in some RunPod images define custom ops under
+    `from __future__ import annotations`, so PyTorch 2.4 sees annotations like
+    "torch.Tensor" instead of the `torch.Tensor` class and rejects them. Resolving
+    those strings before the original schema inference runs avoids the import-time
+    crash without changing any generated image behavior.
+    """
+    try:
+        import torch._library.custom_ops as custom_ops
+        import torch._library.infer_schema as infer_schema_module
+    except Exception as exc:
+        print(f"[syncmvd] torch schema patch skipped: {exc}", flush=True)
+        return
+
+    original = getattr(infer_schema_module, "_worldsketch_original_infer_schema", None)
+    if original is None:
+        original = infer_schema_module.infer_schema
+        infer_schema_module._worldsketch_original_infer_schema = original
+
+    namespace = {
+        "torch": torch,
+        "Tensor": torch.Tensor,
+        "typing": typing,
+        "Optional": typing.Optional,
+        "Sequence": typing.Sequence,
+        "List": typing.List,
+        "Union": typing.Union,
+        "Tuple": typing.Tuple,
+    }
+
+    def infer_schema_with_resolved_annotations(func, *args, **kwargs):
+        annotations = getattr(func, "__annotations__", None)
+        if annotations:
+            for key, value in list(annotations.items()):
+                if not isinstance(value, str):
+                    continue
+                try:
+                    annotations[key] = eval(value, namespace)
+                except Exception:
+                    pass
+        return original(func, *args, **kwargs)
+
+    infer_schema_module.infer_schema = infer_schema_with_resolved_annotations
+    if hasattr(custom_ops, "infer_schema"):
+        custom_ops.infer_schema = infer_schema_with_resolved_annotations
+    print("[syncmvd] patched torch custom_op schema annotations", flush=True)
 
 
 def load_pipeline(args, device, dtype):
@@ -104,11 +158,16 @@ def load_pipeline(args, device, dtype):
     if not hasattr(_tu, "FLAX_WEIGHTS_NAME"):
         _tu.FLAX_WEIGHTS_NAME = "flax_model.msgpack"
 
-    from diffusers import (
-        ControlNetModel,
-        DDIMScheduler,
-        StableDiffusionControlNetImg2ImgPipeline,
-    )
+    try:
+        from diffusers import (
+            ControlNetModel,
+            DDIMScheduler,
+            StableDiffusionControlNetImg2ImgPipeline,
+        )
+    except Exception:
+        print("[syncmvd] diffusers import failed with full traceback:", flush=True)
+        traceback.print_exc()
+        raise
 
     models = Path(args.models)
     canny = ControlNetModel.from_single_file(

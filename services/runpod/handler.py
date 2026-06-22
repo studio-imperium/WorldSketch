@@ -121,12 +121,12 @@ def handler(event):
             text=True,
         )
         if proc.returncode != 0:
-            tail = (proc.stdout[-2000:] + proc.stderr[-2000:])
+            tail = (proc.stdout[-6000:] + proc.stderr[-6000:])
             return {"error": "pipeline failed", "log": tail}
 
         splat = pathlib.Path(job_dir) / "world.splat"
         if not splat.exists():
-            return {"error": "no world.splat produced", "log": proc.stdout[-2000:]}
+            return {"error": "no world.splat produced", "log": proc.stdout[-6000:]}
         data = splat.read_bytes()
 
         result_url = payload.get("resultUrl")
