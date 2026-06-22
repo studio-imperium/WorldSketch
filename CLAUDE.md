@@ -97,8 +97,12 @@ mode: `worldsketch-server -job <dir>` runs the pipeline once on a staged dir and
   inpainted to match the parent, and fused onto the parent `world.ply` (merged world; each
   plot is also its own job/splat). Fusion's keep-region is **scene-bounds-aware**
   (`sceneCullBounds`) so a tile offset from origin isn't culled — the client sends the union
-  bounds of all tiles. Local-only for now; seam context is approximate (style continuity via
-  shared seed/prompt/palette, not pixel-aligned). Design + research:
+  bounds of all tiles. **Runs on the RunPod worker** when configured: `buildRunpodInput`
+  ships the per-view masks + the parent's `world.ply`; the worker one-shot (`pipeline.go`)
+  fuses the new tile onto `<dir>/parent/world.ply`. **Needs a worker image rebuild** to take
+  effect (`services/runpod/Dockerfile` bakes the code). Local ComfyUI inpaint is the
+  no-RunPod fallback. Seam context is approximate (style continuity via shared
+  seed/prompt/palette, not pixel-aligned). Design + research:
   [docs/world-expansion-plan.md](docs/world-expansion-plan.md).
 - **Image-gen backend** is selected by `WS_IMAGEGEN` (`syncmvd` → diffusers path,
   else ComfyUI). See `server/syncmvd.go`.

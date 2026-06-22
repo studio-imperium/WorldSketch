@@ -141,6 +141,28 @@ UX is the one the user actually wanted: **extend the world with adjacent tiles.*
   seam continuity (render the parent splat into the new cameras for aligned context) is
   the next quality step.
 
+## Shipped v2 — expansion runs on the RunPod worker
+
+v1 ran expansion locally (ComfyUI inpaint), which is dead weight on a GPU-less Mac. v2
+routes it through the same serverless path as normal generation:
+
+- **Coordinator** (`jobs.go`): when RunPod is configured, expansion goes to `runRemote`
+  (not the local ComfyUI path, which is now only the no-RunPod fallback).
+- **Payload** (`runpod.go buildRunpodInput`): each view carries its `new_mask`, and the
+  job carries the parent's `world.ply` (base64, `parentPly`) + the parent's prompt.
+- **Worker** (`services/runpod/handler.py`): stages the masks + `parent/world.ply`, runs
+  the Go one-shot.
+- **Worker pipeline** (`pipeline.go`): for an expansion job it fuses via
+  `WriteExpandedPLY` onto `<dir>/parent/world.ply` instead of `WritePLYFromViews`; the
+  parent ply is excluded from the result bundle shipped back.
+- **Deploy gate:** the worker is a baked Docker image, so this needs a **worker image
+  rebuild** (`docker build -f services/runpod/Dockerfile -t <user>/worldsketch-worker .`,
+  push, point the endpoint at it). The coordinator (run via `dev.sh` = `go run .`) picks
+  up its half on relaunch.
+- **Known risk:** the parent `world.ply` (~20 MB → ~27 MB base64) inflates the `/run`
+  payload; if it trips RunPod's request-size limit, switch `parentPly` to a volume/object
+  handoff instead of inline base64 (tracked, see review).
+
 ## Client changes
 
 - After a successful generate, record `lastJobId` and mark every user primitive
