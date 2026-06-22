@@ -173,6 +173,15 @@ func (s *Store) Run(id string) {
 	dir := filepath.Join(s.root, id)
 	scene := readScene(filepath.Join(dir, "scene.json"))
 
+	// Flag-gated alternative pipeline (WS_PIPELINE=tripo): one isometric capture ->
+	// OpenAI gpt-image-1 edit -> TripoSplat /generate -> world.splat. Runs entirely in the
+	// coordinator (no ComfyUI/depth/fusion/local training/RunPod). Checked first so it wins
+	// even when RunPod creds are present. See server/tripo.go.
+	if tripoConfigured() {
+		s.runTripo(id, dir, scene)
+		return
+	}
+
 	// Serverless: hand the whole pipeline to the RunPod GPU worker instead of running
 	// ComfyUI + gsplat locally. This handles expansion too — buildRunpodInput ships the
 	// per-view masks + the parent's world.ply, and the worker's pipeline fuses the new

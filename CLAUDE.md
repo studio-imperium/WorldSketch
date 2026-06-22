@@ -140,6 +140,15 @@ staged dir and exits.
   when it isn't in the in-memory job map, so recovery survives a coordinator restart too.
 - **Image-gen backend** is selected by `WS_IMAGEGEN` (`syncmvd` → diffusers path,
   else ComfyUI). See `server/syncmvd.go`.
+- **Tripo splat pipeline** (additive, flag-gated): `WS_PIPELINE=tripo` swaps the whole
+  image-gen→depth→fusion→train chain for a single-image path — the server takes one captured
+  isometric view (`WS_ISO_VIEW`, default `corner_fr_high`), restyles it via OpenAI
+  `gpt-image-1` `/v1/images/edits` (needs `OPENAI_API_KEY`), POSTs the image to the synchronous
+  TripoSplat API (`TRIPO_API_URL`, `/generate`, `output_format=splat`), and writes the returned
+  `world.splat` directly. No depth/fusion/local-training/RunPod on this path; colliders are still
+  served from scene primitives (the Tripo splat is in its own frame, so they may not align). The
+  default pipeline is untouched when `WS_PIPELINE` is unset. Checked first in `Store.Run`. Code:
+  `server/tripo.go`; knobs in `.env.example`.
 - **Python interpreter**: `WORLDSKETCH_PYTHON`, else `services/ml/.venv`, else `python3`.
 - **Secrets**: `RUNPOD_API_KEY` is read from env — the server **auto-loads `.env`** at startup
   (`loadDotEnv`, repo root; shell exports take precedence). Never commit it; `.env` is gitignored.
