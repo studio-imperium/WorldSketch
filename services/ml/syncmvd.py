@@ -318,9 +318,9 @@ def _denoise_setup(pipe, views, args, generator, device, dtype):
     pos, neg = pipe.encode_prompt(args.prompt, device, 1, True, NEGATIVE)
     embeds = torch.cat([neg.repeat(n, 1, 1), pos.repeat(n, 1, 1)]).to(dtype)
 
-    # img2img init latents.
-    init = pipe.image_processor.preprocess([v["init"] for v in views]).to(device, dtype)
-    init_lat = pipe.vae.encode(init).latent_dist.sample(generator) * pipe.vae.config.scaling_factor
+    # img2img init latents. Encode in small chunks; the VAE is often the first
+    # thing to OOM after the UNet path has been batched down.
+    init_lat = _encode_pils(pipe, [v["init"] for v in views], generator, device, dtype, sample=True)
 
     pipe.scheduler.set_timesteps(args.steps, device=device)
     start = max(args.steps - min(int(args.steps * args.denoise), args.steps), 0)
@@ -375,12 +375,60 @@ def _predict_x0(pipe, latents, t, embeds, canny_cond, depth_cond, alphas, args):
     return x0, sa, s1
 
 
+def _encode_pils(pipe, images, generator, device, dtype, sample=False):
+    chunks = []
+    batch = max(1, min(pipe._worldsketch_sync_batch, len(images)))
+    for start in range(0, len(images), batch):
+        init = pipe.image_processor.preprocess(images[start:start + batch]).to(device, dtype)
+        dist = pipe.vae.encode(init).latent_dist
+        latents = dist.sample(generator) if sample else dist.mode()
+        chunks.append(latents * pipe.vae.config.scaling_factor)
+        del init, dist, latents
+    return torch.cat(chunks)
+
+
+def _decode_latents_np(pipe, latents):
+    images = []
+    scaling = pipe.vae.config.scaling_factor
+    batch = max(1, min(pipe._worldsketch_sync_batch, latents.shape[0]))
+    for start in range(0, latents.shape[0], batch):
+        decoded = pipe.vae.decode(latents[start:start + batch] / scaling, return_dict=False)[0]
+        images.extend(decoded.float().permute(0, 2, 3, 1).cpu().numpy())
+        del decoded
+    return images
+
+
+def _encode_image_arrays(pipe, images_np, device, dtype):
+    chunks = []
+    scaling = pipe.vae.config.scaling_factor
+    batch = max(1, min(pipe._worldsketch_sync_batch, len(images_np)))
+    for start in range(0, len(images_np), batch):
+        arr = np.stack(images_np[start:start + batch])
+        images = torch.from_numpy(arr).permute(0, 3, 1, 2).to(device, dtype)
+        latents = pipe.vae.encode(images).latent_dist.mode() * scaling
+        chunks.append(latents)
+        del arr, images, latents
+    return torch.cat(chunks)
+
+
 def _decode_and_save(pipe, latents, views):
-    images = pipe.vae.decode(latents / pipe.vae.config.scaling_factor, return_dict=False)[0]
-    pils = pipe.image_processor.postprocess(images, output_type="pil")
-    for v, p in zip(views, pils):
-        p.save(v["out"])
-        print(f"[syncmvd] {v['name']} saved", flush=True)
+    scaling = pipe.vae.config.scaling_factor
+    batch = max(1, min(pipe._worldsketch_sync_batch, latents.shape[0]))
+    for start in range(0, latents.shape[0], batch):
+        images = pipe.vae.decode(latents[start:start + batch] / scaling, return_dict=False)[0]
+        pils = pipe.image_processor.postprocess(images, output_type="pil")
+        for v, p in zip(views[start:start + batch], pils):
+            p.save(v["out"])
+            print(f"[syncmvd] {v['name']} saved", flush=True)
+        del images, pils
+
+
+def _blend_np(images_np, consensus, lam):
+    return [(1 - lam) * image + lam * cons for image, cons in zip(images_np, consensus)]
+
+
+def _set_memory_batch(pipe, args):
+    pipe._worldsketch_sync_batch = max(1, args.sync_batch)
 
 
 def _build_sync(views, depth_key, voxel):
@@ -434,7 +482,6 @@ def run_synced_rgb(pipe, views, args, generator, device, dtype):
     sync = _build_sync(views, "depth_full", args.sync_voxel)
     n, embeds, latents, timesteps, canny_cond, depth_cond, alphas = _denoise_setup(
         pipe, views, args, generator, device, dtype)
-    scaling = pipe.vae.config.scaling_factor
     interval = max(args.sync_interval, 1)
 
     for i, t in enumerate(timesteps):
@@ -443,13 +490,11 @@ def run_synced_rgb(pipe, views, args, generator, device, dtype):
         lam = _sync_lambda(i, len(timesteps), args)
         synced = lam > 0 and i % interval == 0
         if synced:
-            imgs = pipe.vae.decode(x0 / scaling, return_dict=False)[0]   # (N, 3, H, W) in [-1, 1]
-            imgs_np = imgs.float().permute(0, 2, 3, 1).cpu().numpy()     # (N, H, W, 3)
+            # Decode/sync/re-encode through CPU arrays so successful sync does not
+            # require holding every full-res view in GPU memory at the same time.
+            imgs_np = _decode_latents_np(pipe, x0)
             consensus = sync.sync([imgs_np[j] for j in range(n)])
-            cons = torch.from_numpy(np.stack(consensus)).permute(0, 3, 1, 2).to(device, dtype)
-            blended = (1 - lam) * imgs + lam * cons
-            # mode() (the distribution mean) re-encodes deterministically — no sampling noise.
-            x0 = pipe.vae.encode(blended).latent_dist.mode() * scaling
+            x0 = _encode_image_arrays(pipe, _blend_np(imgs_np, consensus, lam), device, dtype)
 
         # re-derive epsilon from the (possibly synced) x0 and step
         noise_corr = (latents - sa * x0) / s1
@@ -477,19 +522,22 @@ def main():
 
     device, dtype = "cuda", torch.float16
     pipe = load_pipeline(args, device, dtype)
+    _set_memory_batch(pipe, args)
     views = gather_views(job, args.size, args.size // 8)
     if not views:
         raise SystemExit("no views found")
     generator = torch.Generator(device=device).manual_seed(args.seed)
 
     if args.sync <= 0:
-        run_per_view(pipe, views, args, generator)
+        with torch.inference_mode():
+            run_per_view(pipe, views, args, generator)
         write_generation_meta(job, args, "no_sync")
         return 0
 
     sync_oom = False
     try:
-        run_synced(pipe, views, args, generator, device, dtype)
+        with torch.inference_mode():
+            run_synced(pipe, views, args, generator, device, dtype)
         write_generation_meta(job, args, f"synced_{args.sync_space}")
     except torch.OutOfMemoryError:
         sync_oom = True
@@ -504,7 +552,8 @@ def main():
             torch.cuda.ipc_collect()
         except Exception:
             pass
-        run_per_view(pipe, views, args, generator)
+        with torch.inference_mode():
+            run_per_view(pipe, views, args, generator)
         write_generation_meta(job, args, "fallback_no_sync", "synced generation OOM")
     return 0
 

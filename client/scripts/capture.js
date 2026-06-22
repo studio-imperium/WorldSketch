@@ -4,18 +4,19 @@ const size = 512
 const names = ["front", "back", "left", "right", "top", "corner_fl", "corner_fr", "corner_bl", "corner_br"]
 
 
-export async function captureViews(renderer, scene, camera, helpers, selected) {
+export async function captureViews(renderer, scene, camera, helpers, selected, subjects = []) {
 	const original = snapshot(camera, renderer)
 	const target = new THREE.WebGLRenderTarget(size, size)
 	const depthMaterial = createDepthMaterial(camera)
 	const views = []
+	const frame = captureFrame(subjects)
 
 	setHelpers(helpers, false)
 	const selectionOutlines = selected ? selected.children.filter(child => child.userData.isSelectionOutline) : []
 	for (const outline of selectionOutlines) outline.visible = false
 
 	for (const name of names) {
-		poseCamera(camera, name)
+		poseCamera(camera, name, frame)
 		updateSky(scene, camera)
 		camera.aspect = 1
 		camera.updateProjectionMatrix()
@@ -45,24 +46,59 @@ export async function captureViews(renderer, scene, camera, helpers, selected) {
 	return views
 }
 
-function poseCamera(camera, name) {
-	const target = new THREE.Vector3(0, 1.6, 0)
-	const positions = {
-		front: [0, 4.4, 16],
-		back: [0, 4.4, -16],
-		left: [-16, 4.4, 0],
-		right: [16, 4.4, 0],
-		top: [0.02, 18, 0],
-		corner_fl: [-11, 12, 11],
-		corner_fr: [11, 12, 11],
-		corner_bl: [-11, 12, -11],
-		corner_br: [11, 12, -11],
+function poseCamera(camera, name, frame) {
+	const { target, radius } = frame
+	const straightDistance = Math.max(18, radius * 2.8)
+	const cornerDistance = Math.max(24, radius * 3.4)
+	const topDistance = Math.max(22, radius * 3.2)
+	const height = Math.max(4.8, radius * 0.55)
+	const cornerHeight = Math.max(8, radius * 0.9)
+	const offsets = {
+		front: [0, height, straightDistance],
+		back: [0, height, -straightDistance],
+		left: [-straightDistance, height, 0],
+		right: [straightDistance, height, 0],
+		top: [0.02, topDistance, 0],
+		corner_fl: [-cornerDistance, cornerHeight, cornerDistance],
+		corner_fr: [cornerDistance, cornerHeight, cornerDistance],
+		corner_bl: [-cornerDistance, cornerHeight, -cornerDistance],
+		corner_br: [cornerDistance, cornerHeight, -cornerDistance],
 	}
-	camera.position.fromArray(positions[name])
+	camera.position.copy(target).add(new THREE.Vector3(...offsets[name]))
 	camera.lookAt(target)
 	camera.near = 0.05
-	camera.far = 48
+	camera.far = Math.max(48, cornerDistance + radius * 2 + 12)
 	camera.fov = 50
+}
+
+function captureFrame(subjects) {
+	const box = new THREE.Box3()
+	const subjectBox = new THREE.Box3()
+	let hasSubject = false
+
+	for (const subject of subjects) {
+		if (!subject.visible) continue
+		subject.updateMatrixWorld(true)
+		subjectBox.setFromObject(subject)
+		if (subjectBox.isEmpty()) continue
+		box.union(subjectBox)
+		hasSubject = true
+	}
+
+	if (!hasSubject) {
+		return {
+			target: new THREE.Vector3(0, 1.6, 0),
+			radius: 7,
+		}
+	}
+
+	const target = box.getCenter(new THREE.Vector3())
+	const size = box.getSize(new THREE.Vector3())
+	target.y = Math.max(1.2, target.y)
+	return {
+		target,
+		radius: Math.max(4, size.length() * 0.5),
+	}
 }
 
 function cameraPayload(camera, name) {
