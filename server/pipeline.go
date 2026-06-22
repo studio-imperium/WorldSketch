@@ -18,10 +18,10 @@ func RunPipeline(dir string, scene Scene, status func(string)) error {
 
 	plyPath := filepath.Join(dir, "world.ply")
 	if scene.isExpansion() {
-		// Expansion: fuse only the new tile (masked) and merge onto the parent's world.ply,
-		// which the handler staged at <dir>/parent/world.ply.
-		status("fusing into existing world")
-		if err := WriteExpandedPLY(scene, dir, filepath.Join(dir, "parent"), plyPath); err != nil {
+		// Expansion: this plot is independent — fuse ONLY the new tile (masked) into its own
+		// world.ply. No parent cloud is staged or merged; the viewer stacks per-plot splats.
+		status("fusing new plot")
+		if err := WriteExpandedPLY(scene, dir, plyPath); err != nil {
 			return err
 		}
 	} else {

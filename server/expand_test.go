@@ -153,24 +153,11 @@ func makeView(t *testing.T, dir, name string, maskY uint8) {
 	writeGrayPNG(t, filepath.Join(viewDir, "new_mask.png"), 64, 64, maskY)
 }
 
-func TestWriteExpandedPLYMergesOntoParent(t *testing.T) {
-	root := t.TempDir()
-	parentDir := filepath.Join(root, "parent")
-	dir := filepath.Join(root, "child")
-	if err := os.MkdirAll(parentDir, 0755); err != nil {
-		t.Fatal(err)
-	}
+func TestWriteExpandedPLYOnlyNewPoints(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "child")
 
-	parentPts := []Point{
-		{X: 0, Y: 0, Z: -5, R: 1, G: 2, B: 3},
-		{X: 1, Y: 0, Z: -5, R: 1, G: 2, B: 3},
-		{X: 2, Y: 0, Z: -5, R: 1, G: 2, B: 3},
-	}
-	if err := writePointsPLY(parentPts, filepath.Join(parentDir, "world.ply")); err != nil {
-		t.Fatal(err)
-	}
-
-	// One view with a fully-white mask → new points get fused.
+	// One view with a fully-white mask → only the new (masked) points get fused. No parent
+	// cloud exists or is read — each plot's world.ply holds only its own delta.
 	makeView(t, dir, "front", 255)
 
 	// Permissive scene: a big box (no colour → position-only) so the delta survives the
@@ -184,45 +171,51 @@ func TestWriteExpandedPLYMergesOntoParent(t *testing.T) {
 	}
 
 	out := filepath.Join(dir, "world.ply")
-	if err := WriteExpandedPLY(scene, dir, parentDir, out); err != nil {
+	if err := WriteExpandedPLY(scene, dir, out); err != nil {
 		t.Fatal(err)
 	}
-	merged := readPointsPLY(out)
-	if len(merged) <= len(parentPts) {
-		t.Fatalf("merged cloud should exceed parent (%d) after fusing new points, got %d", len(parentPts), len(merged))
+	got := readPointsPLY(out)
+	if len(got) == 0 {
+		t.Fatal("expected the new plot's fused points, got an empty cloud")
+	}
+	// Every emitted point must be one of the new tile's (z≈-8 region from the front cam),
+	// never a stray parent point — there is no parent to merge.
+	for _, p := range got {
+		if p.R == 1 && p.G == 2 && p.B == 3 {
+			t.Fatalf("found a parent-coloured point %+v — expansion must not merge any parent cloud", p)
+		}
 	}
 }
 
-func TestWriteExpandedPLYEmptyMaskKeepsParentOnly(t *testing.T) {
-	root := t.TempDir()
-	parentDir := filepath.Join(root, "parent")
-	dir := filepath.Join(root, "child")
-	if err := os.MkdirAll(parentDir, 0755); err != nil {
-		t.Fatal(err)
-	}
-	parentPts := []Point{{X: 0, Y: 0, Z: -5, R: 9, G: 9, B: 9}}
-	if err := writePointsPLY(parentPts, filepath.Join(parentDir, "world.ply")); err != nil {
-		t.Fatal(err)
-	}
+func TestWriteExpandedPLYEmptyDeltaIsInvalid(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "child")
 	makeView(t, dir, "front", 0) // all-black mask → no new points
 
 	scene := Scene{Parent: "parent", Primitives: []Primitive{{Type: "box", Scale: Vec3{1, 1, 1}}}}
 	out := filepath.Join(dir, "world.ply")
-	if err := WriteExpandedPLY(scene, dir, parentDir, out); err != nil {
-		t.Fatal(err)
-	}
-	if got := readPointsPLY(out); len(got) != len(parentPts) {
-		t.Fatalf("empty-mask expansion should preserve exactly the parent cloud, want %d got %d", len(parentPts), len(got))
+	if err := WriteExpandedPLY(scene, dir, out); err == nil {
+		t.Fatal("an expansion that fuses zero new points should be invalid (no parent to fall back on)")
 	}
 }
 
-func TestWriteExpandedPLYNoParentNoNewIsInvalid(t *testing.T) {
-	root := t.TempDir()
-	dir := filepath.Join(root, "child")
-	makeView(t, dir, "front", 0) // no parent ply, no new points
-	scene := Scene{Parent: "missing", Primitives: []Primitive{{Type: "box", Scale: Vec3{1, 1, 1}}}}
-	if err := WriteExpandedPLY(scene, dir, filepath.Join(root, "missing"), filepath.Join(dir, "world.ply")); err == nil {
-		t.Fatal("expected an error when there are neither parent nor new points")
+func TestWriteExpandedPLYNoMasksIsInvalid(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "child")
+	// A view with all the files EXCEPT new_mask.png → masksSeen==0 (staging bug), which must
+	// fail rather than silently emit an empty plot.
+	viewDir := filepath.Join(dir, "views", "front")
+	if err := os.MkdirAll(viewDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	cam, _ := json.Marshal(testCamera())
+	if err := os.WriteFile(filepath.Join(viewDir, "camera.json"), cam, 0644); err != nil {
+		t.Fatal(err)
+	}
+	writeGrayPNG(t, filepath.Join(viewDir, "primitive_depth.png"), 64, 64, 40)
+	writeRGBPNG(t, filepath.Join(viewDir, "generated_rgb.png"), 64, 64, 120, 120, 120)
+
+	scene := Scene{Parent: "parent", Primitives: []Primitive{{Type: "box", Scale: Vec3{1, 1, 1}}}}
+	if err := WriteExpandedPLY(scene, dir, filepath.Join(dir, "world.ply")); err == nil {
+		t.Fatal("expected an error when no view carries a new-object mask")
 	}
 }
 
@@ -268,6 +261,35 @@ func TestSceneCullBounds(t *testing.T) {
 	dmin, dmax := defaultCullBounds()
 	if !outside(p, dmin, dmax) {
 		t.Fatal("expected the old fixed ±16 box to cull the adjacent-tile point (sanity check)")
+	}
+}
+
+func TestExpandCullBounds(t *testing.T) {
+	// Two NEW primitives offset from origin: the keep-box is their AABB grown by the
+	// sceneCullBounds margins (min -6/-1/-6, max +6/+4/+6), staying tight to the tile
+	// rather than the union of all tiles. Existing primitives are ignored.
+	scene := Scene{
+		Bounds: Bounds{Min: Vec3{-100, 0, -100}, Max: Vec3{100, 50, 100}}, // wide union — must NOT be used
+		Primitives: []Primitive{
+			{ID: "old", Existing: true, Position: Vec3{0, 0, 0}, Scale: Vec3{200, 200, 200}},
+			{ID: "a", Position: Vec3{20, 1, 0}, Scale: Vec3{2, 2, 2}},   // [19,21] [0,2] [-1,1]
+			{ID: "b", Position: Vec3{24, 3, -4}, Scale: Vec3{-4, 2, 2}}, // |scale| → [22,26] [2,4] [-5,-3]
+		},
+	}
+	// AABB over new prims a,b: x[19,26] y[0,4] z[-5,1].
+	wantMin := Vec3{19 - 6, 0 - 1, -5 - 6}
+	wantMax := Vec3{26 + 6, 4 + 4, 1 + 6}
+	min, max := expandCullBounds(scene)
+	if min != wantMin || max != wantMax {
+		t.Fatalf("expandCullBounds tile box: min=%v max=%v, want min=%v max=%v", min, max, wantMin, wantMax)
+	}
+
+	// No new primitives → fall back to sceneCullBounds (nothing to bound).
+	noNew := Scene{Bounds: Bounds{Min: Vec3{-10, 0, -10}, Max: Vec3{10, 5, 10}}, Primitives: []Primitive{{ID: "x", Existing: true, Scale: Vec3{1, 1, 1}}}}
+	gotMin, gotMax := expandCullBounds(noNew)
+	sMin, sMax := sceneCullBounds(noNew)
+	if gotMin != sMin || gotMax != sMax {
+		t.Fatalf("empty newPrimitives should fall back to sceneCullBounds: got min=%v max=%v, want min=%v max=%v", gotMin, gotMax, sMin, sMax)
 	}
 }
 

@@ -35,8 +35,9 @@ type runpodView struct {
 
 // buildRunpodInput packs the staged job dir into the worker's input payload: scene +
 // base64 views + the callback URL the worker PUTs the result bundle to. For an expansion
-// it also includes each view's new-object mask and the parent plot's world.ply, so the
-// worker can fuse the new tile onto the existing world.
+// it also includes each view's new-object mask so the worker can fuse just the new tile.
+// Each plot is independent — the parent cloud is never shipped or fetched; the viewer
+// stacks per-plot splats.
 func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any, error) {
 	var views []runpodView
 	for _, name := range viewNames {
@@ -68,22 +69,13 @@ func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any
 	}
 
 	if scene.isExpansion() {
-		parentDir := filepath.Join(filepath.Dir(dir), scene.Parent)
-		// Copy the parent's vibe: fall back to its prompt when none was supplied.
+		// Copy the parent's vibe: fall back to its prompt when none was supplied, so the new
+		// plot lands in the same stylistic basin. The parent cloud itself is never fetched —
+		// the worker fuses only this plot's masked delta into its own world.ply.
 		if strings.TrimSpace(scene.Prompt) == "" {
+			parentDir := filepath.Join(filepath.Dir(dir), scene.Parent)
 			scene.Prompt = readScene(filepath.Join(parentDir, "scene.json")).Prompt
 		}
-		// The parent world.ply can be ~20MB; base64 inline would blow RunPod's /run
-		// request-size limit. Instead hand the worker a URL to pull it from (we already
-		// serve it + have a public base URL). Verify it exists so we fail early & clearly.
-		if _, err := os.Stat(filepath.Join(parentDir, "world.ply")); err != nil {
-			return nil, fmt.Errorf("expansion parent %q has no world.ply on the coordinator (generate the parent first): %w", scene.Parent, err)
-		}
-		base := publicBaseURL()
-		if base == "" {
-			return nil, errors.New("expansion needs WORLDSKETCH_PUBLIC_URL so the worker can fetch the parent world.ply")
-		}
-		input["parentPlyUrl"] = base + "/api/jobs/" + scene.Parent + "/world.ply"
 	}
 
 	input["scene"] = scene

@@ -60,8 +60,9 @@ func TestBuildRunpodInput(t *testing.T) {
 	}
 }
 
-// Expansion payload must carry the per-view mask + the parent's world.ply, and inherit
-// the parent's prompt when none was supplied.
+// Expansion payload must carry the per-view mask and inherit the parent's prompt when
+// none was supplied. Each plot is independent, so it must NOT ship/reference the parent
+// cloud — the worker fuses only this plot's masked delta.
 func TestBuildRunpodInputExpansion(t *testing.T) {
 	root := t.TempDir()
 	parentDir := filepath.Join(root, "parent")
@@ -69,7 +70,6 @@ func TestBuildRunpodInputExpansion(t *testing.T) {
 	if err := os.MkdirAll(parentDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-	os.WriteFile(filepath.Join(parentDir, "world.ply"), []byte("PLYBYTES"), 0644)
 	os.WriteFile(filepath.Join(parentDir, "scene.json"), []byte(`{"version":1,"prompt":"mossy ruins"}`), 0644)
 
 	vd := filepath.Join(dir, "views", viewNames[0])
@@ -81,22 +81,17 @@ func TestBuildRunpodInputExpansion(t *testing.T) {
 	os.WriteFile(filepath.Join(vd, "camera.json"), []byte(`{"name":"front"}`), 0644)
 	os.WriteFile(filepath.Join(vd, "new_mask.png"), []byte("MASKBYTES"), 0644)
 
-	// The worker pulls the parent ply by URL, so a public base URL is required.
-	t.Setenv("WORLDSKETCH_PUBLIC_URL", "https://pub.example")
 	input, err := buildRunpodInput(dir, Scene{Parent: "parent"}, "https://x/result")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	url, ok := input["parentPlyUrl"].(string)
-	if !ok {
-		t.Fatal("expansion payload missing parentPlyUrl")
-	}
-	if url != "https://pub.example/api/jobs/parent/world.ply" {
-		t.Fatalf("parentPlyUrl wrong: %q", url)
+	// Per-plot independence: no parent cloud is referenced or inlined.
+	if _, ok := input["parentPlyUrl"]; ok {
+		t.Fatal("expansion payload must NOT include parentPlyUrl — each plot is independent")
 	}
 	if _, inlined := input["parentPly"]; inlined {
-		t.Fatal("parent ply must NOT be inlined (blows the /run payload size limit)")
+		t.Fatal("expansion payload must NOT inline the parent ply")
 	}
 	if got := input["scene"].(Scene).Prompt; got != "mossy ruins" {
 		t.Fatalf("expansion should inherit the parent prompt, got %q", got)
