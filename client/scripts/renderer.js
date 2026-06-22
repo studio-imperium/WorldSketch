@@ -467,18 +467,18 @@ async function generate(prompt) {
 	try {
 		const views = await captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected)
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
-		els.downloadPly.href = job.plyUrl
-		els.downloadCollision.href = job.collisionUrl
-		els.downloadBundle.href = job.bundleUrl
+		if (job.plyUrl) els.downloadPly.href = job.plyUrl
+		if (job.collisionUrl) els.downloadCollision.href = job.collisionUrl
+		if (job.bundleUrl) els.downloadBundle.href = job.bundleUrl
 		if (job.splatUrl) {
 			els.viewSplat.href = `/splat-viewer.html?src=${encodeURIComponent(job.splatUrl)}&collisions=${encodeURIComponent(job.collisionUrl)}`
 			els.download.href = job.splatUrl
 			els.viewSplat.classList.remove("hidden")
 			els.download.classList.remove("hidden")
 		}
-		els.downloadPly.classList.remove("hidden")
-		els.downloadCollision.classList.remove("hidden")
-		els.downloadBundle.classList.remove("hidden")
+		els.downloadPly.classList.toggle("hidden", !job.plyUrl)
+		els.downloadCollision.classList.toggle("hidden", !job.collisionUrl)
+		els.downloadBundle.classList.toggle("hidden", !job.bundleUrl)
 		showWorldResult(job)
 		els.generate.disabled = false
 	} catch (err) {

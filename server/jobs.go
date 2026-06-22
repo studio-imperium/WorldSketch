@@ -252,6 +252,13 @@ func (s *Store) markDone(id string) {
 	job.Status = "done"
 	job.SplatURL = "/api/jobs/" + id + "/world.splat"
 	job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
+	if fileExists(filepath.Join(s.root, id, "world.ply")) {
+		job.PlyURL = "/api/jobs/" + id + "/world.ply"
+		job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
+	}
+	if fileExists(filepath.Join(s.root, id, "views", "front", "generated_rgb.png")) {
+		job.PreviewURL = "/api/jobs/" + id + "/preview.png"
+	}
 	job.UpdatedAt = time.Now()
 }
 
@@ -274,6 +281,11 @@ func readScene(path string) Scene {
 	data, _ := os.ReadFile(path)
 	json.Unmarshal(data, &scene)
 	return scene
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func newID() string {

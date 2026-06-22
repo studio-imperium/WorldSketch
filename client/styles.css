@@ -165,10 +165,11 @@ button {
 	position: absolute;
 	left: 1rem;
 	top: 1rem;
-	width: 3.25rem;
+	width: auto;
 	box-sizing: border-box;
 	display: flex;
 	flex-direction: column;
+	align-items: flex-start;
 	gap: 0.55rem;
 }
 
@@ -192,6 +193,13 @@ button {
 
 .generate-btn:disabled {
 	opacity: 0.55;
+}
+
+.generate-panel > a.btn {
+	width: 8.75rem;
+	justify-content: center;
+	text-align: center;
+	white-space: normal;
 }
 
 .generate-btn svg {

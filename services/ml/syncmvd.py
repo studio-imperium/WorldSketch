@@ -322,21 +322,37 @@ def _denoise_setup(pipe, views, args, generator, device, dtype):
 def _predict_x0(pipe, latents, t, embeds, canny_cond, depth_cond, alphas, args):
     """One UNet+ControlNet pass with CFG -> predicted clean latent x0, plus the
     sqrt(a) / sqrt(1-a) coefficients so the caller can re-derive epsilon after syncing."""
-    lmi = pipe.scheduler.scale_model_input(torch.cat([latents, latents]), t)
-    down, mid = pipe.controlnet(
-        lmi, t, encoder_hidden_states=embeds,
-        controlnet_cond=[canny_cond, depth_cond],
-        conditioning_scale=[args.canny, args.depth_scale],
-        guess_mode=False, return_dict=False,
-    )
-    noise_pred = pipe.unet(
-        lmi, t, encoder_hidden_states=embeds,
-        down_block_additional_residuals=down,
-        mid_block_additional_residual=mid,
-        return_dict=False,
-    )[0]
-    uncond, text = noise_pred.chunk(2)
-    noise_pred = uncond + args.cfg * (text - uncond)
+    n = latents.shape[0]
+    batch = max(1, min(args.sync_batch, n))
+    noise_chunks = []
+
+    for start in range(0, n, batch):
+        end = min(start + batch, n)
+        latent_chunk = latents[start:end]
+        lmi = pipe.scheduler.scale_model_input(torch.cat([latent_chunk, latent_chunk]), t)
+        cond_idx = list(range(start, end)) + list(range(n + start, n + end))
+        embed_chunk = embeds[cond_idx]
+        canny_chunk = canny_cond[cond_idx]
+        depth_chunk = depth_cond[cond_idx]
+
+        down, mid = pipe.controlnet(
+            lmi, t, encoder_hidden_states=embed_chunk,
+            controlnet_cond=[canny_chunk, depth_chunk],
+            conditioning_scale=[args.canny, args.depth_scale],
+            guess_mode=False, return_dict=False,
+        )
+        noise_pred = pipe.unet(
+            lmi, t, encoder_hidden_states=embed_chunk,
+            down_block_additional_residuals=down,
+            mid_block_additional_residual=mid,
+            return_dict=False,
+        )[0]
+        uncond, text = noise_pred.chunk(2)
+        noise_chunks.append(uncond + args.cfg * (text - uncond))
+        del lmi, down, mid, noise_pred, uncond, text, embed_chunk, canny_chunk, depth_chunk
+
+    noise_pred = torch.cat(noise_chunks)
+    del noise_chunks
 
     a = alphas[t]
     sa, s1 = a ** 0.5, (1 - a) ** 0.5
@@ -453,14 +469,26 @@ def main():
 
     if args.sync <= 0:
         run_per_view(pipe, views, args, generator)
-    else:
+        return 0
+
+    sync_oom = False
+    try:
+        run_synced(pipe, views, args, generator, device, dtype)
+    except torch.OutOfMemoryError:
+        sync_oom = True
+        print("[syncmvd] synced generation OOM; retrying per-view fallback", flush=True)
+
+    # Do this outside the except block so Python can release traceback frames that
+    # still reference the failed sync tensors before the fallback pipeline runs.
+    if sync_oom:
+        gc.collect()
+        torch.cuda.empty_cache()
         try:
-            run_synced(pipe, views, args, generator, device, dtype)
-        except torch.OutOfMemoryError:
-            print("[syncmvd] synced generation OOM; retrying per-view fallback", flush=True)
-            gc.collect()
-            torch.cuda.empty_cache()
-            run_per_view(pipe, views, args, generator)
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+        run_per_view(pipe, views, args, generator)
+    return 0
 
 
 def parse_args():
@@ -484,6 +512,7 @@ def parse_args():
     p.add_argument("--sync-weight", type=float, default=1.0, dest="sync_weight")
     p.add_argument("--sync-voxel", type=float, default=0.25, dest="sync_voxel")
     p.add_argument("--sync-taper", type=float, default=0.7, dest="sync_taper")
+    p.add_argument("--sync-batch", type=int, default=1, dest="sync_batch")
     return p.parse_args()
 
 

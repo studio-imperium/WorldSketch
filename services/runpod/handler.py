@@ -23,6 +23,7 @@ import time
 import urllib.request
 import uuid
 import sys
+import zipfile
 
 import runpod
 
@@ -104,6 +105,17 @@ def stage_inputs(job_dir, payload):
         (view_dir / "camera.json").write_text(json.dumps(view["camera"]))
 
 
+def write_result_bundle(job_dir):
+    path = pathlib.Path(job_dir)
+    bundle = path / "worldsketch-result.zip"
+    with zipfile.ZipFile(bundle, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        for item in path.rglob("*"):
+            if not item.is_file() or item == bundle:
+                continue
+            zf.write(item, item.relative_to(path).as_posix())
+    return bundle
+
+
 def handler(event):
     payload = event.get("input") or {}
     if "scene" not in payload or "views" not in payload:
@@ -124,23 +136,26 @@ def handler(event):
             tail = (proc.stdout[-6000:] + proc.stderr[-6000:])
             return {"error": "pipeline failed", "log": tail}
 
-        splat = pathlib.Path(job_dir) / "world.splat"
+        job_path = pathlib.Path(job_dir)
+        splat = job_path / "world.splat"
         if not splat.exists():
             return {"error": "no world.splat produced", "log": proc.stdout[-6000:]}
-        data = splat.read_bytes()
 
         result_url = payload.get("resultUrl")
         if result_url:
+            bundle = write_result_bundle(job_dir)
+            data = bundle.read_bytes()
             req = urllib.request.Request(
                 result_url,
                 data=data,
                 method="PUT",
-                headers={"Content-Type": "application/octet-stream"},
+                headers={"Content-Type": "application/zip"},
             )
             urllib.request.urlopen(req, timeout=180)
-            return {"status": "done", "bytes": len(data)}
+            return {"status": "done", "bytes": len(data), "bundle": True}
 
         # No callback URL: return inline (only viable once artifacts are small, e.g. .spz).
+        data = splat.read_bytes()
         return {"status": "done", "splat_b64": base64.b64encode(data).decode()}
     finally:
         subprocess.run(["rm", "-rf", job_dir])

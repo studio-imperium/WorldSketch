@@ -55,6 +55,7 @@ func RunSyncMVD(dir, scenePrompt string) error {
 		"--sync-weight", fmt.Sprintf("%g", envFloat("WS_SYNC_WEIGHT", 1.0)),
 		"--sync-voxel", fmt.Sprintf("%g", envFloat("WS_SYNC_VOXEL", 0.25)),
 		"--sync-taper", fmt.Sprintf("%g", envFloat("WS_SYNC_TAPER", 0.7)),
+		"--sync-batch", strconv.Itoa(envInt("WS_SYNC_BATCH", 1)),
 	}
 	cmd := exec.Command(pythonBin(), args...)
 	cmd.Dir = "."
