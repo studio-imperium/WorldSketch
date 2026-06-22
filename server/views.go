@@ -29,3 +29,10 @@ var viewNames = []string{
 	"corner_bl_low",
 	"corner_br_low",
 }
+
+func imageGenViewNames() []string {
+	if envBool("WS_IMAGE_ONLY") {
+		return []string{envStr("WS_IMAGE_ONLY_VIEW", "front")}
+	}
+	return viewNames
+}

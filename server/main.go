@@ -102,7 +102,7 @@ func main() {
 		}
 		if strings.HasSuffix(id, "/preview.png") {
 			id = strings.TrimSuffix(id, "/preview.png")
-			http.ServeFile(w, r, filepath.Join(outputDir, id, "views", "front", "generated_rgb.png"))
+			http.ServeFile(w, r, previewPath(filepath.Join(outputDir, id)))
 			return
 		}
 

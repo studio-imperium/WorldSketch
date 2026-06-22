@@ -32,3 +32,14 @@ func envStr(key, def string) string {
 	}
 	return def
 }
+
+func envBool(key string) bool {
+	return envInt(key, 0) != 0
+}
+
+func envBoolDefault(key string, def bool) bool {
+	if _, ok := os.LookupEnv(key); !ok {
+		return def
+	}
+	return envBool(key)
+}

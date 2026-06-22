@@ -121,7 +121,8 @@ def handler(event):
     if "scene" not in payload or "views" not in payload:
         return {"error": "input must include 'scene' and 'views'"}
 
-    ensure_comfy()
+    if os.environ.get("WS_IMAGEGEN") != "syncmvd":
+        ensure_comfy()
     job_dir = f"/tmp/ws-{uuid.uuid4().hex}"
     try:
         stage_inputs(job_dir, payload)
@@ -138,7 +139,9 @@ def handler(event):
 
         job_path = pathlib.Path(job_dir)
         splat = job_path / "world.splat"
-        if not splat.exists():
+        image_only = os.environ.get("WS_IMAGE_ONLY", "0") not in ("", "0", "false", "False")
+        point_cloud_only = os.environ.get("WS_POINT_CLOUD_ONLY", "0") not in ("", "0", "false", "False")
+        if not splat.exists() and not (image_only or point_cloud_only):
             return {"error": "no world.splat produced", "log": proc.stdout[-6000:]}
 
         result_url = payload.get("resultUrl")
@@ -155,8 +158,11 @@ def handler(event):
             return {"status": "done", "bytes": len(data), "bundle": True}
 
         # No callback URL: return inline (only viable once artifacts are small, e.g. .spz).
-        data = splat.read_bytes()
-        return {"status": "done", "splat_b64": base64.b64encode(data).decode()}
+        if splat.exists():
+            data = splat.read_bytes()
+            return {"status": "done", "splat_b64": base64.b64encode(data).decode()}
+        bundle = write_result_bundle(job_dir)
+        return {"status": "done", "bundle_b64": base64.b64encode(bundle.read_bytes()).decode()}
     finally:
         subprocess.run(["rm", "-rf", job_dir])
 

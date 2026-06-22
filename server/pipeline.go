@@ -12,6 +12,10 @@ func RunPipeline(dir string, scene Scene, status func(string)) error {
 	if err := runImageGen(dir, scene.Prompt); err != nil {
 		return err
 	}
+	if envBool("WS_IMAGE_ONLY") {
+		status("image-only complete")
+		return nil
+	}
 
 	status("estimating depth")
 	RunDepth(dir)
@@ -22,6 +26,10 @@ func RunPipeline(dir string, scene Scene, status func(string)) error {
 		if err := WritePLY(scene, plyPath, SeedFromString(filepath.Base(dir))); err != nil {
 			return err
 		}
+	}
+	if envBool("WS_POINT_CLOUD_ONLY") {
+		status("point-cloud-only complete")
+		return nil
 	}
 
 	status("training splat")

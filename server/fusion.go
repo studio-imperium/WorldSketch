@@ -28,7 +28,9 @@ func WritePLYFromViews(scene Scene, dir, path string) error {
 
 	points = dedupe(points, envFloat("WS_DEDUPE", 0.015))
 	deduped := len(points)
-	points = cullUnsupportedPoints(points, scene.Primitives)
+	if envBoolDefault("WS_PRIMITIVE_CULL", true) {
+		points = cullUnsupportedPoints(points, scene.Primitives)
+	}
 	supported := len(points)
 	points = cullSparsePoints(points, envFloat("WS_SPARSE_VOXEL", 0.1), envInt("WS_SPARSE_MIN_NEIGHBORS", 4))
 	stats := fmt.Sprintf("deduped_points=%d\nprimitive_supported_points=%d\nfiltered_points=%d\nprimitive_culled_points=%d\nsparse_culled_points=%d\n", deduped, supported, len(points), deduped-supported, supported-len(points))

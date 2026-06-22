@@ -98,6 +98,17 @@ func (s *Store) Run(id string) {
 		return
 	}
 	s.setPreview(id)
+	if envBool("WS_IMAGE_ONLY") {
+		s.mu.Lock()
+		job := s.jobs[id]
+		job.Status = "done"
+		job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
+		job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
+		job.PreviewURL = "/api/jobs/" + id + "/preview.png"
+		job.UpdatedAt = time.Now()
+		s.mu.Unlock()
+		return
+	}
 
 	s.set(id, "estimating depth", "")
 	RunDepth(dir)
@@ -112,6 +123,18 @@ func (s *Store) Run(id string) {
 	}
 	s.setPLY(id)
 	s.setBundle(id)
+	if envBool("WS_POINT_CLOUD_ONLY") {
+		s.mu.Lock()
+		job := s.jobs[id]
+		job.Status = "done"
+		job.PlyURL = "/api/jobs/" + id + "/world.ply"
+		job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
+		job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
+		job.PreviewURL = "/api/jobs/" + id + "/preview.png"
+		job.UpdatedAt = time.Now()
+		s.mu.Unlock()
+		return
+	}
 
 	s.set(id, "training splat", "")
 	if err := RunSplatTraining(dir); err != nil {
@@ -188,6 +211,14 @@ func (s *Store) setPreview(id string) {
 	job.UpdatedAt = time.Now()
 }
 
+func previewPath(dir string) string {
+	view := "front"
+	if envBool("WS_IMAGE_ONLY") {
+		view = envStr("WS_IMAGE_ONLY_VIEW", "front")
+	}
+	return filepath.Join(dir, "views", view, "generated_rgb.png")
+}
+
 // runRemote submits the job to the RunPod serverless worker and waits for it to
 // finish. The worker PUTs world.splat back to a one-time callback URL (handled in
 // main.go), which marks the job done; we poll RunPod only to surface failures.
@@ -241,7 +272,7 @@ func (s *Store) runRemote(id, dir string, scene Scene) {
 	}
 }
 
-// markDone is called by the result callback once world.splat has been received.
+// markDone is called by the result callback once the worker result bundle has been received.
 func (s *Store) markDone(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -250,13 +281,18 @@ func (s *Store) markDone(id string) {
 		return
 	}
 	job.Status = "done"
-	job.SplatURL = "/api/jobs/" + id + "/world.splat"
 	job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
+	if fileExists(filepath.Join(s.root, id, "world.splat")) {
+		job.SplatURL = "/api/jobs/" + id + "/world.splat"
+	}
 	if fileExists(filepath.Join(s.root, id, "world.ply")) {
 		job.PlyURL = "/api/jobs/" + id + "/world.ply"
 		job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
 	}
-	if fileExists(filepath.Join(s.root, id, "views", "front", "generated_rgb.png")) {
+	if job.BundleURL == "" {
+		job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
+	}
+	if fileExists(previewPath(filepath.Join(s.root, id))) {
 		job.PreviewURL = "/api/jobs/" + id + "/preview.png"
 	}
 	job.UpdatedAt = time.Now()

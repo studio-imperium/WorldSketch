@@ -74,6 +74,7 @@ sun.position.set(4, 7, 3)
 scene.add(sun)
 
 const bounds = new THREE.Box3(new THREE.Vector3(-10, 0, -10), new THREE.Vector3(10, 5, 10))
+const baseplateScale = 0.75
 
 const els = {
 	status: document.getElementById("status"),
@@ -85,6 +86,7 @@ const els = {
 	downloadPly: document.getElementById("download_ply_btn"),
 	downloadCollision: document.getElementById("download_collision_btn"),
 	downloadBundle: document.getElementById("download_bundle_btn"),
+	downloadCaptures: document.getElementById("download_captures_btn"),
 	generateModal: document.getElementById("generate_modal"),
 	generateForm: document.getElementById("generate_form"),
 	cancelGenerate: document.getElementById("cancel_generate_btn"),
@@ -467,8 +469,7 @@ async function generate(prompt) {
 	setStatus("Capturing views")
 
 	try {
-		const captureSubjects = primitives
-		const views = await captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected, captureSubjects)
+		const views = await captureCurrentViews()
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
 		if (job.plyUrl) els.downloadPly.href = job.plyUrl
 		if (job.collisionUrl) els.downloadCollision.href = job.collisionUrl
@@ -490,6 +491,124 @@ async function generate(prompt) {
 	}
 }
 
+async function captureCurrentViews() {
+	const captureSubjects = primitives
+	return captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected, captureSubjects)
+}
+
+async function downloadCaptures() {
+	if (!primitives.some(primitive => !primitive.userData.locked)) {
+		setStatus("Add at least one primitive.")
+		return
+	}
+
+	els.downloadCaptures.disabled = true
+	setStatus("Capturing views")
+	try {
+		const views = await captureCurrentViews()
+		const files = views.map(view => ({ name: `${view.name}_rgb.png`, blob: view.rgb }))
+		downloadBlob(await createZip(files), "worldsketch-rgb-captures.zip")
+		setStatus(`Downloaded ${views.length} RGB captures`)
+	} catch (err) {
+		setStatus(err.message)
+	} finally {
+		els.downloadCaptures.disabled = false
+	}
+}
+
+function downloadBlob(blob, filename) {
+	const url = URL.createObjectURL(blob)
+	const link = document.createElement("a")
+	link.href = url
+	link.download = filename
+	document.body.appendChild(link)
+	link.click()
+	link.remove()
+	setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function createZip(files) {
+	const encoder = new TextEncoder()
+	const localParts = []
+	const centralParts = []
+	let offset = 0
+
+	for (const file of files) {
+		const nameBytes = encoder.encode(file.name)
+		const data = new Uint8Array(await file.blob.arrayBuffer())
+		const crc = crc32(data)
+		const localHeader = zipLocalHeader(nameBytes, data.length, crc)
+		const centralHeader = zipCentralHeader(nameBytes, data.length, crc, offset)
+
+		localParts.push(localHeader, data)
+		centralParts.push(centralHeader)
+		offset += localHeader.length + data.length
+	}
+
+	const centralSize = centralParts.reduce((total, part) => total + part.length, 0)
+	return new Blob(
+		[...localParts, ...centralParts, zipEndRecord(files.length, centralSize, offset)],
+		{ type: "application/zip" },
+	)
+}
+
+function zipLocalHeader(nameBytes, size, crc) {
+	const header = new Uint8Array(30 + nameBytes.length)
+	const view = new DataView(header.buffer)
+	view.setUint32(0, 0x04034b50, true)
+	view.setUint16(4, 20, true)
+	view.setUint16(8, 0, true)
+	view.setUint32(14, crc, true)
+	view.setUint32(18, size, true)
+	view.setUint32(22, size, true)
+	view.setUint16(26, nameBytes.length, true)
+	header.set(nameBytes, 30)
+	return header
+}
+
+function zipCentralHeader(nameBytes, size, crc, offset) {
+	const header = new Uint8Array(46 + nameBytes.length)
+	const view = new DataView(header.buffer)
+	view.setUint32(0, 0x02014b50, true)
+	view.setUint16(4, 20, true)
+	view.setUint16(6, 20, true)
+	view.setUint16(10, 0, true)
+	view.setUint32(16, crc, true)
+	view.setUint32(20, size, true)
+	view.setUint32(24, size, true)
+	view.setUint16(28, nameBytes.length, true)
+	view.setUint32(42, offset, true)
+	header.set(nameBytes, 46)
+	return header
+}
+
+function zipEndRecord(fileCount, centralSize, centralOffset) {
+	const header = new Uint8Array(22)
+	const view = new DataView(header.buffer)
+	view.setUint32(0, 0x06054b50, true)
+	view.setUint16(8, fileCount, true)
+	view.setUint16(10, fileCount, true)
+	view.setUint32(12, centralSize, true)
+	view.setUint32(16, centralOffset, true)
+	return header
+}
+
+function crc32(data) {
+	let crc = 0xffffffff
+	for (const byte of data) {
+		crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff]
+	}
+	return (crc ^ 0xffffffff) >>> 0
+}
+
+const crcTable = Array.from({ length: 256 }, (_, index) => {
+	let value = index
+	for (let bit = 0; bit < 8; bit++) {
+		value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
+	}
+	return value >>> 0
+})
+
 for (const button of document.querySelectorAll("[data-tool]")) {
 	button.addEventListener("click", () => setActiveTool(button.dataset.tool))
 }
@@ -502,6 +621,8 @@ els.generate.addEventListener("click", () => {
 	els.generateModal.showModal()
 	els.scenePrompt.focus()
 })
+
+els.downloadCaptures.addEventListener("click", downloadCaptures)
 
 els.cancelGenerate.addEventListener("click", () => els.generateModal.close())
 
@@ -821,7 +942,7 @@ addPrimitive("box", {
 	type: "box",
 	position: [0, 0.05, 0],
 	rotation: [0, 0, 0],
-	scale: [bounds.max.x - bounds.min.x, 0.1, bounds.max.z - bounds.min.z],
+	scale: [(bounds.max.x - bounds.min.x) * baseplateScale, 0.1, (bounds.max.z - bounds.min.z) * baseplateScale],
 	color: "#587553",
 	locked: true,
 })
