@@ -8,9 +8,18 @@ import "path/filepath"
 // (`worldsketch-server -job <dir>`) where there's no HTTP store. status() is called
 // before each stage for logging.
 func RunPipeline(dir string, scene Scene, status func(string)) error {
+	if envBool("WS_RETRAIN_ONLY") {
+		status("training splat")
+		return RunSplatTraining(dir)
+	}
+
 	status("generating images")
 	if err := runImageGen(dir, scene.Prompt); err != nil {
 		return err
+	}
+	if envBool("WS_IMAGE_ONLY") {
+		status("image-only complete")
+		return nil
 	}
 
 	status("estimating depth")
@@ -31,6 +40,10 @@ func RunPipeline(dir string, scene Scene, status func(string)) error {
 				return err
 			}
 		}
+	}
+	if envBool("WS_POINT_CLOUD_ONLY") {
+		status("point-cloud-only complete")
+		return nil
 	}
 
 	status("training splat")

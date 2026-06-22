@@ -59,6 +59,28 @@ func main() {
 		writeJSON(w, http.StatusAccepted, map[string]string{"jobId": job.ID})
 	})
 
+	http.HandleFunc("/api/retrain", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
+
+		bundle, err := readRetrainRequest(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		job, err := store.CreateRetrain(bundle)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		go store.RunRetrain(job.ID)
+		writeJSON(w, http.StatusAccepted, map[string]string{"jobId": job.ID})
+	})
+
 	http.HandleFunc("/api/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
 
@@ -108,7 +130,7 @@ func main() {
 		}
 		if strings.HasSuffix(id, "/preview.png") {
 			id = strings.TrimSuffix(id, "/preview.png")
-			http.ServeFile(w, r, filepath.Join(outputDir, id, "views", "front", "generated_rgb.png"))
+			http.ServeFile(w, r, previewPath(filepath.Join(outputDir, id)))
 			return
 		}
 
@@ -243,6 +265,21 @@ func readUploadedView(r *http.Request, name string) UploadedView {
 	camera, _ := readMultipartFile(r, name+"_camera")
 	mask, _ := readMultipartFile(r, name+"_mask") // present only on expansion submits
 	return UploadedView{Name: name, RGB: rgb, Depth: depth, CameraJSON: camera, Mask: mask}
+}
+
+func readRetrainRequest(r *http.Request) ([]byte, error) {
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
+		return nil, err
+	}
+	file, _, err := r.FormFile("bundle")
+	if err != nil {
+		file, _, err = r.FormFile("training_bundle")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("bundle file is required")
+	}
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 func readMultipartFile(r *http.Request, field string) ([]byte, error) {

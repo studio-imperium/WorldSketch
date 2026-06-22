@@ -21,6 +21,22 @@ export async function generateScene(scene, views, onStatus) {
 	return poll(jobId, onStatus)
 }
 
+export async function retrainBundle(file, onStatus) {
+	onStatus("Uploading bundle")
+
+	const body = new FormData()
+	body.append("bundle", file, file.name || "worldsketch-training-bundle.zip")
+
+	const res = await fetch("/api/retrain", {
+		method: "POST",
+		body,
+	})
+	if (!res.ok) throw new Error(await res.text())
+
+	const { jobId } = await res.json()
+	return poll(jobId, onStatus)
+}
+
 async function poll(jobId, onStatus) {
 	while (true) {
 		const res = await fetch(`/api/jobs/${jobId}`)

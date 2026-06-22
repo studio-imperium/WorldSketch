@@ -17,12 +17,21 @@ Expected input:
                   "mask"(b64 png, expansion only)}, ...],
       "resultUrl": "https://coordinator/.../result"   # optional; PUT target
     }
+
+Retrain input:
+    {
+      "mode": "retrain",
+      "bundleUrl": "https://coordinator/.../training-bundle.zip",
+      "resultUrl": "https://coordinator/.../result"
+    }
 """
 
 import base64
+import io
 import json
 import os
 import pathlib
+import posixpath
 import subprocess
 import time
 import urllib.request
@@ -121,6 +130,47 @@ def stage_inputs(job_dir, payload):
             (view_dir / "new_mask.png").write_bytes(base64.b64decode(view["mask"]))
 
 
+def is_job_artifact_path(name):
+    return name in ("scene.json", "world.ply", "collisions.json", "world.splat") or name.startswith("views/")
+
+
+def extract_training_bundle(job_dir, data):
+    root = pathlib.Path(job_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(io.BytesIO(data)) as zf:
+        for info in zf.infolist():
+            clean = posixpath.normpath(info.filename.replace("\\", "/"))
+            if clean.startswith("/") or clean == ".." or clean.startswith("../"):
+                raise ValueError("unsafe path in training bundle")
+            if clean.startswith("job/"):
+                rel = clean.removeprefix("job/")
+            elif is_job_artifact_path(clean):
+                rel = clean
+            else:
+                continue
+            if not rel or rel == ".":
+                continue
+            target = root / pathlib.PurePosixPath(rel)
+            if info.is_dir():
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(zf.read(info))
+    if not (root / "world.ply").exists():
+        raise ValueError("training bundle must contain job/world.ply")
+
+
+def stage_retrain_inputs(job_dir, payload):
+    if "bundleUrl" in payload:
+        with urllib.request.urlopen(payload["bundleUrl"], timeout=180) as res:
+            extract_training_bundle(job_dir, res.read())
+        return
+    if "bundle_b64" in payload:
+        extract_training_bundle(job_dir, base64.b64decode(payload["bundle_b64"]))
+        return
+    raise ValueError("retrain input must include bundleUrl or bundle_b64")
+
+
 def write_result_bundle(job_dir):
     path = pathlib.Path(job_dir)
     bundle = path / "worldsketch-result.zip"
@@ -138,20 +188,29 @@ def write_result_bundle(job_dir):
 
 def handler(event):
     payload = event.get("input") or {}
-    if "scene" not in payload or "views" not in payload:
+    mode = payload.get("mode", "generate")
+    if mode != "retrain" and ("scene" not in payload or "views" not in payload):
         return {"error": "input must include 'scene' and 'views'"}
 
-    ensure_comfy()
+    if mode != "retrain" and os.environ.get("WS_IMAGEGEN") != "syncmvd":
+        ensure_comfy()
     job_dir = f"/tmp/ws-{uuid.uuid4().hex}"
     try:
         try:
-            stage_inputs(job_dir, payload)
+            if mode == "retrain":
+                stage_retrain_inputs(job_dir, payload)
+            else:
+                stage_inputs(job_dir, payload)
         except Exception as exc:
             return {"error": f"bad input: {exc}"}
 
+        env = os.environ.copy()
+        if mode == "retrain":
+            env["WS_RETRAIN_ONLY"] = "1"
         proc = subprocess.run(
             [SERVER_BIN, "-job", job_dir],
             cwd=SERVER_DIR,
+            env=env,
             capture_output=True,
             text=True,
         )
@@ -161,7 +220,9 @@ def handler(event):
 
         job_path = pathlib.Path(job_dir)
         splat = job_path / "world.splat"
-        if not splat.exists():
+        image_only = os.environ.get("WS_IMAGE_ONLY", "0") not in ("", "0", "false", "False")
+        point_cloud_only = os.environ.get("WS_POINT_CLOUD_ONLY", "0") not in ("", "0", "false", "False")
+        if not splat.exists() and not (image_only or point_cloud_only):
             return {"error": "no world.splat produced", "log": proc.stdout[-6000:]}
 
         result_url = payload.get("resultUrl")
@@ -178,8 +239,11 @@ def handler(event):
             return {"status": "done", "bytes": len(data), "bundle": True}
 
         # No callback URL: return inline (only viable once artifacts are small, e.g. .spz).
-        data = splat.read_bytes()
-        return {"status": "done", "splat_b64": base64.b64encode(data).decode()}
+        if splat.exists():
+            data = splat.read_bytes()
+            return {"status": "done", "splat_b64": base64.b64encode(data).decode()}
+        bundle = write_result_bundle(job_dir)
+        return {"status": "done", "bundle_b64": base64.b64encode(bundle.read_bytes()).decode()}
     finally:
         subprocess.run(["rm", "-rf", job_dir])
 

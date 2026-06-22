@@ -1,6 +1,6 @@
 import * as THREE from "three"
 import { createOrbit } from "/scripts/controls.js"
-import { generateScene } from "/scripts/api.js"
+import { generateScene, retrainBundle } from "/scripts/api.js"
 import { captureViews } from "/scripts/capture.js"
 import { createPrimitive, round, serializePrimitive } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
@@ -75,6 +75,7 @@ sun.position.set(4, 7, 3)
 scene.add(sun)
 
 const bounds = new THREE.Box3(new THREE.Vector3(-10, 0, -10), new THREE.Vector3(10, 5, 10))
+const baseplateScale = 0.75
 
 // World expansion: new plots are ground tiles laid down next to the current one.
 const tileSize = bounds.max.x - bounds.min.x // 20×20, matches the starting ground
@@ -103,6 +104,8 @@ const els = {
 	downloadPly: document.getElementById("download_ply_btn"),
 	downloadCollision: document.getElementById("download_collision_btn"),
 	downloadBundle: document.getElementById("download_bundle_btn"),
+	downloadCaptures: document.getElementById("download_captures_btn"),
+	retrainBundle: document.getElementById("retrain_bundle_input"),
 	generateModal: document.getElementById("generate_modal"),
 	generateForm: document.getElementById("generate_form"),
 	generateTitle: document.getElementById("generate_title"),
@@ -1015,7 +1018,7 @@ function clearWorld() {
 		type: "box",
 		position: [0, 0.05, 0],
 		rotation: [0, 0, 0],
-		scale: [bounds.max.x - bounds.min.x, 0.1, bounds.max.z - bounds.min.z],
+		scale: [(bounds.max.x - bounds.min.x) * baseplateScale, 0.1, (bounds.max.z - bounds.min.z) * baseplateScale],
 		color: "#587553",
 		locked: true,
 		isGround: true,
@@ -1061,6 +1064,145 @@ async function fetchBackendStatus() {
 	}
 }
 
+async function retrainUploadedBundle(file) {
+	if (!file) return
+
+	els.generate.disabled = true
+	els.retrainBundle.disabled = true
+	showWorldLoading()
+	hideWorldButtons()
+	setStatus("Uploading bundle")
+
+	try {
+		const job = await retrainBundle(file, setStatus)
+		applyJobResult(job)
+	} catch (err) {
+		showWorldError(err.message)
+	} finally {
+		els.generate.disabled = false
+		els.retrainBundle.disabled = false
+		els.retrainBundle.value = ""
+	}
+}
+
+async function captureCurrentViews() {
+	const captureSubjects = primitives
+	return captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected, captureSubjects)
+}
+
+async function downloadCaptures() {
+	if (!primitives.some(primitive => !primitive.userData.locked)) {
+		setStatus("Add at least one primitive.")
+		return
+	}
+
+	els.downloadCaptures.disabled = true
+	setStatus("Capturing views")
+	try {
+		const views = await captureCurrentViews()
+		const files = views.map(view => ({ name: `${view.name}_rgb.png`, blob: view.rgb }))
+		downloadBlob(await createZip(files), "worldsketch-rgb-captures.zip")
+		setStatus(`Downloaded ${views.length} RGB captures`)
+	} catch (err) {
+		setStatus(err.message)
+	} finally {
+		els.downloadCaptures.disabled = false
+	}
+}
+
+function downloadBlob(blob, filename) {
+	const url = URL.createObjectURL(blob)
+	const link = document.createElement("a")
+	link.href = url
+	link.download = filename
+	document.body.appendChild(link)
+	link.click()
+	link.remove()
+	setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+async function createZip(files) {
+	const encoder = new TextEncoder()
+	const localParts = []
+	const centralParts = []
+	let offset = 0
+
+	for (const file of files) {
+		const nameBytes = encoder.encode(file.name)
+		const data = new Uint8Array(await file.blob.arrayBuffer())
+		const crc = crc32(data)
+		const localHeader = zipLocalHeader(nameBytes, data.length, crc)
+		const centralHeader = zipCentralHeader(nameBytes, data.length, crc, offset)
+
+		localParts.push(localHeader, data)
+		centralParts.push(centralHeader)
+		offset += localHeader.length + data.length
+	}
+
+	const centralSize = centralParts.reduce((total, part) => total + part.length, 0)
+	return new Blob(
+		[...localParts, ...centralParts, zipEndRecord(files.length, centralSize, offset)],
+		{ type: "application/zip" },
+	)
+}
+
+function zipLocalHeader(nameBytes, size, crc) {
+	const header = new Uint8Array(30 + nameBytes.length)
+	const view = new DataView(header.buffer)
+	view.setUint32(0, 0x04034b50, true)
+	view.setUint16(4, 20, true)
+	view.setUint16(8, 0, true)
+	view.setUint32(14, crc, true)
+	view.setUint32(18, size, true)
+	view.setUint32(22, size, true)
+	view.setUint16(26, nameBytes.length, true)
+	header.set(nameBytes, 30)
+	return header
+}
+
+function zipCentralHeader(nameBytes, size, crc, offset) {
+	const header = new Uint8Array(46 + nameBytes.length)
+	const view = new DataView(header.buffer)
+	view.setUint32(0, 0x02014b50, true)
+	view.setUint16(4, 20, true)
+	view.setUint16(6, 20, true)
+	view.setUint16(10, 0, true)
+	view.setUint32(16, crc, true)
+	view.setUint32(20, size, true)
+	view.setUint32(24, size, true)
+	view.setUint16(28, nameBytes.length, true)
+	view.setUint32(42, offset, true)
+	header.set(nameBytes, 46)
+	return header
+}
+
+function zipEndRecord(fileCount, centralSize, centralOffset) {
+	const header = new Uint8Array(22)
+	const view = new DataView(header.buffer)
+	view.setUint32(0, 0x06054b50, true)
+	view.setUint16(8, fileCount, true)
+	view.setUint16(10, fileCount, true)
+	view.setUint32(12, centralSize, true)
+	view.setUint32(16, centralOffset, true)
+	return header
+}
+
+function crc32(data) {
+	let crc = 0xffffffff
+	for (const byte of data) {
+		crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 0xff]
+	}
+	return (crc ^ 0xffffffff) >>> 0
+}
+
+const crcTable = Array.from({ length: 256 }, (_, index) => {
+	let value = index
+	for (let bit = 0; bit < 8; bit++) {
+		value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
+	}
+	return value >>> 0
+})
+
 for (const button of document.querySelectorAll("[data-tool]")) {
 	button.addEventListener("click", () => setActiveTool(button.dataset.tool))
 }
@@ -1083,6 +1225,10 @@ if (els.clearWorld) els.clearWorld.addEventListener("click", clearWorld)
 if (els.matchPlot) els.matchPlot.addEventListener("change", () => {
 	matchPlotId = els.matchPlot.value === "" ? null : Number(els.matchPlot.value)
 	syncBuildUi()
+})
+if (els.downloadCaptures) els.downloadCaptures.addEventListener("click", downloadCaptures)
+if (els.retrainBundle) els.retrainBundle.addEventListener("change", () => {
+	retrainUploadedBundle(els.retrainBundle.files?.[0])
 })
 
 els.generateForm.addEventListener("submit", (event) => {
@@ -1445,7 +1591,7 @@ if (loadState()) {
 		type: "box",
 		position: [0, 0.05, 0],
 		rotation: [0, 0, 0],
-		scale: [bounds.max.x - bounds.min.x, 0.1, bounds.max.z - bounds.min.z],
+		scale: [(bounds.max.x - bounds.min.x) * baseplateScale, 0.1, (bounds.max.z - bounds.min.z) * baseplateScale],
 		color: "#587553",
 		locked: true,
 		isGround: true,

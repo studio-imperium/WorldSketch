@@ -27,7 +27,7 @@ func RunComfy(dir, scenePrompt string) error {
 
 	control, _ := firstControlNet()
 	depthControl := firstDepthControlNet()
-	saveWorkflowFiles(dir, ckpt, control)
+	saveWorkflowFiles(dir, ckpt, control, depthControl)
 
 	if err := generateBatchedViews(dir, ckpt, control, depthControl, scenePrompt); err != nil {
 		writeLog(dir, "comfy.log", err.Error())
@@ -158,7 +158,7 @@ type viewJob struct {
 // keeping the GPU saturated instead of paying per-view setup and HTTP round-trips.
 func generateBatchedViews(dir, ckpt, control, depthControl, scenePrompt string) error {
 	var jobs []viewJob
-	for _, name := range viewNames {
+	for _, name := range imageGenViewNames() {
 		viewDir := filepath.Join(dir, "views", name)
 		in := filepath.Join(viewDir, "primitive_rgb.png")
 		if _, err := os.Stat(in); err != nil {

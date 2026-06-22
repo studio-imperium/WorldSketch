@@ -2,10 +2,12 @@ package main
 
 import (
 	"archive/zip"
+	"bytes"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 )
@@ -28,6 +30,71 @@ func ServeTrainingBundle(w http.ResponseWriter, r *http.Request, dir string) {
 	addFile(zipper, "../scripts/runpod-train-bundle.sh", "runpod-train-bundle.sh")
 	addText(zipper, "run_train.sh", runTrainScript())
 	addText(zipper, "README.md", bundleReadme())
+}
+
+func ExtractTrainingBundle(dir string, data []byte) (int, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return 0, err
+	}
+
+	total := 0
+	for _, file := range reader.File {
+		name := path.Clean(strings.ReplaceAll(file.Name, "\\", "/"))
+		if path.IsAbs(name) || name == ".." || strings.HasPrefix(name, "../") {
+			return total, os.ErrPermission
+		}
+
+		rel := ""
+		if strings.HasPrefix(name, "job/") {
+			rel = strings.TrimPrefix(name, "job/")
+		} else if isJobArtifactPath(name) {
+			rel = name
+		}
+		if rel == "" || rel == "." {
+			continue
+		}
+
+		target := filepath.Join(dir, filepath.FromSlash(rel))
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return total, err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return total, err
+		}
+
+		src, err := file.Open()
+		if err != nil {
+			return total, err
+		}
+		dst, err := os.Create(target)
+		if err != nil {
+			src.Close()
+			return total, err
+		}
+		n, copyErr := io.Copy(dst, src)
+		closeErr := dst.Close()
+		src.Close()
+		total += int(n)
+		if copyErr != nil {
+			return total, copyErr
+		}
+		if closeErr != nil {
+			return total, closeErr
+		}
+	}
+	return total, nil
+}
+
+func isJobArtifactPath(name string) bool {
+	switch name {
+	case "scene.json", "world.ply", "collisions.json", "world.splat":
+		return true
+	}
+	return strings.HasPrefix(name, "views/")
 }
 
 func addDir(zipper *zip.Writer, dir string, prefix string) {

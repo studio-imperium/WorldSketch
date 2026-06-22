@@ -176,10 +176,15 @@ locally). Defaults in `.env.example` and read in `server/config.go`.
 | Var | Default | Effect |
 |---|---|---|
 | `WS_STEPS` / `WS_CFG` / `WS_DENOISE` | 7 / 6.5 / 0.5 | KSampler steps / guidance / img2img strength |
+| `WS_IMAGE_ONLY` / `WS_IMAGE_ONLY_VIEW` | 0 / front | stop after image generation; when enabled, only generate this single view |
+| `WS_RETRAIN_ONLY` | 0 | worker mode used by retrain uploads; skips image generation, depth, and fusion, then trains from an existing bundle/job dir |
 | `WS_CANNY_STRENGTH` / `WS_DEPTH_STRENGTH` | 0.9 / 0.6 | ControlNet conditioning strengths |
 | `WS_FUSION_STRIDE` | 1 | pixel stride for fusing each generated view (higher = faster/sparser) |
 | `WS_DEDUPE` | 0.015 | point-cloud dedupe radius (smaller = denser) |
 | `WS_SPARSE_VOXEL` / `WS_SPARSE_MIN_NEIGHBORS` | 0.1 / 4 | sparse-point cull (lower neighbors = keep more) |
+| `WS_POINT_CLOUD_ONLY` | 0 | stop after fused `world.ply`; skips gsplat training |
+| `WS_PRIMITIVE_CULL` | 1 | primitive support/color culling toggle; set `0` to keep points even when not near primitives |
+| `WS_PRIMITIVE_SUPPORT_MARGIN` | 0.1 | primitive shape-cull margin in world units (higher = keep points farther outside primitive surfaces) |
 | `WS_COLOR_CULL_THRESHOLD` | 0.8 | how aggressively to drop off-color points |
 | `WS_SPLAT_STEPS` / `WS_SPLAT_SIZE` | 3000 / 512 | gsplat optimization steps / render target resolution |
 | `WS_SPLAT_MAX_POINTS` | 0 | gaussian budget; 0 means no growth beyond fused PLY count |

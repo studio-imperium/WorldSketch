@@ -252,9 +252,11 @@ def load_pipeline(args, device, dtype):
     return pipe
 
 
-def gather_views(job, size, latent):
+def gather_views(job, size, latent, only_view=None):
     views = []
     for name in VIEW_NAMES:
+        if only_view and name != only_view:
+            continue
         d = job / "views" / name
         if not (d / "primitive_rgb.png").exists():
             continue
@@ -537,7 +539,7 @@ def main():
     device, dtype = "cuda", torch.float16
     pipe = load_pipeline(args, device, dtype)
     _set_memory_batch(pipe, args)
-    views = gather_views(job, args.size, args.size // 8)
+    views = gather_views(job, args.size, args.size // 8, args.view)
     if not views:
         raise SystemExit("no views found")
     generator = torch.Generator(device=device).manual_seed(args.seed)
@@ -594,6 +596,7 @@ def parse_args():
     p.add_argument("--sync-voxel", type=float, default=0.25, dest="sync_voxel")
     p.add_argument("--sync-taper", type=float, default=0.7, dest="sync_taper")
     p.add_argument("--sync-batch", type=int, default=1, dest="sync_batch")
+    p.add_argument("--view", default=None)
     return p.parse_args()
 
 

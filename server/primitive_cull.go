@@ -113,5 +113,5 @@ func primitiveHalfExtents(primitive Primitive) Vec3 {
 }
 
 func primitiveSupportMargin(primitive Primitive) float64 {
-	return 0.1
+	return envFloat("WS_PRIMITIVE_SUPPORT_MARGIN", 0.1)
 }
