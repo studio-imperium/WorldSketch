@@ -17,6 +17,7 @@ import importlib
 import importlib.util
 import sys
 import traceback
+import types
 import typing
 from pathlib import Path
 
@@ -47,6 +48,14 @@ def is_flash_attn_module(name):
     return any(name == prefix or name.startswith(prefix + ".") for prefix in FLASH_ATTN_MODULE_PREFIXES)
 
 
+def is_flash_attn_stub(name):
+    return name in {
+        "flash_attn",
+        "flash_attn.modules",
+        "flash_attn.modules.mha",
+    }
+
+
 def disable_flash_attn_detection():
     """Force HF/diffusers to use PyTorch SDPA instead of optional flash-attn.
 
@@ -60,6 +69,8 @@ def disable_flash_attn_detection():
     original_import_module = importlib.import_module
     original_import = builtins.__import__
 
+    install_flash_attn_stubs()
+
     visible = {
         name: bool(original_find_spec(name))
         for name in FLASH_ATTN_MODULE_PREFIXES
@@ -67,28 +78,44 @@ def disable_flash_attn_detection():
     print(f"[syncmvd] disabling flash-attn modules {visible}", flush=True)
 
     def find_spec_without_flash_attn(name, *args, **kwargs):
-        if is_flash_attn_module(name):
+        if is_flash_attn_module(name) and not is_flash_attn_stub(name):
             return None
         return original_find_spec(name, *args, **kwargs)
 
     def import_module_without_flash_attn(name, package=None):
-        if is_flash_attn_module(name):
+        if is_flash_attn_module(name) and not is_flash_attn_stub(name):
             raise ImportError(f"{name} disabled by WorldSketch")
         return original_import_module(name, package)
 
     def import_without_flash_attn(name, globals=None, locals=None, fromlist=(), level=0):
-        if level == 0 and is_flash_attn_module(name):
+        if level == 0 and is_flash_attn_module(name) and not is_flash_attn_stub(name):
             raise ImportError(f"{name} disabled by WorldSketch")
         return original_import(name, globals, locals, fromlist, level)
 
     for name in list(sys.modules):
-        if is_flash_attn_module(name):
+        if is_flash_attn_module(name) and not is_flash_attn_stub(name):
             del sys.modules[name]
 
     importlib.util.find_spec = find_spec_without_flash_attn
     importlib.import_module = import_module_without_flash_attn
     builtins.__import__ = import_without_flash_attn
     patch_torch_infer_schema_string_annotations()
+
+
+def install_flash_attn_stubs():
+    flash_attn = types.ModuleType("flash_attn")
+    modules = types.ModuleType("flash_attn.modules")
+    mha = types.ModuleType("flash_attn.modules.mha")
+    flash_attn.__path__ = []
+    modules.__path__ = []
+    mha.FlashCrossAttention = None
+    mha.FlashSelfAttention = None
+    flash_attn.modules = modules
+    modules.mha = mha
+    sys.modules["flash_attn"] = flash_attn
+    sys.modules["flash_attn.modules"] = modules
+    sys.modules["flash_attn.modules.mha"] = mha
+    print("[syncmvd] installed flash_attn.modules.mha stub", flush=True)
 
 
 def patch_torch_infer_schema_string_annotations():
