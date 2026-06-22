@@ -118,6 +118,29 @@ New env knobs (read where the pipeline runs, like the rest — `config.go`):
 | `WS_EXPAND_DENOISE` | 0.8 | img2img strength inside the new-object mask (higher than the 0.5 base — the masked region is a full repaint, the frozen region is untouched regardless) |
 | `WS_EXPAND_MASK_GROW` | 6 | px to dilate the mask so the new object blends into its seam instead of leaving a hard edge |
 
+## Shipped v1 — adjacent-plot tiling ("Add plot")
+
+The first interpretation built was object-level inpaint *within* one plot. The shipped
+UX is the one the user actually wanted: **extend the world with adjacent tiles.**
+
+- **+ Add plot** (editor) lays a fresh 20×20 ground tile next to the current plot
+  (directions cycle E/S/W/N), frames the camera on it, and freezes the previous plot
+  (locked + dimmed). Objects you build on the new tile are the delta.
+- **Generate** then runs the expansion: it frames + masks the new tile, sends `parent`
+  + the union `bounds` of all tiles, inpaints the tile's content, and fuses it onto the
+  parent `world.ply` (one merged world; each plot is also its own job/splat → "both"
+  outputs from the design Q).
+- **Server enabler:** fusion's keep-box was a hardcoded ±16, which would discard any tile
+  offset from origin. It's now `sceneCullBounds(scene)` — the authored bounds + margin —
+  so the keep-region grows with the world. (`TestSceneCullBounds`.)
+- **Vibe matching today** is style continuity — shared fixed seed, the parent's prompt
+  (reused when the expansion submit is blank), and the palette you reuse — plus the
+  parent edge being visible at the seam. It is **not** a pixel-seamless continuation:
+  because adjacent tiles need their own camera framing, the parent's generated views
+  don't pixel-align as frozen context the way same-frame object inpaint does. True
+  seam continuity (render the parent splat into the new cameras for aligned context) is
+  the next quality step.
+
 ## Client changes
 
 - After a successful generate, record `lastJobId` and mark every user primitive

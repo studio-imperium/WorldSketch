@@ -92,10 +92,14 @@ mode: `worldsketch-server -job <dir>` runs the pipeline once on a staged dir and
   `WS_DEDUPE`, `WS_SPARSE_*`, `WS_EXPAND_*`, …). Set them where the pipeline *runs*
   (RunPod env for serverless, `.env`/shell for local). No rebuild needed. See `.env.example`.
 - **World expansion** (`server/expand.go` + `inpaint.go`): a scene with a `parent` job id
-  grows that plot — new (non-`existing`) primitives are inpainted into the parent's frozen
-  views (masked img2img via a per-view `new_mask`) and fused onto the parent `world.ply`,
-  so the existing world is preserved and new objects are decorated to match. Local-only
-  for now. Design + model-optimisation research: [docs/world-expansion-plan.md](docs/world-expansion-plan.md).
+  grows that plot. In the editor, **+ Add plot** lays a new ground tile next to the current
+  one; objects built there are the new (non-`existing`) delta, masked per-view (`new_mask`),
+  inpainted to match the parent, and fused onto the parent `world.ply` (merged world; each
+  plot is also its own job/splat). Fusion's keep-region is **scene-bounds-aware**
+  (`sceneCullBounds`) so a tile offset from origin isn't culled — the client sends the union
+  bounds of all tiles. Local-only for now; seam context is approximate (style continuity via
+  shared seed/prompt/palette, not pixel-aligned). Design + research:
+  [docs/world-expansion-plan.md](docs/world-expansion-plan.md).
 - **Image-gen backend** is selected by `WS_IMAGEGEN` (`syncmvd` → diffusers path,
   else ComfyUI). See `server/syncmvd.go`.
 - **Python interpreter**: `WORLDSKETCH_PYTHON`, else `services/ml/.venv`, else `python3`.
