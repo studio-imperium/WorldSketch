@@ -14,6 +14,7 @@ primitive_depth_control), plus camera.json + primitive_depth for the geometry.
 import argparse
 import builtins
 import importlib
+import importlib.machinery
 import importlib.util
 import sys
 import traceback
@@ -69,16 +70,15 @@ def disable_flash_attn_detection():
     original_import_module = importlib.import_module
     original_import = builtins.__import__
 
-    install_flash_attn_stubs()
-
     visible = {
-        name: bool(original_find_spec(name))
+        name: bool(safe_find_spec(original_find_spec, name))
         for name in FLASH_ATTN_MODULE_PREFIXES
     }
     print(f"[syncmvd] disabling flash-attn modules {visible}", flush=True)
+    install_flash_attn_stubs()
 
     def find_spec_without_flash_attn(name, *args, **kwargs):
-        if is_flash_attn_module(name) and not is_flash_attn_stub(name):
+        if is_flash_attn_module(name):
             return None
         return original_find_spec(name, *args, **kwargs)
 
@@ -102,12 +102,22 @@ def disable_flash_attn_detection():
     patch_torch_infer_schema_string_annotations()
 
 
+def safe_find_spec(find_spec, name):
+    try:
+        return find_spec(name)
+    except (ImportError, ValueError):
+        return None
+
+
 def install_flash_attn_stubs():
     flash_attn = types.ModuleType("flash_attn")
     modules = types.ModuleType("flash_attn.modules")
     mha = types.ModuleType("flash_attn.modules.mha")
     flash_attn.__path__ = []
     modules.__path__ = []
+    flash_attn.__spec__ = importlib.machinery.ModuleSpec("flash_attn", loader=None, is_package=True)
+    modules.__spec__ = importlib.machinery.ModuleSpec("flash_attn.modules", loader=None, is_package=True)
+    mha.__spec__ = importlib.machinery.ModuleSpec("flash_attn.modules.mha", loader=None)
     mha.FlashCrossAttention = None
     mha.FlashSelfAttention = None
     flash_attn.modules = modules
