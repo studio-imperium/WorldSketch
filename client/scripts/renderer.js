@@ -1,7 +1,7 @@
 import * as THREE from "three"
 import { createOrbit } from "/scripts/controls.js"
 import { generateScene } from "/scripts/api.js"
-import { captureViews, captureFrame } from "/scripts/capture.js"
+import { captureViews } from "/scripts/capture.js"
 import { createPrimitive, round, serializePrimitive } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
 
@@ -628,13 +628,12 @@ async function generate(prompt) {
 
 	try {
 		const helpers = [placementPreview, rotationGizmo].filter(Boolean)
-		// Subjects = the non-locked pieces: during expansion that's the new plot tile + its
-		// objects, so the cameras frame the new tile (with the existing plot at the seam),
-		// and we render a mask of just those new meshes to inpaint + fuse.
-		const captureSubjects = primitives.filter(primitive => !primitive.userData.locked)
+		// Non-expansion frames the whole scene (main's ground+subject framing). Expansion
+		// frames just the new tile + its objects (and masks them) so it's decorated and
+		// fused as the delta, with the existing plot visible at the seam.
+		const captureSubjects = expanding ? newMeshes : primitives
 		const views = await captureViews(renderer, scene, camera, helpers, selected, captureSubjects, {
 			maskMeshes: expanding ? newMeshes : null,
-			frame: captureFrame(captureSubjects),
 		})
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
 		if (job.plyUrl) els.downloadPly.href = job.plyUrl

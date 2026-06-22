@@ -18,18 +18,16 @@ const names = [
 ]
 
 
-// subjects: meshes to auto-frame the 13 cameras around (main's dynamic framing).
+// subjects: meshes to auto-frame the 13 cameras around (ground tile + objects on it).
 // options.maskMeshes: during expansion, the *new* meshes — we also render a white-on-black
 //   mask of just those so the server inpaints + fuses only the delta.
-// options.frame: reuse a prior (parent) frame so an expansion's cameras line up pixel-for-
-//   pixel with the parent views it decorates onto.
 export async function captureViews(renderer, scene, camera, helpers, selected, subjects = [], options = {}) {
-	const { maskMeshes = null, frame: frameOverride = null } = options
+	const { maskMeshes = null } = options
 	const original = snapshot(camera, renderer)
 	const target = new THREE.WebGLRenderTarget(size, size)
 	const depthMaterial = createDepthMaterial(camera)
 	const views = []
-	const frame = frameOverride || captureFrame(subjects)
+	const frames = captureFrames(subjects)
 
 	const maskSet = maskMeshes && maskMeshes.length ? new Set(maskMeshes) : null
 	const maskMaterial = maskSet ? new THREE.MeshBasicMaterial({ color: 0xffffff }) : null
@@ -39,7 +37,7 @@ export async function captureViews(renderer, scene, camera, helpers, selected, s
 	for (const outline of selectionOutlines) outline.visible = false
 
 	for (const name of names) {
-		poseCamera(camera, name, frame)
+		poseCamera(camera, name, frames)
 		updateSky(scene, camera)
 		camera.aspect = 1
 		camera.updateProjectionMatrix()
@@ -92,39 +90,48 @@ async function captureMask(renderer, scene, camera, target, maskSet, maskMateria
 	return blob
 }
 
-function poseCamera(camera, name, frame) {
+function poseCamera(camera, name, frames) {
+	const frame = name === "top" ? frames.ground : frames.subject
 	const { target, radius } = frame
-	const zoom = 1.2
-	const straightDistance = Math.max(18, radius * 2.8) * zoom
-	const topDistance = Math.max(22, radius * 3.2) * zoom
-	const height = Math.max(4.8, radius * 0.55) * zoom
-	const highCornerDistance = Math.max(24, radius * 3.4) * zoom
-	const highCornerHeight = Math.max(8, radius * 0.9) * zoom
-	const lowCornerDistance = Math.max(24, radius * 3.4) * zoom
-	const lowCornerHeight = Math.max(2.2, radius * 0.2) * zoom
+	camera.near = 0.05
+	camera.fov = 50
+	const straightDistance = Math.max(18, radius * 2.8)
+	const height = Math.max(4.8, radius * 0.55)
+	const cornerDistance = Math.max(24, radius * 3.4)
+	const highCornerHeight = Math.max(8, radius * 0.9)
+	const lowCornerHeight = Math.max(2.2, radius * 0.2)
+	const topDistance = topFitDistance(camera, frame)
 	const offsets = {
 		front: [0, height, straightDistance],
 		back: [0, height, -straightDistance],
 		left: [-straightDistance, height, 0],
 		right: [straightDistance, height, 0],
 		top: [0.02, topDistance, 0],
-		corner_fl_high: [-highCornerDistance, highCornerHeight, highCornerDistance],
-		corner_fr_high: [highCornerDistance, highCornerHeight, highCornerDistance],
-		corner_bl_high: [-highCornerDistance, highCornerHeight, -highCornerDistance],
-		corner_br_high: [highCornerDistance, highCornerHeight, -highCornerDistance],
-		corner_fl_low: [-lowCornerDistance, lowCornerHeight, lowCornerDistance],
-		corner_fr_low: [lowCornerDistance, lowCornerHeight, lowCornerDistance],
-		corner_bl_low: [-lowCornerDistance, lowCornerHeight, -lowCornerDistance],
-		corner_br_low: [lowCornerDistance, lowCornerHeight, -lowCornerDistance],
+		corner_fl_high: [-cornerDistance, highCornerHeight, cornerDistance],
+		corner_fr_high: [cornerDistance, highCornerHeight, cornerDistance],
+		corner_bl_high: [-cornerDistance, highCornerHeight, -cornerDistance],
+		corner_br_high: [cornerDistance, highCornerHeight, -cornerDistance],
+		corner_fl_low: [-cornerDistance, lowCornerHeight, cornerDistance],
+		corner_fr_low: [cornerDistance, lowCornerHeight, cornerDistance],
+		corner_bl_low: [-cornerDistance, lowCornerHeight, -cornerDistance],
+		corner_br_low: [cornerDistance, lowCornerHeight, -cornerDistance],
 	}
 	camera.position.copy(target).add(new THREE.Vector3(...offsets[name]))
 	camera.lookAt(target)
-	camera.near = 0.05
-	camera.fov = 50
-	camera.far = Math.max(48, Math.max(straightDistance, topDistance, highCornerDistance, lowCornerDistance) + radius * 2 + 12)
+	camera.far = Math.max(48, Math.max(straightDistance, topDistance, cornerDistance) + radius * 2 + 12)
 }
 
-export function captureFrame(subjects) {
+// Split the framed subjects into the ground tile(s) and the objects on them. Keyed on
+// isGround (not locked) so a freshly-added, still-unlocked expansion tile is framed as
+// ground too — the top view fits the tile, the side views frame the objects.
+function captureFrames(subjects) {
+	return {
+		subject: captureFrame(subjects.filter(subject => !subject.userData.isGround)),
+		ground: captureFrame(subjects.filter(subject => subject.userData.isGround), 0),
+	}
+}
+
+function captureFrame(subjects, minTargetY = 1.2) {
 	const box = new THREE.Box3()
 	const subjectBox = new THREE.Box3()
 	let hasSubject = false
@@ -147,11 +154,21 @@ export function captureFrame(subjects) {
 
 	const target = box.getCenter(new THREE.Vector3())
 	const size = box.getSize(new THREE.Vector3())
-	target.y = Math.max(1.2, target.y)
+	target.y = Math.max(minTargetY, target.y)
 	return {
+		box: box.clone(),
 		target,
 		radius: Math.max(4, size.length() * 0.5),
 	}
+}
+
+function topFitDistance(camera, frame) {
+	const box = frame.box
+	if (!box) return Math.max(22, frame.radius * 3.2)
+	const width = Math.max(box.max.x - box.min.x, box.max.z - box.min.z)
+	const half = width * 0.5
+	const margin = 1.02
+	return Math.max(4, half * margin / Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5))
 }
 
 function cameraPayload(camera, name) {
