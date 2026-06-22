@@ -1,11 +1,17 @@
 # Secrets / local config
 .env
+.env.*
+!.env.example
 
 # OS
 .DS_Store
 
-# Python virtualenvs / caches
+# Python virtualenvs / caches (match at any depth, dir or not)
+.venv
 .venv/
+venv/
+**/.venv/
+*.venv
 __pycache__/
 *.pyc
 
@@ -13,6 +19,7 @@ __pycache__/
 /server/gausy
 /server/worldsketch-server
 /server/tmp/
+/tmp/
 *.test
 
 # Generated job output
