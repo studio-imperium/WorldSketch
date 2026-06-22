@@ -65,8 +65,12 @@ cp .env.example .env           # fill RUNPOD_ENDPOINT_ID + RUNPOD_API_KEY
 [docs/worker-setup.md](docs/worker-setup.md) — `scripts/setup-worker.sh` then
 `scripts/start-worker.sh`.
 
-Run the Go server directly: `cd server && go run .` (port 8067). One-shot worker
-mode: `worldsketch-server -job <dir>` runs the pipeline once on a staged dir and exits.
+Run the Go server directly: `cd server && go run .` (port 8067) — it **auto-loads `.env`**
+from the repo root (RunPod creds + tunables; already-set shell env wins), so RunPod activates
+without `dev.sh`. But the worker still needs a public callback URL: serverless builds fail
+until `WORLDSKETCH_PUBLIC_URL` is set, which `dev.sh` does via a cloudflare tunnel (or set it
+in `.env`). One-shot worker mode: `worldsketch-server -job <dir>` runs the pipeline once on a
+staged dir and exits.
 
 ## Hard invariants (break these and the output silently degrades)
 
@@ -92,22 +96,53 @@ mode: `worldsketch-server -job <dir>` runs the pipeline once on a staged dir and
   `WS_DEDUPE`, `WS_SPARSE_*`, `WS_EXPAND_*`, …). Set them where the pipeline *runs*
   (RunPod env for serverless, `.env`/shell for local). No rebuild needed. See `.env.example`.
 - **World expansion** (`server/expand.go` + `inpaint.go`): a scene with a `parent` job id
-  grows that plot. In the editor, **+ Add plot** lays a new ground tile next to the current
-  one; objects built there are the new (non-`existing`) delta, masked per-view (`new_mask`),
-  inpainted to match the parent, and fused onto the parent `world.ply` (merged world; each
-  plot is also its own job/splat). Fusion's keep-region is **scene-bounds-aware**
-  (`sceneCullBounds`) so a tile offset from origin isn't culled — the client sends the union
-  bounds of all tiles. **Runs on the RunPod worker** when configured: `buildRunpodInput`
-  ships the per-view masks + the parent's `world.ply`; the worker one-shot (`pipeline.go`)
-  fuses the new tile onto `<dir>/parent/world.ply`. **Needs a worker image rebuild** to take
-  effect (`services/runpod/Dockerfile` bakes the code). Local ComfyUI inpaint is the
-  no-RunPod fallback. Seam context is approximate (style continuity via shared
-  seed/prompt/palette, not pixel-aligned). Design + research:
+  grows that plot. In the editor, **+ Add plot** lays a new ground tile at the nearest free
+  cell (it spirals outward so plots never overlap). Each plot is a movable unit: with the
+  pointer tool, click its (unfrozen) ground tile to select it, then drag to translate the
+  whole plot — tile + every object sharing its `plotId` — so you reposition it before
+  generating (frozen/generated plots stay put). You can lay out several plots up front (Add
+  plot no longer requires building the first), then **choose what to build**: the **Plots
+  panel** (`renderPlotsPanel`, shown once there's >1 plot) — click a row to focus that plot,
+  **check** several for **Build selected**, per-row **Build/Rebuild** builds just one, and
+  **Build all** builds them one at a time; the main Generate button builds the active plot. A
+  **Match** dropdown picks a reference plot — builds then copy that plot's vibe + parent onto
+  the targets (e.g. match Plot 1), skipping the prompt. **Clear** (`clearWorld`) is a hard reset
+  (wipes scene + autosave). A build only registers (`plotJobIds[plotId]`) if it finishes
+  `done` (a splat exists) — a failed build is surfaced, not silently added (else its splat would
+  404 in the viewer); on load `reconcilePlotState` un-freezes any plot marked built but lacking a
+  job. `GET /api/status` reports the backend (`mode`: `gpu`/`gpu_no_url`/`local`) and the editor
+  shows it as a badge so a blank splat is explained. The world recomposes from every built plot's
+  splat. **Each plot keeps its own vibe** (`plotPrompts[plotId]`, shown under its name in the
+  panel): the vibe modal is scoped — a single build sets that plot's prompt; **Build all** keeps
+  each plot's saved vibe and only fills the unset ones with the typed prompt (a blank prompt
+  still falls back to the parent plot's, server-side). **Each plot is independent**:
+  an expansion is a normal generation of just the new tile (framed on itself, inheriting the parent's
+  prompt for style continuity). Objects built there are the new (non-`existing`) delta,
+  masked per-view (`new_mask`); fusion keeps **only** those masked points (`WriteExpandedPLY`)
+  so the plot's `world.ply`/`world.splat` contains only its own content. The parent plot is
+  **never** read, merged, fetched, or retrained — the world is composed by stacking per-plot
+  splats in the viewer. Fusion's keep-region is the new tile's tight AABB + margins
+  (`expandCullBounds`), not the union of all tiles. **Runs on the RunPod worker** when
+  configured: `buildRunpodInput` ships the per-view masks (no parent cloud); the worker
+  one-shot (`pipeline.go`) fuses only the new tile into its own `world.ply`. **Needs a worker
+  image rebuild** to take effect (`services/runpod/Dockerfile` bakes the code). The no-RunPod
+  fallback (`runExpansion`) mirrors this with local ComfyUI generation (not inpaint;
+  `inpaint.go`'s `RunComfyInpaint` is retained but no longer wired in). Style continuity is
+  via shared seed/prompt/palette, not pixel-aligned. Design + research:
   [docs/world-expansion-plan.md](docs/world-expansion-plan.md).
+- **Editor state survives reloads** (`client/scripts/renderer.js`): the scene (primitives,
+  plots + `plotId` membership, per-plot build jobs `plotJobIds`, `activeOrigin`, `lastJobId`,
+  last prompt, camera) autosaves to `localStorage` (`worldsketch_editor_v1`, debounced + on
+  `beforeunload`); open with `?new` to start clean. On load the editor re-fetches
+  `/api/jobs/<lastJobId>` and recomposes the world from every built plot's splat without
+  regenerating. The server reconstructs a
+  finished job from disk (`Store.Get` → `output/<id>/`, needs `scene.json` + `world.splat`)
+  when it isn't in the in-memory job map, so recovery survives a coordinator restart too.
 - **Image-gen backend** is selected by `WS_IMAGEGEN` (`syncmvd` → diffusers path,
   else ComfyUI). See `server/syncmvd.go`.
 - **Python interpreter**: `WORLDSKETCH_PYTHON`, else `services/ml/.venv`, else `python3`.
-- **Secrets**: `RUNPOD_API_KEY` is read from env only — never commit it. `.env` is gitignored.
+- **Secrets**: `RUNPOD_API_KEY` is read from env — the server **auto-loads `.env`** at startup
+  (`loadDotEnv`, repo root; shell exports take precedence). Never commit it; `.env` is gitignored.
 - **Generated output** (`server/output/`, build artifacts, venvs) is gitignored.
 
 ## Git / status

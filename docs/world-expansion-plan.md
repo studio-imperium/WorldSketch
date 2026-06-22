@@ -123,13 +123,24 @@ New env knobs (read where the pipeline runs, like the rest — `config.go`):
 The first interpretation built was object-level inpaint *within* one plot. The shipped
 UX is the one the user actually wanted: **extend the world with adjacent tiles.**
 
-- **+ Add plot** (editor) lays a fresh 20×20 ground tile next to the current plot
-  (directions cycle E/S/W/N), frames the camera on it, and freezes the previous plot
-  (locked + dimmed). Objects you build on the new tile are the delta.
+- **+ Add plot** (editor) lays a fresh 20×20 ground tile at the nearest free cell next to
+  the current plot (it prefers E/S/W/N, then spirals outward so tiles never overlap — the
+  earlier blind `addPlotCount % 4` cycle re-used a cell and stacked the 5th plot on the 1st),
+  frames the camera on it, and freezes the previous plot (locked + dimmed). Objects you build
+  on the new tile are the delta.
+- **Plots are movable as a unit** before they're generated. Each ground tile + the objects
+  on it share a `plotId`; with the pointer tool you click a plot's (unfrozen) ground tile to
+  select it, then drag to translate the whole plot — tile *and* its objects — across the
+  ground plane. Repositioning updates the union `bounds` worldBounds sends to fusion, so you
+  place a new plot exactly where you want it relative to the frozen parent before Generate.
+  Frozen (already-generated) plots stay put — their splat is fixed in world space. This fixed
+  the prior failure mode where there was no tile→objects link, so moving a tile (or building
+  off it) left objects stranded on bare ground.
 - **Generate** then runs the expansion: it frames + masks the new tile, sends `parent`
-  + the union `bounds` of all tiles, inpaints the tile's content, and fuses it onto the
-  parent `world.ply` (one merged world; each plot is also its own job/splat → "both"
-  outputs from the design Q).
+  (for prompt inheritance), generates the tile, and fuses **only the masked new points**
+  into the plot's *own* `world.ply`/`world.splat`. The world is the per-plot splats composed
+  in the viewer — see **Shipped v3** below, which superseded the earlier "merge onto the
+  parent cloud" approach described in the rest of v1 and in v2.
 - **Server enabler:** fusion's keep-box was a hardcoded ±16, which would discard any tile
   offset from origin. It's now `sceneCullBounds(scene)` — the authored bounds + margin —
   so the keep-region grows with the world. (`TestSceneCullBounds`.)
@@ -180,6 +191,78 @@ routes it through the same serverless path as normal generation:
   payload; if it trips RunPod's request-size limit, switch `parentPly` to a volume/object
   handoff instead of inline base64 (tracked, see review).
 
+## Shipped v3 — per-plot independent splats (compose, not merge)
+
+v1/v2 fused each new plot's points **onto the parent's `world.ply`** and retrained the
+**merged** cloud. That quietly broke the user's actual model in two ways: (a) `train_splat.py`
+re-optimised the *whole* merged cloud every expansion, so the parent's gaussians drifted —
+the existing world *was* regenerated; and (b) one splat was trained over the union of every
+tile, so a plot far from origin sat in a corner of a huge mostly-empty bounds ("generating
+from one center point"). v3 makes each plot truly independent:
+
+- **Fusion writes only the new tile.** `WriteExpandedPLY(scene, dir, path)` no longer reads
+  or merges the parent — it fuses just the masked new pixels into **this plot's own**
+  `world.ply`. The keep-box is `expandCullBounds(scene)` — the AABB of the **new** primitives
+  + margins, tight to the new tile — not `sceneCullBounds`'s union of every tile.
+- **Training is per-plot.** Each plot's `world.splat` trains on its own `world.ply` only. The
+  parent is never re-read, merged, fetched, or retrained — it's frozen by construction.
+- **The world is composed in the viewer.** Every plot is a splat in the **same world
+  coordinate frame** (cameras sit at absolute world positions, so gaussians come out in world
+  coords). The editor tracks the ordered `plotJobs` chain; the splat viewer loads them all via
+  `addSplatScenes` with no per-scene transform → they overlay into one world. Colliders come
+  from the latest job's `collisions.json`, whose scene already lists every primitive.
+- **Worker payload shrank.** `buildRunpodInput` no longer ships the parent `world.ply`
+  (`parentPlyUrl`/`parentPly` removed), retiring the v2 "~20 MB inflates `/run`" risk;
+  `handler.py` no longer stages a `parent/` cloud.
+- **Local fallback matches.** `runExpansion` (no-RunPod) now mirrors the worker: normal
+  generation of the new tile (inheriting the parent prompt) → only-new fusion → per-plot
+  train. It no longer calls `RunComfyInpaint` (kept in `inpaint.go` but unwired; the
+  `WS_EXPAND_*` knobs are read only there now).
+- **Still GPU-gated:** needs a worker image rebuild to take effect (the worker bakes the code).
+- **Trade-off / next step:** plots never share a cloud, so there's no cross-plot fusion at the
+  seam — continuity is stylistic (shared seed/prompt/palette) and adjacency is geometric (tiles
+  abut in world space). True seam blending — warm-starting a plot from its neighbour, or
+  rendering the neighbour splat into the new cameras for aligned context — remains the future
+  quality lever.
+
+## Shipped v4 — choose which plots to build
+
+Because plots are now independent (v3), you don't have to build them in lockstep. The editor
+lets you lay out the whole world first, then build any subset:
+
+- **Lay out up front.** `+ Add plot` no longer requires building plot 1 first — drop as many
+  tiles as you want, move them, fill them with objects, *then* build.
+- **Plots panel** (`renderPlotsPanel`, appears once there's more than one plot): one row per
+  plot with a checkbox, its number + object count, **its own vibe** (under the label), and a
+  built/empty/building badge. Click a row to focus that plot (make active + frame the camera);
+  per-row **Build/Rebuild** builds just it; **check** several + **Build selected**, or **Build
+  all**. **Clear** (`clearWorld`) hard-resets the whole world (scene + autosave). A build only
+  counts as built (`plotJobIds[plotId]`) when it finishes `done`; a failed build is surfaced,
+  never silently added (otherwise its missing `world.splat` 404s the viewer, which now also
+  skips any splat it can't load and says so). On load, `reconcilePlotState` un-freezes any plot
+  marked built but missing a job (fixes plots paled by an earlier failed build).
+- **Match a reference.** The **Match** dropdown picks a plot whose vibe + parent the next build
+  copies onto its targets — so "match Plot 1" + **Build all** rebuilds every plot in Plot 1's
+  style (shared prompt + that plot as `parent` for seed/style). `startBuild` routes here: with a
+  match set it builds directly (no modal); otherwise it opens the vibe modal first.
+- **Backend badge.** `GET /api/status` returns `mode` (`gpu` ready · `gpu_no_url` creds but no
+  tunnel · `local` no creds); the editor shows it (`fetchBackendStatus`) so a blank splat reads
+  as "no GPU / run dev.sh" instead of a mystery (splat training needs the GPU worker).
+- **Per-plot vibe.** Every plot keeps its own prompt in `plotPrompts[plotId]`. The vibe modal
+  is **scoped**: building a single plot pre-fills (and saves) *that plot's* vibe, so you can
+  give Plot 1 "misty forest" and Plot 2 "sandy desert" by building each with its own prompt. A
+  batch build (**selected**/**all**) keeps each plot's saved vibe and uses the typed prompt only
+  to fill plots that don't have one yet — so the first **Build all** can share one vibe, and
+  later rebuilds keep them distinct. (Server-side, a blank prompt still inherits the parent
+  plot's prompt as a final fallback.)
+- **Build registry.** `plotJobIds` maps `plotId`→its latest job. Building a plot
+  (`buildPlot(plotId)`) frames+masks on just that plot, generates, sets `plotJobIds[plotId]`,
+  and recomposes the world from `orderedPlotIds().filter(built)`. Rebuilding swaps that one
+  plot's splat; the others are untouched. Builds run **one plot at a time** (`runBuilds`).
+- **Use cases:** give each plot a different vibe and build them; build all the unbuilt plots in
+  one go; rebuild a single plot after editing it or changing its vibe; or re-skin the whole
+  world with one vibe via **Build all** (when plots have no per-plot vibe of their own).
+
 ## Client changes
 
 - After a successful generate, record `lastJobId` and mark every user primitive
@@ -195,6 +278,14 @@ routes it through the same serverless path as normal generation:
 - A "Expand / Decorate" affordance (the Generate button becomes "Decorate" once a
   world exists and new objects are present). Optional polish: load plot 1's `.splat`
   as a faint backdrop so the user places new objects against the world they're growing.
+- **State survives reloads.** The whole authoring state — primitives, plots + `plotId`
+  membership, `activeOrigin`, the parent `lastJobId`, and the camera — autosaves to
+  `localStorage` (`worldsketch_editor_v1`, debounced + on `beforeunload`; `?new` starts
+  clean). On load the editor also re-fetches `/api/jobs/<lastJobId>` and re-attaches the
+  generated world (splat viewer + downloads) without regenerating. So a refresh keeps both
+  the blockout *and* the finished world. The coordinator backs this by reconstructing a
+  completed job from disk (`Store.Get` → `output/<id>/` when `scene.json` + `world.splat`
+  exist) when it's not in the in-memory job map, so recovery survives a server restart too.
 
 ## Optimising the model (research, grounded in the existing plan docs)
 

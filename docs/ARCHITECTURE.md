@@ -272,10 +272,12 @@ The north star is **walk inside your sketch**:
   collision against the analytic colliders. The biggest single build; the payoff.
 - **E — SyncMVD** (optional quality): swap image-gen if depth-CN consistency isn't enough.
 
-A parallel track is **growing a world instead of regenerating it**: expand an existing
-plot by inpainting only the newly-added objects into its frozen views and fusing the
-delta onto the existing point cloud, so additions are decorated to *match* what's already
-there. Design + the model-optimisation levers it shares with SyncMVD/gsplat:
+A parallel track is **growing a world plot-by-plot instead of regenerating it**: each
+expansion is an *independent* generation of just the new tile (`WriteExpandedPLY` fuses
+only the new objects' masked points into the new plot's own `world.ply`/`world.splat`).
+The existing plot is never re-fused or re-trained — the world is composed by stacking
+per-plot splats in the viewer, with style continuity from the shared prompt/seed. Design +
+the model-optimisation levers it shares with SyncMVD/gsplat:
 [world-expansion-plan.md](world-expansion-plan.md).
 
 Full rationale, effort estimates, and ordering: [generation-pipeline-plan.md](generation-pipeline-plan.md).
