@@ -73,11 +73,17 @@ func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any
 		if strings.TrimSpace(scene.Prompt) == "" {
 			scene.Prompt = readScene(filepath.Join(parentDir, "scene.json")).Prompt
 		}
-		ply, err := os.ReadFile(filepath.Join(parentDir, "world.ply"))
-		if err != nil {
+		// The parent world.ply can be ~20MB; base64 inline would blow RunPod's /run
+		// request-size limit. Instead hand the worker a URL to pull it from (we already
+		// serve it + have a public base URL). Verify it exists so we fail early & clearly.
+		if _, err := os.Stat(filepath.Join(parentDir, "world.ply")); err != nil {
 			return nil, fmt.Errorf("expansion parent %q has no world.ply on the coordinator (generate the parent first): %w", scene.Parent, err)
 		}
-		input["parentPly"] = base64.StdEncoding.EncodeToString(ply)
+		base := publicBaseURL()
+		if base == "" {
+			return nil, errors.New("expansion needs WORLDSKETCH_PUBLIC_URL so the worker can fetch the parent world.ply")
+		}
+		input["parentPlyUrl"] = base + "/api/jobs/" + scene.Parent + "/world.ply"
 	}
 
 	input["scene"] = scene

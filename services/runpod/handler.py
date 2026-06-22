@@ -11,7 +11,7 @@ Expected input:
       "scene":  {... scene.json ...},          # scene.parent set => expansion
       "views":  [{"name","rgb"(b64 png),"depth"(b64 png),"camera"{...},
                   "mask"(b64 png, expansion only)}, ...],
-      "parentPly": "<b64 world.ply>",          # expansion only: parent plot's point cloud
+      "parentPlyUrl": "https://coordinator/.../world.ply",  # expansion only: pull parent cloud
       "resultUrl": "https://coordinator/.../result"   # optional; PUT target
     }
 """
@@ -95,12 +95,20 @@ def ensure_comfy():
     raise RuntimeError("ComfyUI did not become ready in time")
 
 
+def _safe_view_name(name):
+    # view["name"] lands in a filesystem path — reject anything that could escape job_dir.
+    if not isinstance(name, str) or "/" in name or "\\" in name or name in ("", ".", ".."):
+        raise ValueError(f"invalid view name: {name!r}")
+    return name
+
+
 def stage_inputs(job_dir, payload):
     root = pathlib.Path(job_dir)
     root.mkdir(parents=True, exist_ok=True)
     (root / "scene.json").write_text(json.dumps(payload["scene"]))
     for view in payload["views"]:
-        view_dir = root / "views" / view["name"]
+        name = _safe_view_name(view["name"])
+        view_dir = root / "views" / name
         view_dir.mkdir(parents=True, exist_ok=True)
         (view_dir / "primitive_rgb.png").write_bytes(base64.b64decode(view["rgb"]))
         (view_dir / "primitive_depth.png").write_bytes(base64.b64decode(view["depth"]))
@@ -108,13 +116,15 @@ def stage_inputs(job_dir, payload):
         # Expansion only: the new-object mask the fusion step uses to fuse just the delta.
         if view.get("mask"):
             (view_dir / "new_mask.png").write_bytes(base64.b64decode(view["mask"]))
-    # Expansion only: the parent plot's point cloud, which the pipeline merges the new
-    # tile onto (read by WriteExpandedPLY at <job_dir>/parent/world.ply).
-    parent_ply = payload.get("parentPly")
-    if parent_ply:
+    # Expansion only: pull the parent plot's point cloud from the coordinator (passed as a
+    # URL, not inline, to keep the /run payload small) into <job>/parent/world.ply, which
+    # the pipeline merges the new tile onto (WriteExpandedPLY).
+    parent_ply_url = payload.get("parentPlyUrl")
+    if parent_ply_url:
         parent_dir = root / "parent"
         parent_dir.mkdir(parents=True, exist_ok=True)
-        (parent_dir / "world.ply").write_bytes(base64.b64decode(parent_ply))
+        with urllib.request.urlopen(parent_ply_url, timeout=180) as resp:
+            (parent_dir / "world.ply").write_bytes(resp.read())
 
 
 def write_result_bundle(job_dir):
@@ -140,7 +150,10 @@ def handler(event):
     ensure_comfy()
     job_dir = f"/tmp/ws-{uuid.uuid4().hex}"
     try:
-        stage_inputs(job_dir, payload)
+        try:
+            stage_inputs(job_dir, payload)
+        except Exception as exc:
+            return {"error": f"bad input: {exc}"}
 
         proc = subprocess.run(
             [SERVER_BIN, "-job", job_dir],

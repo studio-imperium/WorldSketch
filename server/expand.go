@@ -84,16 +84,24 @@ func writePNG(path string, img image.Image) error {
 // grows by the delta. Falls back to fusing the new points alone if the parent ply is
 // missing (e.g. a serverless parent that only returned a .splat).
 func WriteExpandedPLY(scene Scene, dir, parentDir, path string) error {
-	parentPoints := readPointsPLY(filepath.Join(parentDir, "world.ply"))
+	// Fail loud if the parent cloud wasn't staged (e.g. an old worker that ignored the
+	// expansion payload) — silently merging onto nothing would ship a broken "expansion".
+	parentPlyPath := filepath.Join(parentDir, "world.ply")
+	if _, err := os.Stat(parentPlyPath); err != nil {
+		return fmt.Errorf("expansion parent world.ply not staged at %s: %w", parentPlyPath, err)
+	}
+	parentPoints := readPointsPLY(parentPlyPath)
 	min, max := sceneCullBounds(scene)
 
 	newPoints := make([]Point, 0, 120000)
+	masksSeen := 0
 	for _, name := range viewNames {
 		viewDir := filepath.Join(dir, "views", name)
 		mask := readPNG(filepath.Join(viewDir, "new_mask.png"))
 		if mask == nil {
 			continue
 		}
+		masksSeen++
 		camera := readCamera(filepath.Join(viewDir, "camera.json"))
 		rgb := readPNG(prefer(filepath.Join(viewDir, "generated_rgb.png"), filepath.Join(viewDir, "primitive_rgb.png")))
 		primitiveDepth := readPNG(filepath.Join(viewDir, "primitive_depth.png"))
@@ -102,6 +110,11 @@ func WriteExpandedPLY(scene Scene, dir, parentDir, path string) error {
 			continue
 		}
 		newPoints = append(newPoints, pointsFromViewMasked(camera, rgb, primitiveDepth, generatedDepth, mask, min, max)...)
+	}
+	// No masks anywhere means the expansion payload lost them (old worker / staging bug),
+	// not a legitimately empty delta — fail rather than silently rebuild the parent.
+	if masksSeen == 0 {
+		return fmt.Errorf("expansion has no new-object masks in any view (masks not staged?)")
 	}
 
 	newPoints = dedupe(newPoints, envFloat("WS_DEDUPE", 0.025))
@@ -185,10 +198,11 @@ func readPointsPLY(path string) []Point {
 	return points
 }
 
-// runExpansion is the expansion counterpart to Store.Run: decorate the new objects into
-// the parent's frozen world, fuse the delta onto the parent point cloud, and train the
-// merged world. Local-only for slice 1 (the GPU worker doesn't yet have the parent
-// artifacts — see docs/world-expansion-plan.md Phase 3).
+// runExpansion is the NO-RunPod fallback for expansion (Store.Run routes to the worker
+// when RunPod is configured). It uses local ComfyUI masked inpaint against the parent's
+// frozen views — the same-frame variant — then fuses the delta onto the parent cloud.
+// The serverless/adjacent-tile path instead generates the new tile with the shared
+// prompt+seed and merges (pipeline.go); see docs/world-expansion-plan.md.
 func (s *Store) runExpansion(id, dir string, scene Scene) {
 	parentDir := filepath.Join(s.root, scene.Parent)
 	if _, err := os.Stat(filepath.Join(parentDir, "scene.json")); err != nil {

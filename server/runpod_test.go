@@ -81,17 +81,22 @@ func TestBuildRunpodInputExpansion(t *testing.T) {
 	os.WriteFile(filepath.Join(vd, "camera.json"), []byte(`{"name":"front"}`), 0644)
 	os.WriteFile(filepath.Join(vd, "new_mask.png"), []byte("MASKBYTES"), 0644)
 
+	// The worker pulls the parent ply by URL, so a public base URL is required.
+	t.Setenv("WORLDSKETCH_PUBLIC_URL", "https://pub.example")
 	input, err := buildRunpodInput(dir, Scene{Parent: "parent"}, "https://x/result")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	plyB64, ok := input["parentPly"].(string)
+	url, ok := input["parentPlyUrl"].(string)
 	if !ok {
-		t.Fatal("expansion payload missing parentPly")
+		t.Fatal("expansion payload missing parentPlyUrl")
 	}
-	if ply, _ := base64.StdEncoding.DecodeString(plyB64); string(ply) != "PLYBYTES" {
-		t.Fatalf("parentPly not base64 of the parent world.ply: %q", plyB64)
+	if url != "https://pub.example/api/jobs/parent/world.ply" {
+		t.Fatalf("parentPlyUrl wrong: %q", url)
+	}
+	if _, inlined := input["parentPly"]; inlined {
+		t.Fatal("parent ply must NOT be inlined (blows the /run payload size limit)")
 	}
 	if got := input["scene"].(Scene).Prompt; got != "mossy ruins" {
 		t.Fatalf("expansion should inherit the parent prompt, got %q", got)
