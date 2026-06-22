@@ -280,6 +280,21 @@ def run_per_view(pipe, views, args, generator):
         print(f"[syncmvd] {v['name']} done (no-sync)", flush=True)
 
 
+def write_generation_meta(job, args, status, error=None):
+    meta = {
+        "backend": "syncmvd",
+        "status": status,
+        "sync_requested": args.sync > 0,
+        "sync_space": args.sync_space,
+        "sync_interval": args.sync_interval,
+        "sync_weight": args.sync_weight,
+        "sync_batch": args.sync_batch,
+    }
+    if error:
+        meta["error"] = error
+    (job / "generation_meta.json").write_text(json.dumps(meta, indent=2))
+
+
 def _control_cond(pils, device, dtype):
     """PIL list -> (2N, 3, H, W) in [0,1], duplicated for classifier-free guidance."""
     arr = np.stack([np.asarray(p, np.float32) / 255.0 for p in pils])  # (N,H,W,3)
@@ -469,14 +484,16 @@ def main():
 
     if args.sync <= 0:
         run_per_view(pipe, views, args, generator)
+        write_generation_meta(job, args, "no_sync")
         return 0
 
     sync_oom = False
     try:
         run_synced(pipe, views, args, generator, device, dtype)
+        write_generation_meta(job, args, f"synced_{args.sync_space}")
     except torch.OutOfMemoryError:
         sync_oom = True
-        print("[syncmvd] synced generation OOM; retrying per-view fallback", flush=True)
+        print("[syncmvd] synced generation OOM; retrying per-view fallback (outputs will not be synced)", flush=True)
 
     # Do this outside the except block so Python can release traceback frames that
     # still reference the failed sync tensors before the fallback pipeline runs.
@@ -488,6 +505,7 @@ def main():
         except Exception:
             pass
         run_per_view(pipe, views, args, generator)
+        write_generation_meta(job, args, "fallback_no_sync", "synced generation OOM")
     return 0
 
 
