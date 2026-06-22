@@ -150,10 +150,13 @@ staged dir and exits.
   `world.splat` directly. No depth/fusion/local-training/RunPod on this path; colliders are still
   served from scene primitives (the Tripo splat is in its own frame, so they may not align). The
   default pipeline is untouched when `WS_PIPELINE` is unset. Checked first in `Store.Run`. Tripo's
-  raw output is kept as `world_raw.splat`; `normalizeSplat` then reorients it (Tripo is Y-down vs our
-  Y-up viewer — `WS_TRIPO_FLIP=none|x|y|z`, default `x`) and fits it to the scene's XZ footprint
-  resting on the ground (`WS_TRIPO_FIT`, default on) before writing `world.splat`. Code:
-  `server/tripo.go`; knobs in `.env.example`.
+  raw output is kept as `world_raw.splat`; `normalizeSplat` then reorients it (orientation =
+  mirror ∘ yaw ∘ flip applied to both centers and gaussian quaternions: `WS_TRIPO_FLIP=none|x|y|z`
+  default `x` fixes Tripo's Y-down up-axis; `WS_TRIPO_YAW` degrees about vertical; `WS_TRIPO_MIRROR=none|x|z`
+  fixes a left/right-reversed scene) and fits it to the scene's XZ footprint resting on the ground
+  (`WS_TRIPO_FIT`, default on) before writing `world.splat`. Orientation is tunable without
+  re-calling the APIs: `worldsketch-server -renorm output/<jobid>` rewrites `world.splat` from
+  `world_raw.splat` using the current `WS_TRIPO_*` env in <1s. Code: `server/tripo.go`; knobs in `.env.example`.
 - **Python interpreter**: `WORLDSKETCH_PYTHON`, else `services/ml/.venv`, else `python3`.
 - **Secrets**: `RUNPOD_API_KEY` is read from env — the server **auto-loads `.env`** at startup
   (`loadDotEnv`, repo root; shell exports take precedence). Never commit it; `.env` is gitignored.

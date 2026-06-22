@@ -20,9 +20,14 @@ func main() {
 	loadDotEnv() // pick up .env (RunPod creds + tunables) without the shell exporting it
 
 	jobDir := flag.String("job", "", "serverless worker mode: run the pipeline once on this job dir, then exit")
+	renormDir := flag.String("renorm", "", "re-apply WS_TRIPO_* orientation/fit to <jobdir>/world_raw.splat -> world.splat, then exit")
 	flag.Parse()
 	if *jobDir != "" {
 		runOnce(*jobDir)
+		return
+	}
+	if *renormDir != "" {
+		runRenorm(*renormDir)
 		return
 	}
 

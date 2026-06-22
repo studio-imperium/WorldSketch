@@ -79,6 +79,24 @@ func runTripoPipeline(dir string, scene Scene, status func(string)) error {
 	return nil
 }
 
+// runRenorm re-applies orientation + fit to <dir>/world_raw.splat using the current WS_TRIPO_*
+// env, overwriting world.splat — a sub-second loop for dialing in WS_TRIPO_FLIP / WS_TRIPO_YAW /
+// WS_TRIPO_MIRROR without re-calling OpenAI/Tripo. Reload the splat viewer to see the result.
+func runRenorm(dir string) {
+	raw, err := os.ReadFile(filepath.Join(dir, "world_raw.splat"))
+	if err != nil {
+		log.Fatalf("renorm: read world_raw.splat: %v", err)
+	}
+	scene := readScene(filepath.Join(dir, "scene.json"))
+	out := normalizeSplat(raw, scene)
+	if err := os.WriteFile(filepath.Join(dir, "world.splat"), out, 0644); err != nil {
+		log.Fatalf("renorm: write world.splat: %v", err)
+	}
+	log.Printf("renorm: %s flip=%s yaw=%s mirror=%s fit=%v -> world.splat (%d bytes)",
+		dir, envStr("WS_TRIPO_FLIP", "x"), envStr("WS_TRIPO_YAW", "0"),
+		envStr("WS_TRIPO_MIRROR", "none"), envBoolDefault("WS_TRIPO_FIT", true), len(out))
+}
+
 // normalizeSplat reorients Tripo's raw splat into the editor's Y-up world and fits it to the
 // scene. It operates on the standard 32-byte .splat record: center[0:12] f32, scale[12:24]
 // f32, color[24:28] u8, rotation[28:32] u8 packed as (q*128+128) in w,x,y,z order.
@@ -97,21 +115,40 @@ func normalizeSplat(raw []byte, scene Scene) []byte {
 	copy(out, raw)
 	le := binary.LittleEndian
 
+	// Orientation = mirror ∘ yaw ∘ flip. flip fixes the up-axis (Tripo is Y-down vs our
+	// Y-up viewer); yaw spins about world-up; mirror flips handedness when the scene comes
+	// out left-right reversed vs the colliders. The rotation part is one quaternion qR
+	// (= yaw ⊗ flip, so flip is applied first), and the optional mirror negates one axis.
 	fw, fx, fy, fz, doFlip := flipQuat(envStr("WS_TRIPO_FLIP", "x"))
+	yaw := envFloat("WS_TRIPO_YAW", 0) * math.Pi / 180
+	yw, yx, yy, yz := math.Cos(yaw/2), 0.0, math.Sin(yaw/2), 0.0
+	rw, rx, ry, rz := quatMul(yw, yx, yy, yz, fw, fx, fy, fz)
+	mirror := strings.ToLower(strings.TrimSpace(envStr("WS_TRIPO_MIRROR", "none")))
+	doOrient := doFlip || yaw != 0 || mirror == "x" || mirror == "z"
 
-	// Pass 1: read centers, apply the flip, track the post-flip AABB.
+	orientVec := func(x, y, z float64) (float64, float64, float64) {
+		x, y, z = quatRotateVec(rw, rx, ry, rz, x, y, z)
+		switch mirror {
+		case "x":
+			x = -x
+		case "z":
+			z = -z
+		}
+		return x, y, z
+	}
+
+	// Pass 1: read centers, apply orientation, track the AABB.
 	cx := make([]float64, n)
 	cy := make([]float64, n)
 	cz := make([]float64, n)
 	var minx, miny, minz, maxx, maxy, maxz float64
 	for i := 0; i < n; i++ {
 		b := i * stride
-		x := float64(math.Float32frombits(le.Uint32(out[b:])))
-		y := float64(math.Float32frombits(le.Uint32(out[b+4:])))
-		z := float64(math.Float32frombits(le.Uint32(out[b+8:])))
-		if doFlip {
-			x, y, z = quatRotateVec(fw, fx, fy, fz, x, y, z)
-		}
+		x, y, z := orientVec(
+			float64(math.Float32frombits(le.Uint32(out[b:]))),
+			float64(math.Float32frombits(le.Uint32(out[b+4:]))),
+			float64(math.Float32frombits(le.Uint32(out[b+8:]))),
+		)
 		cx[i], cy[i], cz[i] = x, y, z
 		if i == 0 {
 			minx, maxx, miny, maxy, minz, maxz = x, x, y, y, z, z
@@ -147,12 +184,18 @@ func normalizeSplat(raw []byte, scene Scene) []byte {
 			le.PutUint32(out[off:], math.Float32bits(float32(s)))
 		}
 
-		if doFlip { // q' = flip * q, re-packed as (q*128+128) in w,x,y,z
-			rw := (float64(out[b+28]) - 128) / 128
-			rx := (float64(out[b+29]) - 128) / 128
-			ry := (float64(out[b+30]) - 128) / 128
-			rz := (float64(out[b+31]) - 128) / 128
-			qw, qx, qy, qz := quatMul(fw, fx, fy, fz, rw, rx, ry, rz)
+		if doOrient { // q' = orient(q): rotate by qR, then reflect for the mirror
+			iw := (float64(out[b+28]) - 128) / 128
+			ix := (float64(out[b+29]) - 128) / 128
+			iy := (float64(out[b+30]) - 128) / 128
+			iz := (float64(out[b+31]) - 128) / 128
+			qw, qx, qy, qz := quatMul(rw, rx, ry, rz, iw, ix, iy, iz)
+			switch mirror { // reflect the rotation under the same axis negation (pseudovector rule)
+			case "x":
+				qy, qz = -qy, -qz
+			case "z":
+				qx, qy = -qx, -qy
+			}
 			if nrm := math.Sqrt(qw*qw + qx*qx + qy*qy + qz*qz); nrm > 1e-9 {
 				qw, qx, qy, qz = qw/nrm, qx/nrm, qy/nrm, qz/nrm
 			}
