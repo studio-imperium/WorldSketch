@@ -27,7 +27,7 @@ func RunComfy(dir, scenePrompt string) error {
 
 	control, _ := firstControlNet()
 	depthControl := firstDepthControlNet()
-	saveWorkflowFiles(dir, ckpt, control)
+	saveWorkflowFiles(dir, ckpt, control, depthControl)
 
 	if err := generateBatchedViews(dir, ckpt, control, depthControl, scenePrompt); err != nil {
 		writeLog(dir, "comfy.log", err.Error())

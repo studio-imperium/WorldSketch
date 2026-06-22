@@ -68,6 +68,44 @@ func (s *Store) Create(scene Scene, views []UploadedView) *Job {
 	return job
 }
 
+func (s *Store) CreateRetrain(bundle []byte) (*Job, error) {
+	id := newID()
+	dir := filepath.Join(s.root, id)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return nil, err
+	}
+	if _, err := ExtractTrainingBundle(dir, bundle); err != nil {
+		os.RemoveAll(dir)
+		return nil, err
+	}
+	if !fileExists(filepath.Join(dir, "world.ply")) {
+		os.RemoveAll(dir)
+		return nil, errors.New("training bundle must contain job/world.ply")
+	}
+
+	now := time.Now()
+	job := &Job{
+		ID:        id,
+		Status:    "queued",
+		PlyURL:    "/api/jobs/" + id + "/world.ply",
+		BundleURL: "/api/jobs/" + id + "/training-bundle.zip",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}
+	if fileExists(filepath.Join(dir, "collisions.json")) {
+		job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
+	}
+	if fileExists(previewPath(dir)) {
+		job.PreviewURL = "/api/jobs/" + id + "/preview.png"
+	}
+
+	s.mu.Lock()
+	s.jobs[id] = job
+	s.mu.Unlock()
+
+	return job, nil
+}
+
 func (s *Store) Get(id string) (*Job, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -152,6 +190,21 @@ func (s *Store) Run(id string) {
 	job.SplatURL = "/api/jobs/" + id + "/world.splat"
 	job.UpdatedAt = time.Now()
 	s.mu.Unlock()
+}
+
+func (s *Store) RunRetrain(id string) {
+	dir := filepath.Join(s.root, id)
+	if runpodConfigured() {
+		s.runRemoteRetrain(id)
+		return
+	}
+
+	s.set(id, "training splat", "")
+	if err := RunSplatTraining(dir); err != nil {
+		s.fail(id, err)
+		return
+	}
+	s.markDone(id)
 }
 
 func writeViews(dir string, views []UploadedView) {
@@ -255,6 +308,53 @@ func (s *Store) runRemote(id, dir string, scene Scene) {
 		time.Sleep(2 * time.Second)
 		if s.isDone(id) {
 			return // the result callback already completed the job
+		}
+		status, message := runpodStatus(rpID)
+		if status != lastStatus {
+			log.Printf("[%s] runpod status: %s", id, status)
+			lastStatus = status
+		}
+		switch status {
+		case "FAILED", "CANCELLED", "TIMED_OUT":
+			s.fail(id, fmt.Errorf("gpu job %s: %s", strings.ToLower(status), message))
+			return
+		}
+	}
+	if !s.isDone(id) {
+		s.fail(id, errors.New("gpu job timed out (worker never PUT a result — is the tunnel/public URL alive?)"))
+	}
+}
+
+func (s *Store) runRemoteRetrain(id string) {
+	base := publicBaseURL()
+	if base == "" {
+		s.fail(id, errors.New("WORLDSKETCH_PUBLIC_URL is not set — the GPU worker needs a public URL to fetch and return results"))
+		return
+	}
+
+	token := newID()
+	s.mu.Lock()
+	s.tokens[id] = token
+	s.mu.Unlock()
+	resultURL := base + "/api/jobs/" + id + "/result?token=" + token
+	bundleURL := base + "/api/jobs/" + id + "/training-bundle.zip"
+
+	s.set(id, "submitting to gpu", "")
+	input := buildRunpodRetrainInput(bundleURL, resultURL)
+	rpID, err := runpodRun(input)
+	if err != nil {
+		s.fail(id, err)
+		return
+	}
+	log.Printf("[%s] runpod retrain job %s queued; bundle=%s result=%s", id, rpID, bundleURL, resultURL)
+
+	s.set(id, "training splat on gpu", "")
+	deadline := time.Now().Add(20 * time.Minute)
+	lastStatus := ""
+	for time.Now().Before(deadline) {
+		time.Sleep(2 * time.Second)
+		if s.isDone(id) {
+			return
 		}
 		status, message := runpodStatus(rpID)
 		if status != lastStatus {

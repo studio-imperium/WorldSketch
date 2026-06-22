@@ -1,6 +1,6 @@
 import * as THREE from "three"
 import { createOrbit } from "/scripts/controls.js"
-import { generateScene } from "/scripts/api.js"
+import { generateScene, retrainBundle } from "/scripts/api.js"
 import { captureViews } from "/scripts/capture.js"
 import { createPrimitive, round, serializePrimitive } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
@@ -87,6 +87,7 @@ const els = {
 	downloadCollision: document.getElementById("download_collision_btn"),
 	downloadBundle: document.getElementById("download_bundle_btn"),
 	downloadCaptures: document.getElementById("download_captures_btn"),
+	retrainBundle: document.getElementById("retrain_bundle_input"),
 	generateModal: document.getElementById("generate_modal"),
 	generateForm: document.getElementById("generate_form"),
 	cancelGenerate: document.getElementById("cancel_generate_btn"),
@@ -453,6 +454,30 @@ function downloadWorld() {
 	clickDownload(els.downloadBundle)
 }
 
+function clearJobLinks() {
+	els.viewSplat.classList.add("hidden")
+	els.download.classList.add("hidden")
+	els.downloadPly.classList.add("hidden")
+	els.downloadCollision.classList.add("hidden")
+	els.downloadBundle.classList.add("hidden")
+}
+
+function applyJobResult(job) {
+	if (job.plyUrl) els.downloadPly.href = job.plyUrl
+	if (job.collisionUrl) els.downloadCollision.href = job.collisionUrl
+	if (job.bundleUrl) els.downloadBundle.href = job.bundleUrl
+	if (job.splatUrl) {
+		els.viewSplat.href = `/splat-viewer.html?src=${encodeURIComponent(job.splatUrl)}&collisions=${encodeURIComponent(job.collisionUrl || "")}`
+		els.download.href = job.splatUrl
+		els.viewSplat.classList.remove("hidden")
+		els.download.classList.remove("hidden")
+	}
+	els.downloadPly.classList.toggle("hidden", !job.plyUrl)
+	els.downloadCollision.classList.toggle("hidden", !job.collisionUrl)
+	els.downloadBundle.classList.toggle("hidden", !job.bundleUrl)
+	showWorldResult(job)
+}
+
 async function generate(prompt) {
 	if (!primitives.some(primitive => !primitive.userData.locked)) {
 		setStatus("Add at least one primitive.")
@@ -461,33 +486,38 @@ async function generate(prompt) {
 
 	els.generate.disabled = true
 	showWorldLoading()
-	els.viewSplat.classList.add("hidden")
-	els.download.classList.add("hidden")
-	els.downloadPly.classList.add("hidden")
-	els.downloadCollision.classList.add("hidden")
-	els.downloadBundle.classList.add("hidden")
+	clearJobLinks()
 	setStatus("Capturing views")
 
 	try {
 		const views = await captureCurrentViews()
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
-		if (job.plyUrl) els.downloadPly.href = job.plyUrl
-		if (job.collisionUrl) els.downloadCollision.href = job.collisionUrl
-		if (job.bundleUrl) els.downloadBundle.href = job.bundleUrl
-		if (job.splatUrl) {
-			els.viewSplat.href = `/splat-viewer.html?src=${encodeURIComponent(job.splatUrl)}&collisions=${encodeURIComponent(job.collisionUrl)}`
-			els.download.href = job.splatUrl
-			els.viewSplat.classList.remove("hidden")
-			els.download.classList.remove("hidden")
-		}
-		els.downloadPly.classList.toggle("hidden", !job.plyUrl)
-		els.downloadCollision.classList.toggle("hidden", !job.collisionUrl)
-		els.downloadBundle.classList.toggle("hidden", !job.bundleUrl)
-		showWorldResult(job)
+		applyJobResult(job)
 		els.generate.disabled = false
 	} catch (err) {
 		showWorldError(err.message)
 		els.generate.disabled = false
+	}
+}
+
+async function retrainUploadedBundle(file) {
+	if (!file) return
+
+	els.generate.disabled = true
+	els.retrainBundle.disabled = true
+	showWorldLoading()
+	clearJobLinks()
+	setStatus("Uploading bundle")
+
+	try {
+		const job = await retrainBundle(file, setStatus)
+		applyJobResult(job)
+	} catch (err) {
+		showWorldError(err.message)
+	} finally {
+		els.generate.disabled = false
+		els.retrainBundle.disabled = false
+		els.retrainBundle.value = ""
 	}
 }
 
@@ -623,6 +653,10 @@ els.generate.addEventListener("click", () => {
 })
 
 els.downloadCaptures.addEventListener("click", downloadCaptures)
+
+els.retrainBundle.addEventListener("change", () => {
+	retrainUploadedBundle(els.retrainBundle.files?.[0])
+})
 
 els.cancelGenerate.addEventListener("click", () => els.generateModal.close())
 

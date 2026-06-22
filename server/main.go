@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -50,6 +51,28 @@ func main() {
 		job := store.Create(scene, files)
 
 		go store.Run(job.ID)
+		writeJSON(w, http.StatusAccepted, map[string]string{"jobId": job.ID})
+	})
+
+	http.HandleFunc("/api/retrain", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
+
+		bundle, err := readRetrainRequest(r)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		job, err := store.CreateRetrain(bundle)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+
+		go store.RunRetrain(job.ID)
 		writeJSON(w, http.StatusAccepted, map[string]string{"jobId": job.ID})
 	})
 
@@ -217,6 +240,21 @@ func readUploadedView(r *http.Request, name string) UploadedView {
 	depth, _ := readMultipartFile(r, name+"_depth")
 	camera, _ := readMultipartFile(r, name+"_camera")
 	return UploadedView{Name: name, RGB: rgb, Depth: depth, CameraJSON: camera}
+}
+
+func readRetrainRequest(r *http.Request) ([]byte, error) {
+	if err := r.ParseMultipartForm(512 << 20); err != nil {
+		return nil, err
+	}
+	file, _, err := r.FormFile("bundle")
+	if err != nil {
+		file, _, err = r.FormFile("training_bundle")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("bundle file is required")
+	}
+	defer file.Close()
+	return io.ReadAll(file)
 }
 
 func readMultipartFile(r *http.Request, field string) ([]byte, error) {

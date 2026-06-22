@@ -177,6 +177,7 @@ locally). Defaults in `.env.example` and read in `server/config.go`.
 |---|---|---|
 | `WS_STEPS` / `WS_CFG` / `WS_DENOISE` | 7 / 6.5 / 0.5 | KSampler steps / guidance / img2img strength |
 | `WS_IMAGE_ONLY` / `WS_IMAGE_ONLY_VIEW` | 0 / front | stop after image generation; when enabled, only generate this single view |
+| `WS_RETRAIN_ONLY` | 0 | worker mode used by retrain uploads; skips image generation, depth, and fusion, then trains from an existing bundle/job dir |
 | `WS_CANNY_STRENGTH` / `WS_DEPTH_STRENGTH` | 0.9 / 0.6 | ControlNet conditioning strengths |
 | `WS_FUSION_STRIDE` | 1 | pixel stride for fusing each generated view (higher = faster/sparser) |
 | `WS_DEDUPE` | 0.015 | point-cloud dedupe radius (smaller = denser) |

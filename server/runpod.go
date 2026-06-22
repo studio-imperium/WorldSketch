@@ -61,6 +61,14 @@ func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any
 	}, nil
 }
 
+func buildRunpodRetrainInput(bundleURL, resultURL string) map[string]any {
+	return map[string]any{
+		"mode":      "retrain",
+		"bundleUrl": bundleURL,
+		"resultUrl": resultURL,
+	}
+}
+
 func runpodEndpointURL(path string) string {
 	return "https://api.runpod.ai/v2/" + os.Getenv("RUNPOD_ENDPOINT_ID") + "/" + path
 }

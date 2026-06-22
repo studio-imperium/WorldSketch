@@ -13,8 +13,8 @@ func comfyWorkflowDir() string {
 	return os.Getenv("COMFY_WORKFLOW_DIR")
 }
 
-func saveWorkflowFiles(dir, ckpt, control string) {
-	workflow := comfyCanvasWorkflow(ckpt, control, "worldsketch_front.png", "worldsketch_front_edges.png")
+func saveWorkflowFiles(dir, ckpt, control, depthControl string) {
+	workflow := comfyCanvasWorkflow(ckpt, control, depthControl, "worldsketch_front.png", "worldsketch_front_edges.png", "worldsketch_front_depth.png")
 	saveJSON(filepath.Join(dir, "worldsketch_comfy_workflow.json"), workflow)
 
 	uiDir := comfyWorkflowDir()
@@ -37,7 +37,8 @@ func saveDefaultWorkflow(dir string) {
 		return
 	}
 	control, _ := firstControlNet()
-	saveWorkflowFiles(dir, ckpt, control)
+	depthControl := firstDepthControlNet()
+	saveWorkflowFiles(dir, ckpt, control, depthControl)
 }
 
 func saveJSON(path string, value any) {
@@ -48,7 +49,7 @@ func saveJSON(path string, value any) {
 	os.WriteFile(path, data, 0644)
 }
 
-func comfyCanvasWorkflow(ckpt, control, image, edge string) map[string]any {
+func comfyCanvasWorkflow(ckpt, control, depthControl, image, edge, depth string) map[string]any {
 	seed := SeedFromString("front")
 	if seed < 0 {
 		seed = -seed
@@ -110,7 +111,7 @@ func comfyCanvasWorkflow(ckpt, control, image, edge string) map[string]any {
 			uiNode(10, "ControlNetLoader", 430, 590, 370, 80, []any{control}, []any{}, []any{
 				output("CONTROL_NET", "CONTROL_NET", 0, []int{12}),
 			}),
-			uiNode(11, "ControlNetApplyAdvanced", 930, 130, 340, 220, []any{0.72, 0, 0.78}, []any{
+			uiNode(11, "ControlNetApplyAdvanced", 930, 130, 340, 220, []any{envFloat("WS_CANNY_STRENGTH", 0), 0, 0.9}, []any{
 				input("positive", "CONDITIONING", 7),
 				input("negative", "CONDITIONING", 8),
 				input("control_net", "CONTROL_NET", 12),
@@ -128,6 +129,38 @@ func comfyCanvasWorkflow(ckpt, control, image, edge string) map[string]any {
 			linkRow(14, 11, 0, 6, 1, "CONDITIONING"),
 			linkRow(15, 11, 1, 6, 2, "CONDITIONING"),
 		)
+		if depthControl != "" {
+			positiveLink = 18
+			negativeLink = 19
+			lastNode = 14
+			lastLink = 19
+			nodes = append(nodes,
+				uiNode(12, "LoadImage", 80, 810, 300, 220, []any{depth, "image"}, []any{}, []any{
+					output("IMAGE", "IMAGE", 0, []int{17}),
+					output("MASK", "MASK", 1, []int{}),
+				}),
+				uiNode(13, "ControlNetLoader", 430, 840, 370, 80, []any{depthControl}, []any{}, []any{
+					output("CONTROL_NET", "CONTROL_NET", 0, []int{16}),
+				}),
+				uiNode(14, "ControlNetApplyAdvanced", 930, 395, 340, 220, []any{envFloat("WS_DEPTH_STRENGTH", 0.35), 0, 0.8}, []any{
+					input("positive", "CONDITIONING", 14),
+					input("negative", "CONDITIONING", 15),
+					input("control_net", "CONTROL_NET", 16),
+					input("image", "IMAGE", 17),
+				}, []any{
+					output("positive", "CONDITIONING", 0, []int{18}),
+					output("negative", "CONDITIONING", 1, []int{19}),
+				}),
+			)
+			links = append(links,
+				linkRow(16, 13, 0, 14, 2, "CONTROL_NET"),
+				linkRow(17, 12, 0, 14, 3, "IMAGE"),
+				linkRow(18, 14, 0, 6, 1, "CONDITIONING"),
+				linkRow(19, 14, 1, 6, 2, "CONDITIONING"),
+			)
+			links[13] = linkRow(14, 11, 0, 14, 0, "CONDITIONING")
+			links[14] = linkRow(15, 11, 1, 14, 1, "CONDITIONING")
+		}
 	} else {
 		links = append(links,
 			linkRow(7, 2, 0, 6, 1, "CONDITIONING"),
@@ -136,7 +169,7 @@ func comfyCanvasWorkflow(ckpt, control, image, edge string) map[string]any {
 	}
 
 	nodes = append(nodes,
-		uiNode(6, "KSampler", 1320, 230, 320, 270, []any{seed, "fixed", 24, 6.5, "dpmpp_2m", "karras", 0.58}, []any{
+		uiNode(6, "KSampler", 1320, 230, 320, 270, []any{seed, "fixed", envInt("WS_STEPS", 32), envFloat("WS_CFG", 7.5), "euler", "normal", envFloat("WS_DENOISE", 0.74)}, []any{
 			input("model", "MODEL", 1),
 			input("positive", "CONDITIONING", positiveLink),
 			input("negative", "CONDITIONING", negativeLink),
