@@ -26,7 +26,7 @@ func WritePLYFromViews(scene Scene, dir, path string) error {
 		points = append(points, pointsFromView(camera, rgb, primitiveDepth, generatedDepth)...)
 	}
 
-	points = dedupe(points, envFloat("WS_DEDUPE", 0.025))
+	points = dedupe(points, envFloat("WS_DEDUPE", 0.015))
 	deduped := len(points)
 	points = cullUnsupportedPoints(points, scene.Primitives)
 	supported := len(points)
@@ -44,7 +44,7 @@ func pointsFromView(camera Camera, rgb image.Image, primitiveDepth image.Image, 
 	bounds := primitiveDepth.Bounds()
 	w := bounds.Dx()
 	h := bounds.Dy()
-	stride := 2
+	stride := max(envInt("WS_FUSION_STRIDE", 1), 1)
 
 	a, b := depthFit(primitiveDepth, generatedDepth)
 	points := make([]Point, 0, (w/stride)*(h/stride))

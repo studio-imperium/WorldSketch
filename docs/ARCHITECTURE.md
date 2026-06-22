@@ -177,7 +177,8 @@ locally). Defaults in `.env.example` and read in `server/config.go`.
 |---|---|---|
 | `WS_STEPS` / `WS_CFG` / `WS_DENOISE` | 7 / 6.5 / 0.5 | KSampler steps / guidance / img2img strength |
 | `WS_CANNY_STRENGTH` / `WS_DEPTH_STRENGTH` | 0.9 / 0.6 | ControlNet conditioning strengths |
-| `WS_DEDUPE` | 0.025 | point-cloud dedupe radius (smaller = denser) |
+| `WS_FUSION_STRIDE` | 1 | pixel stride for fusing each generated view (higher = faster/sparser) |
+| `WS_DEDUPE` | 0.015 | point-cloud dedupe radius (smaller = denser) |
 | `WS_SPARSE_VOXEL` / `WS_SPARSE_MIN_NEIGHBORS` | 0.1 / 4 | sparse-point cull (lower neighbors = keep more) |
 | `WS_COLOR_CULL_THRESHOLD` | 0.8 | how aggressively to drop off-color points |
 | `WS_IMAGEGEN` | (ComfyUI) | `syncmvd` switches to the diffusers path |

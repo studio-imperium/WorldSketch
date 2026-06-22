@@ -61,34 +61,28 @@ export async function captureViews(renderer, scene, camera, helpers, selected, s
 }
 
 function poseCamera(camera, name, frame) {
-	const { target, radius } = frame
-	const straightDistance = Math.max(22, radius * 3.3)
-	const topDistance = Math.max(28, radius * 3.8)
-	const height = Math.max(5.5, radius * 0.65)
-	const highCornerDistance = Math.max(30, radius * 4.1)
-	const highCornerHeight = Math.max(9.5, radius * 1.05)
-	const lowCornerDistance = Math.max(34, radius * 4.4)
-	const lowCornerHeight = Math.max(2.2, radius * 0.16)
-	const offsets = {
-		front: [0, height, straightDistance],
-		back: [0, height, -straightDistance],
-		left: [-straightDistance, height, 0],
-		right: [straightDistance, height, 0],
-		top: [0.02, topDistance, 0],
-		corner_fl_high: [-highCornerDistance, highCornerHeight, highCornerDistance],
-		corner_fr_high: [highCornerDistance, highCornerHeight, highCornerDistance],
-		corner_bl_high: [-highCornerDistance, highCornerHeight, -highCornerDistance],
-		corner_br_high: [highCornerDistance, highCornerHeight, -highCornerDistance],
-		corner_fl_low: [-lowCornerDistance, lowCornerHeight, lowCornerDistance],
-		corner_fr_low: [lowCornerDistance, lowCornerHeight, lowCornerDistance],
-		corner_bl_low: [-lowCornerDistance, lowCornerHeight, -lowCornerDistance],
-		corner_br_low: [lowCornerDistance, lowCornerHeight, -lowCornerDistance],
+	const directions = {
+		front: [0, 0.28, 1],
+		back: [0, 0.28, -1],
+		left: [-1, 0.28, 0],
+		right: [1, 0.28, 0],
+		top: [0.001, 1, 0],
+		corner_fl_high: [-1, 0.78, 1],
+		corner_fr_high: [1, 0.78, 1],
+		corner_bl_high: [-1, 0.78, -1],
+		corner_br_high: [1, 0.78, -1],
+		corner_fl_low: [-1, 0.13, 1],
+		corner_fr_low: [1, 0.13, 1],
+		corner_bl_low: [-1, 0.13, -1],
+		corner_br_low: [1, 0.13, -1],
 	}
-	camera.position.copy(target).add(new THREE.Vector3(...offsets[name]))
-	camera.lookAt(target)
 	camera.near = 0.05
-	camera.far = Math.max(56, lowCornerDistance + radius * 2 + 12)
 	camera.fov = 50
+	const direction = new THREE.Vector3(...directions[name]).normalize()
+	const distance = fitDistanceForFrame(camera, frame, direction, 1.14)
+	camera.position.copy(frame.target).addScaledVector(direction, distance)
+	camera.far = Math.max(48, distance + frame.radius * 3 + 12)
+	camera.lookAt(frame.target)
 }
 
 function captureFrame(subjects) {
@@ -106,8 +100,10 @@ function captureFrame(subjects) {
 	}
 
 	if (!hasSubject) {
+		const target = new THREE.Vector3(0, 1.6, 0)
 		return {
-			target: new THREE.Vector3(0, 1.6, 0),
+			box: new THREE.Box3().setFromCenterAndSize(target, new THREE.Vector3(8, 4, 8)),
+			target,
 			radius: 7,
 		}
 	}
@@ -116,9 +112,41 @@ function captureFrame(subjects) {
 	const size = box.getSize(new THREE.Vector3())
 	target.y = Math.max(1.2, target.y)
 	return {
+		box: box.clone(),
 		target,
 		radius: Math.max(4, size.length() * 0.5),
 	}
+}
+
+function fitDistanceForFrame(camera, frame, direction, margin) {
+	const target = frame.target
+	const box = frame.box
+	const corners = [
+		new THREE.Vector3(box.min.x, box.min.y, box.min.z),
+		new THREE.Vector3(box.min.x, box.min.y, box.max.z),
+		new THREE.Vector3(box.min.x, box.max.y, box.min.z),
+		new THREE.Vector3(box.min.x, box.max.y, box.max.z),
+		new THREE.Vector3(box.max.x, box.min.y, box.min.z),
+		new THREE.Vector3(box.max.x, box.min.y, box.max.z),
+		new THREE.Vector3(box.max.x, box.max.y, box.min.z),
+		new THREE.Vector3(box.max.x, box.max.y, box.max.z),
+	]
+	const forward = direction.clone().multiplyScalar(-1)
+	const upHint = Math.abs(forward.y) > 0.96 ? new THREE.Vector3(0, 0, -1) : new THREE.Vector3(0, 1, 0)
+	const right = new THREE.Vector3().crossVectors(upHint, forward).normalize()
+	const up = new THREE.Vector3().crossVectors(forward, right).normalize()
+	const tan = Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5)
+	let distance = Math.max(frame.radius, 1)
+
+	for (const corner of corners) {
+		const rel = corner.sub(target)
+		const planeX = Math.abs(rel.dot(right))
+		const planeY = Math.abs(rel.dot(up))
+		const towardCamera = rel.dot(direction)
+		distance = Math.max(distance, towardCamera + Math.max(planeX, planeY) * margin / tan)
+	}
+
+	return distance + frame.radius * 0.08
 }
 
 function cameraPayload(camera, name) {
