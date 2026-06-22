@@ -23,14 +23,14 @@ export async function captureViews(renderer, scene, camera, helpers, selected, s
 	const target = new THREE.WebGLRenderTarget(size, size)
 	const depthMaterial = createDepthMaterial(camera)
 	const views = []
-	const frame = captureFrame(subjects)
+	const frames = captureFrames(subjects)
 
 	setHelpers(helpers, false)
 	const selectionOutlines = selected ? selected.children.filter(child => child.userData.isSelectionOutline) : []
 	for (const outline of selectionOutlines) outline.visible = false
 
 	for (const name of names) {
-		poseCamera(camera, name, frame)
+		poseCamera(camera, name, frames)
 		updateSky(scene, camera)
 		camera.aspect = 1
 		camera.updateProjectionMatrix()
@@ -60,14 +60,17 @@ export async function captureViews(renderer, scene, camera, helpers, selected, s
 	return views
 }
 
-function poseCamera(camera, name, frame) {
+function poseCamera(camera, name, frames) {
+	const frame = name === "top" ? frames.ground : frames.subject
 	const { target, radius } = frame
+	camera.near = 0.05
+	camera.fov = 50
 	const straightDistance = Math.max(18, radius * 2.8)
-	const topDistance = Math.max(22, radius * 3.2)
 	const height = Math.max(4.8, radius * 0.55)
 	const cornerDistance = Math.max(24, radius * 3.4)
 	const highCornerHeight = Math.max(8, radius * 0.9)
 	const lowCornerHeight = Math.max(2.2, radius * 0.2)
+	const topDistance = topFitDistance(camera, frame)
 	const offsets = {
 		front: [0, height, straightDistance],
 		back: [0, height, -straightDistance],
@@ -85,12 +88,17 @@ function poseCamera(camera, name, frame) {
 	}
 	camera.position.copy(target).add(new THREE.Vector3(...offsets[name]))
 	camera.lookAt(target)
-	camera.near = 0.05
-	camera.fov = 50
 	camera.far = Math.max(48, Math.max(straightDistance, topDistance, cornerDistance) + radius * 2 + 12)
 }
 
-function captureFrame(subjects) {
+function captureFrames(subjects) {
+	return {
+		subject: captureFrame(subjects.filter(subject => !subject.userData.locked)),
+		ground: captureFrame(subjects.filter(subject => subject.userData.locked), 0),
+	}
+}
+
+function captureFrame(subjects, minTargetY = 1.2) {
 	const box = new THREE.Box3()
 	const subjectBox = new THREE.Box3()
 	let hasSubject = false
@@ -113,11 +121,21 @@ function captureFrame(subjects) {
 
 	const target = box.getCenter(new THREE.Vector3())
 	const size = box.getSize(new THREE.Vector3())
-	target.y = Math.max(1.2, target.y)
+	target.y = Math.max(minTargetY, target.y)
 	return {
+		box: box.clone(),
 		target,
 		radius: Math.max(4, size.length() * 0.5),
 	}
+}
+
+function topFitDistance(camera, frame) {
+	const box = frame.box
+	if (!box) return Math.max(22, frame.radius * 3.2)
+	const width = Math.max(box.max.x - box.min.x, box.max.z - box.min.z)
+	const half = width * 0.5
+	const margin = 1.02
+	return Math.max(4, half * margin / Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5))
 }
 
 function cameraPayload(camera, name) {

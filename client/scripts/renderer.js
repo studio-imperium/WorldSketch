@@ -467,7 +467,7 @@ async function generate(prompt) {
 	setStatus("Capturing views")
 
 	try {
-		const captureSubjects = primitives.filter(primitive => !primitive.userData.locked)
+		const captureSubjects = primitives
 		const views = await captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected, captureSubjects)
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
 		if (job.plyUrl) els.downloadPly.href = job.plyUrl
