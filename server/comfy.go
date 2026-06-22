@@ -464,14 +464,22 @@ func novelViewPose(name string) (float64, float64) {
 		return 180, 0
 	case "top":
 		return 0, 75
-	case "corner_fr":
+	case "corner_fr_high":
 		return 45, 37
-	case "corner_fl":
+	case "corner_fl_high":
 		return -45, 37
-	case "corner_br":
+	case "corner_br_high":
 		return 135, 37
-	case "corner_bl":
+	case "corner_bl_high":
 		return -135, 37
+	case "corner_fr_low":
+		return 45, 8
+	case "corner_fl_low":
+		return -45, 8
+	case "corner_br_low":
+		return 135, 8
+	case "corner_bl_low":
+		return -135, 8
 	default:
 		return 0, 0
 	}

@@ -1,7 +1,21 @@
 import * as THREE from "three"
 
 const size = 512
-const names = ["front", "back", "left", "right", "top", "corner_fl", "corner_fr", "corner_bl", "corner_br"]
+const names = [
+	"front",
+	"back",
+	"left",
+	"right",
+	"top",
+	"corner_fl_high",
+	"corner_fr_high",
+	"corner_bl_high",
+	"corner_br_high",
+	"corner_fl_low",
+	"corner_fr_low",
+	"corner_bl_low",
+	"corner_br_low",
+]
 
 
 export async function captureViews(renderer, scene, camera, helpers, selected, subjects = []) {
@@ -48,26 +62,32 @@ export async function captureViews(renderer, scene, camera, helpers, selected, s
 
 function poseCamera(camera, name, frame) {
 	const { target, radius } = frame
-	const straightDistance = Math.max(18, radius * 2.8)
-	const cornerDistance = Math.max(24, radius * 3.4)
-	const topDistance = Math.max(22, radius * 3.2)
-	const height = Math.max(4.8, radius * 0.55)
-	const cornerHeight = Math.max(8, radius * 0.9)
+	const straightDistance = Math.max(22, radius * 3.3)
+	const topDistance = Math.max(28, radius * 3.8)
+	const height = Math.max(5.5, radius * 0.65)
+	const highCornerDistance = Math.max(30, radius * 4.1)
+	const highCornerHeight = Math.max(9.5, radius * 1.05)
+	const lowCornerDistance = Math.max(34, radius * 4.4)
+	const lowCornerHeight = Math.max(2.2, radius * 0.16)
 	const offsets = {
 		front: [0, height, straightDistance],
 		back: [0, height, -straightDistance],
 		left: [-straightDistance, height, 0],
 		right: [straightDistance, height, 0],
 		top: [0.02, topDistance, 0],
-		corner_fl: [-cornerDistance, cornerHeight, cornerDistance],
-		corner_fr: [cornerDistance, cornerHeight, cornerDistance],
-		corner_bl: [-cornerDistance, cornerHeight, -cornerDistance],
-		corner_br: [cornerDistance, cornerHeight, -cornerDistance],
+		corner_fl_high: [-highCornerDistance, highCornerHeight, highCornerDistance],
+		corner_fr_high: [highCornerDistance, highCornerHeight, highCornerDistance],
+		corner_bl_high: [-highCornerDistance, highCornerHeight, -highCornerDistance],
+		corner_br_high: [highCornerDistance, highCornerHeight, -highCornerDistance],
+		corner_fl_low: [-lowCornerDistance, lowCornerHeight, lowCornerDistance],
+		corner_fr_low: [lowCornerDistance, lowCornerHeight, lowCornerDistance],
+		corner_bl_low: [-lowCornerDistance, lowCornerHeight, -lowCornerDistance],
+		corner_br_low: [lowCornerDistance, lowCornerHeight, -lowCornerDistance],
 	}
 	camera.position.copy(target).add(new THREE.Vector3(...offsets[name]))
 	camera.lookAt(target)
 	camera.near = 0.05
-	camera.far = Math.max(48, cornerDistance + radius * 2 + 12)
+	camera.far = Math.max(56, lowCornerDistance + radius * 2 + 12)
 	camera.fov = 50
 }
 

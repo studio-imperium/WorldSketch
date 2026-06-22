@@ -31,7 +31,21 @@ from PIL import Image
 
 import json
 
-VIEW_NAMES = ["front", "back", "left", "right", "top", "corner_fl", "corner_fr", "corner_bl", "corner_br"]
+VIEW_NAMES = [
+    "front",
+    "back",
+    "left",
+    "right",
+    "top",
+    "corner_fl_high",
+    "corner_fr_high",
+    "corner_bl_high",
+    "corner_br_high",
+    "corner_fl_low",
+    "corner_fr_low",
+    "corner_bl_low",
+    "corner_br_low",
+]
 
 NEGATIVE = (
     "black background, darkness, night, galaxy, stars, abstract noise, empty image, "

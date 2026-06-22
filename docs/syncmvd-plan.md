@@ -1,7 +1,7 @@
 # Plan: Synchronized Multi-View Diffusion (SyncMVD) for WorldSketch
 
 ## Problem
-Each of the 9 views is currently diffused **independently** in ComfyUI (img2img + canny/depth ControlNet). Depth-CN *constrains* geometry but nothing makes the views *agree on appearance*, so the same surface gets different texture/colour across views → ghosting/blur/floaters when `fusion.go` fuses them and gsplat trains on them.
+Each captured view can be diffused **independently** in ComfyUI (img2img + canny/depth ControlNet). Depth-CN *constrains* geometry but nothing makes the views *agree on appearance*, so the same surface gets different texture/colour across views → ghosting/blur/floaters when `fusion.go` fuses them and gsplat trains on them.
 
 ## Goal
 Make all views share one appearance by synchronizing them through the known 3D geometry during denoising, so they line up. We already have everything SyncMVD needs: per-view **cameras** (`camera.json`), per-view **depth** (`primitive_depth.png`), analytic **primitive geometry**, and the unprojection math in `fusion.go`.

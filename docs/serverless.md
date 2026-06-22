@@ -69,5 +69,5 @@ on a cheap public CPU box and set `WORLDSKETCH_PUBLIC_URL` to its address (no tu
 ## Notes / caveats
 - **Untested live** — Go one-shot builds and the handler passes syntax; the Docker build, model-volume wiring, and a real RunPod run need your account to verify. Most likely fixups: exact base-image tag / wheel index, and the DreamShaper checkpoint source.
 - **Cold start** ~30–90 s after idle (boot + model load); fine since gsplat training is minutes. Set min workers = 1 only if you want zero cold start.
-- **Payload size** — 9 views base64'd is ~5–8 MB into `/run`; fine for async. Artifacts go back via `resultUrl` (not the job result, which is size-capped).
+- **Payload size** — 13 views base64'd is still fine for async. Artifacts go back via `resultUrl` (not the job result, which is size-capped).
 ```
