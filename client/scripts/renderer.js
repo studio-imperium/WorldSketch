@@ -130,6 +130,7 @@ function addPrimitive(type, seed) {
 	group.add(mesh)
 	primitives.push(mesh)
 	select(mesh)
+	scheduleSave()
 	return mesh
 }
 
@@ -343,6 +344,7 @@ function applyColor(color) {
 	if (selected) selected.material.color.set(color)
 	if (placementPreview) placementPreview.material.color.set(color)
 	syncColorPalette()
+	scheduleSave()
 }
 
 function removePrimitive(mesh) {
@@ -356,6 +358,7 @@ function removePrimitive(mesh) {
 	if (selected === mesh) selected = null
 	syncSelectionUi()
 	syncRotationGizmo()
+	scheduleSave()
 }
 
 function removeSelected() {
@@ -475,6 +478,67 @@ function markGeneratedExisting() {
 		}
 	}
 	select(null)
+	scheduleSave()
+}
+
+// --- Local autosave: a reload keeps your scene, plots, and parent link ---------------
+// (in-memory only otherwise — there's no server-side scene store). Open with ?new to
+// start a fresh world.
+const STORAGE_KEY = "worldsketch_editor_v1"
+let saveTimer = null
+
+function serializeForSave(mesh) {
+	return {
+		...serializePrimitive(mesh), // id/type/position/rotation/scale/color/existing
+		locked: mesh.userData.locked === true,
+		isGround: mesh.userData.isGround === true,
+	}
+}
+
+function saveState() {
+	saveTimer = null
+	try {
+		localStorage.setItem(STORAGE_KEY, JSON.stringify({
+			v: 1,
+			nextId,
+			lastJobId,
+			addPlotCount,
+			activeOrigin: [activeOrigin.x, activeOrigin.y, activeOrigin.z],
+			primitives: primitives.map(serializeForSave),
+		}))
+	} catch (err) {
+		// localStorage full/disabled — autosave is best-effort, never block the editor.
+	}
+}
+
+function scheduleSave() {
+	if (saveTimer) clearTimeout(saveTimer)
+	saveTimer = setTimeout(saveState, 400)
+}
+
+function loadState() {
+	let state
+	try {
+		state = JSON.parse(localStorage.getItem(STORAGE_KEY) || "null")
+	} catch {
+		return false
+	}
+	if (!state || !Array.isArray(state.primitives) || state.primitives.length === 0) return false
+
+	for (const seed of state.primitives) {
+		const mesh = addPrimitive(seed.type, seed)
+		if (seed.existing && mesh?.material) {
+			mesh.material.transparent = true
+			mesh.material.opacity = 0.5
+		}
+	}
+	if (Number.isFinite(state.nextId)) nextId = state.nextId
+	lastJobId = state.lastJobId ?? null
+	addPlotCount = state.addPlotCount ?? 0
+	if (Array.isArray(state.activeOrigin)) {
+		activeOrigin.set(state.activeOrigin[0] || 0, state.activeOrigin[1] || 0, state.activeOrigin[2] || 0)
+	}
+	return true
 }
 
 function setStatus(message) {
@@ -681,7 +745,10 @@ renderer.domElement.addEventListener("pointerup", (event) => {
 	primitiveDrag = null
 	renderer.domElement.classList.remove("is-dragging")
 	renderer.domElement.releasePointerCapture(event.pointerId)
-	if (transformed) select(null) // deselect after an actual move/scale/rotate
+	if (transformed) {
+		select(null) // deselect after an actual move/scale/rotate
+		scheduleSave()
+	}
 }, { capture: true })
 
 renderer.domElement.addEventListener("pointerup", (event) => {
@@ -924,16 +991,23 @@ function animate() {
 	requestAnimationFrame(animate)
 }
 
-addPrimitive("box", {
-	id: `prim_${String(nextId++).padStart(3, "0")}`,
-	type: "box",
-	position: [0, 0.05, 0],
-	rotation: [0, 0, 0],
-	scale: [bounds.max.x - bounds.min.x, 0.1, bounds.max.z - bounds.min.z],
-	color: "#587553",
-	locked: true,
-	isGround: true,
-})
+// ?new wipes the autosave and starts clean; otherwise restore the last world if there is one.
+if (new URLSearchParams(location.search).has("new")) {
+	try { localStorage.removeItem(STORAGE_KEY) } catch { /* ignore */ }
+}
+if (!loadState()) {
+	addPrimitive("box", {
+		id: `prim_${String(nextId++).padStart(3, "0")}`,
+		type: "box",
+		position: [0, 0.05, 0],
+		rotation: [0, 0, 0],
+		scale: [bounds.max.x - bounds.min.x, 0.1, bounds.max.z - bounds.min.z],
+		color: "#587553",
+		locked: true,
+		isGround: true,
+	})
+}
+window.addEventListener("beforeunload", saveState)
 select(null)
 setActiveTool("pointer")
 animate()
