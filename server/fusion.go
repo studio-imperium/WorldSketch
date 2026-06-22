@@ -14,6 +14,7 @@ import (
 
 func WritePLYFromViews(scene Scene, dir, path string) error {
 	points := make([]Point, 0, 240000)
+	min, max := sceneCullBounds(scene)
 
 	for _, name := range viewNames {
 		viewDir := filepath.Join(dir, "views", name)
@@ -23,7 +24,7 @@ func WritePLYFromViews(scene Scene, dir, path string) error {
 		primitiveDepth := readPNG(filepath.Join(viewDir, "primitive_depth.png"))
 		generatedDepth := readPNG(prefer(filepath.Join(viewDir, "generated_depth.png"), filepath.Join(viewDir, "primitive_depth.png")))
 
-		points = append(points, pointsFromView(camera, rgb, primitiveDepth, generatedDepth)...)
+		points = append(points, pointsFromViewMasked(camera, rgb, primitiveDepth, generatedDepth, nil, min, max)...)
 	}
 
 	points = dedupe(points, envFloat("WS_DEDUPE", 0.015))
@@ -43,6 +44,16 @@ func WritePLYFromViews(scene Scene, dir, path string) error {
 }
 
 func pointsFromView(camera Camera, rgb image.Image, primitiveDepth image.Image, generatedDepth image.Image) []Point {
+	min, max := defaultCullBounds()
+	return pointsFromViewMasked(camera, rgb, primitiveDepth, generatedDepth, nil, min, max)
+}
+
+// pointsFromViewMasked unprojects a view to world points, keeping only points inside
+// [min,max] (the scene bounds + margin — this is what makes adjacent plots possible:
+// the keep-region grows with the world instead of a fixed ±16 box). When mask is
+// non-nil, only pixels where the mask is bright (white = new object) are emitted — this
+// is how expansion fuses just the delta and leaves the existing world's points untouched.
+func pointsFromViewMasked(camera Camera, rgb image.Image, primitiveDepth image.Image, generatedDepth image.Image, mask image.Image, lo, hi Vec3) []Point {
 	bounds := primitiveDepth.Bounds()
 	w := bounds.Dx()
 	h := bounds.Dy()
@@ -54,6 +65,9 @@ func pointsFromView(camera Camera, rgb image.Image, primitiveDepth image.Image, 
 
 	for y := 0; y < h; y += stride {
 		for x := 0; x < w; x += stride {
+			if mask != nil && grayAt(mask, x, y) < 0.5 {
+				continue // outside the new-object region — belongs to the frozen world
+			}
 			pd := grayAt(primitiveDepth, x, y)
 			if pd < 0.01 {
 				continue
@@ -65,7 +79,7 @@ func pointsFromView(camera Camera, rgb image.Image, primitiveDepth image.Image, 
 			px := ((float64(x)+0.5)/float64(w)*2 - 1) * camera.Aspect * tan * depth
 			py := (1 - (float64(y)+0.5)/float64(h)*2) * tan * depth
 			world := add(camera.Position, add(mul(camera.Forward, depth), add(mul(camera.Right, px), mul(camera.Up, py))))
-			if outside(world) {
+			if outside(world, lo, hi) {
 				continue
 			}
 
@@ -182,8 +196,27 @@ func mul(a Vec3, s float64) Vec3 {
 	return Vec3{a[0] * s, a[1] * s, a[2] * s}
 }
 
-func outside(p Vec3) bool {
-	return p[0] < -16 || p[0] > 16 || p[1] < -1 || p[1] > 9 || p[2] < -16 || p[2] > 16
+func outside(p Vec3, min, max Vec3) bool {
+	return p[0] < min[0] || p[0] > max[0] || p[1] < min[1] || p[1] > max[1] || p[2] < min[2] || p[2] > max[2]
+}
+
+// defaultCullBounds reproduces the original fixed ±16 (x/z) / [-1,9] (y) keep-box, used
+// when no scene bounds are available (the bare pointsFromView wrapper + tests).
+func defaultCullBounds() (Vec3, Vec3) {
+	return Vec3{-16, -1, -16}, Vec3{16, 9, 16}
+}
+
+// sceneCullBounds expands the scene's authored bounds by a margin so fused points just
+// outside a primitive's surface survive, while points from an unrelated tile far away
+// (or sky/floaters) are dropped. With the default single-plot bounds this is exactly the
+// original ±16 / [-1,9] box; with multiple tiles it grows to cover them all.
+func sceneCullBounds(scene Scene) (Vec3, Vec3) {
+	min := scene.Bounds.Min
+	max := scene.Bounds.Max
+	if min == (Vec3{}) && max == (Vec3{}) {
+		return defaultCullBounds()
+	}
+	return Vec3{min[0] - 6, min[1] - 1, min[2] - 6}, Vec3{max[0] + 6, max[1] + 4, max[2] + 6}
 }
 
 func clamp01(value float64) float64 {

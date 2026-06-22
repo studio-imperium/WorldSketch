@@ -191,6 +191,7 @@ locally). Defaults in `.env.example` and read in `server/config.go`.
 | `WS_SPLAT_MAX_SCALE` / `WS_SPLAT_DENSIFY_FRAC` | 0.07 / 0.1 | gaussian size cap / clone fraction during densification |
 | `WS_SPLAT_REFINE_EVERY` / `WS_SPLAT_DENSIFY_STOP_FRAC` | 100 / 0.6 | densify-prune cadence / when cloning stops |
 | `WS_IMAGEGEN` | (ComfyUI) | `syncmvd` switches to the diffusers path |
+| `WS_EXPAND_DENOISE` / `WS_EXPAND_MASK_GROW` | 0.8 / 6 | expansion: img2img strength inside the new-object mask / px the mask is dilated for seam blending |
 | `WORLDSKETCH_PYTHON` | venv → `python3` | python interpreter for the ML scripts |
 
 ### Tests
@@ -275,6 +276,14 @@ The north star is **walk inside your sketch**:
 - **D — first-person player**: splat renderer + kinematic capsule controller doing
   collision against the analytic colliders. The biggest single build; the payoff.
 - **E — SyncMVD** (optional quality): swap image-gen if depth-CN consistency isn't enough.
+
+A parallel track is **growing a world plot-by-plot instead of regenerating it**: each
+expansion is an *independent* generation of just the new tile (`WriteExpandedPLY` fuses
+only the new objects' masked points into the new plot's own `world.ply`/`world.splat`).
+The existing plot is never re-fused or re-trained — the world is composed by stacking
+per-plot splats in the viewer, with style continuity from the shared prompt/seed. Design +
+the model-optimisation levers it shares with SyncMVD/gsplat:
+[world-expansion-plan.md](world-expansion-plan.md).
 
 Full rationale, effort estimates, and ordering: [generation-pipeline-plan.md](generation-pipeline-plan.md).
 

@@ -6,10 +6,15 @@ gsplat), and ships world.splat back to the coordinator. Nothing is stored long-t
 the artifact is PUT to the coordinator's per-job resultUrl (which streams it to the
 player and discards it), or returned inline as base64 for small payloads.
 
+Expansion (scene.parent set) is just a normal generation of the new tile that fuses
+only its own masked delta — each plot is independent, so no parent cloud is fetched;
+the viewer stacks per-plot splats.
+
 Expected input:
     {
-      "scene":  {... scene.json ...},
-      "views":  [{"name","rgb"(b64 png),"depth"(b64 png),"camera"{...}}, ...],
+      "scene":  {... scene.json ...},          # scene.parent set => expansion
+      "views":  [{"name","rgb"(b64 png),"depth"(b64 png),"camera"{...},
+                  "mask"(b64 png, expansion only)}, ...],
       "resultUrl": "https://coordinator/.../result"   # optional; PUT target
     }
 
@@ -102,16 +107,27 @@ def ensure_comfy():
     raise RuntimeError("ComfyUI did not become ready in time")
 
 
+def _safe_view_name(name):
+    # view["name"] lands in a filesystem path — reject anything that could escape job_dir.
+    if not isinstance(name, str) or "/" in name or "\\" in name or name in ("", ".", ".."):
+        raise ValueError(f"invalid view name: {name!r}")
+    return name
+
+
 def stage_inputs(job_dir, payload):
     root = pathlib.Path(job_dir)
     root.mkdir(parents=True, exist_ok=True)
     (root / "scene.json").write_text(json.dumps(payload["scene"]))
     for view in payload["views"]:
-        view_dir = root / "views" / view["name"]
+        name = _safe_view_name(view["name"])
+        view_dir = root / "views" / name
         view_dir.mkdir(parents=True, exist_ok=True)
         (view_dir / "primitive_rgb.png").write_bytes(base64.b64decode(view["rgb"]))
         (view_dir / "primitive_depth.png").write_bytes(base64.b64decode(view["depth"]))
         (view_dir / "camera.json").write_text(json.dumps(view["camera"]))
+        # Expansion only: the new-object mask the fusion step uses to fuse just the delta.
+        if view.get("mask"):
+            (view_dir / "new_mask.png").write_bytes(base64.b64decode(view["mask"]))
 
 
 def is_job_artifact_path(name):
@@ -162,7 +178,11 @@ def write_result_bundle(job_dir):
         for item in path.rglob("*"):
             if not item.is_file() or item == bundle:
                 continue
-            zf.write(item, item.relative_to(path).as_posix())
+            rel = item.relative_to(path)
+            # Don't ship the staged parent point cloud back — the coordinator already has it.
+            if rel.parts and rel.parts[0] == "parent":
+                continue
+            zf.write(item, rel.as_posix())
     return bundle
 
 
@@ -176,10 +196,13 @@ def handler(event):
         ensure_comfy()
     job_dir = f"/tmp/ws-{uuid.uuid4().hex}"
     try:
-        if mode == "retrain":
-            stage_retrain_inputs(job_dir, payload)
-        else:
-            stage_inputs(job_dir, payload)
+        try:
+            if mode == "retrain":
+                stage_retrain_inputs(job_dir, payload)
+            else:
+                stage_inputs(job_dir, payload)
+        except Exception as exc:
+            return {"error": f"bad input: {exc}"}
 
         env = os.environ.copy()
         if mode == "retrain":

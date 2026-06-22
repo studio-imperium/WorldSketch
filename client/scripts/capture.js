@@ -18,12 +18,19 @@ const names = [
 ]
 
 
-export async function captureViews(renderer, scene, camera, helpers, selected, subjects = []) {
+// subjects: meshes to auto-frame the 13 cameras around (ground tile + objects on it).
+// options.maskMeshes: during expansion, the *new* meshes — we also render a white-on-black
+//   mask of just those so the server inpaints + fuses only the delta.
+export async function captureViews(renderer, scene, camera, helpers, selected, subjects = [], options = {}) {
+	const { maskMeshes = null } = options
 	const original = snapshot(camera, renderer)
 	const target = new THREE.WebGLRenderTarget(size, size)
 	const depthMaterial = createDepthMaterial(camera)
 	const views = []
 	const frames = captureFrames(subjects)
+
+	const maskSet = maskMeshes && maskMeshes.length ? new Set(maskMeshes) : null
+	const maskMaterial = maskSet ? new THREE.MeshBasicMaterial({ color: 0xffffff }) : null
 
 	setHelpers(helpers, false)
 	const selectionOutlines = selected ? selected.children.filter(child => child.userData.isSelectionOutline) : []
@@ -43,21 +50,44 @@ export async function captureViews(renderer, scene, camera, helpers, selected, s
 		const depth = await captureTarget(renderer, scene, camera, target, 0x000000)
 		scene.overrideMaterial = null
 
+		const mask = maskSet ? await captureMask(renderer, scene, camera, target, maskSet, maskMaterial) : null
+
 		views.push({
 			name,
 			rgb,
 			depth,
+			mask,
 			camera: cameraPayload(camera, name),
 		})
 	}
 
 	target.dispose()
 	depthMaterial.dispose()
+	if (maskMaterial) maskMaterial.dispose()
 	restore(camera, renderer, original)
 	setHelpers(helpers, true)
 	for (const outline of selectionOutlines) outline.visible = true
 
 	return views
+}
+
+// captureMask renders only the new meshes as white on black: hide every other mesh,
+// force a flat white material, snapshot, then restore visibility.
+async function captureMask(renderer, scene, camera, target, maskSet, maskMaterial) {
+	const restored = []
+	scene.traverse(object => {
+		if (object.isMesh) {
+			restored.push([object, object.visible])
+			object.visible = maskSet.has(object)
+		}
+	})
+
+	scene.overrideMaterial = maskMaterial
+	const blob = await captureTarget(renderer, scene, camera, target, 0x000000)
+	scene.overrideMaterial = null
+
+	for (const [object, visible] of restored) object.visible = visible
+	return blob
 }
 
 function poseCamera(camera, name, frames) {
@@ -92,10 +122,13 @@ function poseCamera(camera, name, frames) {
 	camera.far = Math.max(48, Math.max(straightDistance, topDistance, cornerDistance) + radius * 2 + 12)
 }
 
+// Split the framed subjects into the ground tile(s) and the objects on them. Keyed on
+// isGround (not locked) so a freshly-added, still-unlocked expansion tile is framed as
+// ground too — the top view fits the tile, the side views frame the objects.
 function captureFrames(subjects) {
 	return {
-		subject: captureFrame(subjects.filter(subject => !subject.userData.locked)),
-		ground: captureFrame(subjects.filter(subject => subject.userData.locked), 0),
+		subject: captureFrame(subjects.filter(subject => !subject.userData.isGround)),
+		ground: captureFrame(subjects.filter(subject => subject.userData.isGround), 0),
 	}
 }
 

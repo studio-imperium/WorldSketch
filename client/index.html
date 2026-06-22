@@ -43,6 +43,7 @@
 			<button class="generate-btn btn btn-square btn-primary" id="generate_btn" aria-label="Generate world" title="Generate">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l1.3 3.2l3.2 1.3l-3.2 1.3l-1.3 3.2l-1.3 -3.2l-3.2 -1.3l3.2 -1.3z"></path><path d="M6.5 13l.8 2l2 .8l-2 .8l-.8 2l-.8 -2l-2 -.8l2 -.8z"></path></svg>
 			</button>
+			<button class="btn btn-sm" id="add_plot_btn" type="button" aria-label="Add an adjacent plot" title="Add an adjacent plot that copies this plot's vibe">+ Add plot</button>
 			<button class="world-tile hidden" id="world_tile" type="button" aria-label="Download generated world" title="Download generated world">
 				<span class="loading loading-spinner loading-md world-spinner" id="world_spinner" aria-hidden="true"></span>
 				<img class="world-preview hidden" id="world_preview" alt="">
@@ -59,6 +60,24 @@
 				<input id="retrain_bundle_input" type="file" accept=".zip,application/zip">
 			</label>
 			<p class="status hidden text-sm text-base-content/70" id="status"></p>
+			<p class="backend-status hidden" id="backend_status"></p>
+		</section>
+		<section class="plots-panel card bg-base-100 shadow-xl border border-base-300 hidden" id="plots_panel" aria-label="Plots">
+			<div class="card-body p-2">
+				<div class="plots-head">
+					<span class="plots-title">Plots</span>
+					<div class="plots-actions">
+						<button class="btn btn-xs btn-ghost" id="clear_world_btn" type="button" title="Clear everything and start a fresh world">Clear</button>
+						<button class="btn btn-xs btn-primary" id="build_all_btn" type="button" title="Build every plot, one at a time">Build all</button>
+					</div>
+				</div>
+				<p class="plots-hint">Click a plot to focus · check several to build together · “Match” copies a plot's vibe onto them</p>
+				<ul class="plots-list" id="plots_list"></ul>
+				<div class="plots-foot">
+					<select class="plots-match select select-xs" id="match_plot" title="Build the targets to match this plot's vibe"></select>
+					<button class="btn btn-xs" id="build_selected_btn" type="button" title="Build the checked plots">Build selected</button>
+				</div>
+			</div>
 		</section>
 		<dialog class="modal" id="generate_modal">
 			<div class="modal-box generate-modal-box">
@@ -68,7 +87,7 @@
 					</button>
 				</form>
 				<form id="generate_form">
-					<h2 class="text-lg font-bold">Describe your scene</h2>
+					<h2 class="text-lg font-bold" id="generate_title">Describe your scene</h2>
 					<textarea class="textarea textarea-bordered scene-prompt" id="scene_prompt" rows="5" placeholder="A mossy ruin in a quiet forest clearing, soft daylight, natural stone and grass"></textarea>
 					<div class="modal-action">
 						<button class="btn" type="button" id="cancel_generate_btn">Cancel</button>

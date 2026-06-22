@@ -108,25 +108,84 @@ func (s *Store) CreateRetrain(bundle []byte) (*Job, error) {
 
 func (s *Store) Get(id string) (*Job, bool) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if job, ok := s.jobs[id]; ok {
+		copy := *job
+		s.mu.Unlock()
+		return &copy, true
+	}
+	s.mu.Unlock()
 
-	job, ok := s.jobs[id]
+	// Not in memory (e.g. after a server restart): try to resurrect a completed job
+	// from its on-disk artifacts. Do the disk I/O without holding the lock.
+	job, ok := s.reconstructFromDisk(id)
 	if !ok {
 		return nil, false
 	}
 
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Another request may have reconstructed (or the real job may have been created)
+	// while we were off the lock — prefer the existing entry to avoid clobbering it.
+	if existing, ok := s.jobs[id]; ok {
+		copy := *existing
+		return &copy, true
+	}
+	s.jobs[id] = job
 	copy := *job
 	return &copy, true
+}
+
+// reconstructFromDisk rebuilds a completed Job from its artifacts on disk so a
+// client can recover a finished world after the in-memory job map is gone (e.g. a
+// server restart). It only resurrects *completed* jobs: both scene.json and
+// world.splat must exist. A job with scene.json but no world.splat was interrupted
+// and can't be resumed, so the caller should 404. The URL fields mirror markDone.
+func (s *Store) reconstructFromDisk(id string) (*Job, bool) {
+	dir := filepath.Join(s.root, id)
+	if !fileExists(filepath.Join(dir, "scene.json")) || !fileExists(filepath.Join(dir, "world.splat")) {
+		return nil, false
+	}
+
+	ts := time.Now()
+	if info, err := os.Stat(filepath.Join(dir, "world.splat")); err == nil {
+		ts = info.ModTime()
+	}
+
+	job := &Job{
+		ID:           id,
+		Status:       "done",
+		SplatURL:     "/api/jobs/" + id + "/world.splat",
+		CollisionURL: "/api/jobs/" + id + "/collisions.json",
+		CreatedAt:    ts,
+		UpdatedAt:    ts,
+	}
+	if fileExists(filepath.Join(dir, "world.ply")) {
+		job.PlyURL = "/api/jobs/" + id + "/world.ply"
+		job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
+	}
+	if fileExists(filepath.Join(dir, "views", "front", "generated_rgb.png")) {
+		job.PreviewURL = "/api/jobs/" + id + "/preview.png"
+	}
+	return job, true
 }
 
 func (s *Store) Run(id string) {
 	dir := filepath.Join(s.root, id)
 	scene := readScene(filepath.Join(dir, "scene.json"))
 
-	// Serverless: hand the whole pipeline to the RunPod GPU worker instead of
-	// running ComfyUI + gsplat locally. The worker PUTs world.splat back to us.
+	// Serverless: hand the whole pipeline to the RunPod GPU worker instead of running
+	// ComfyUI + gsplat locally. This handles expansion too — buildRunpodInput ships the
+	// per-view masks + the parent's world.ply, and the worker's pipeline fuses the new
+	// tile onto it. The worker PUTs the result bundle back to us.
 	if runpodConfigured() {
 		s.runRemote(id, dir, scene)
+		return
+	}
+
+	// Local expansion fallback (no RunPod): inpaint the new objects via local ComfyUI and
+	// fuse onto the parent point cloud.
+	if scene.isExpansion() {
+		s.runExpansion(id, dir, scene)
 		return
 	}
 
@@ -180,16 +239,7 @@ func (s *Store) Run(id string) {
 		return
 	}
 
-	s.mu.Lock()
-	job := s.jobs[id]
-	job.Status = "done"
-	job.PlyURL = "/api/jobs/" + id + "/world.ply"
-	job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
-	job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
-	job.PreviewURL = "/api/jobs/" + id + "/preview.png"
-	job.SplatURL = "/api/jobs/" + id + "/world.splat"
-	job.UpdatedAt = time.Now()
-	s.mu.Unlock()
+	s.complete(id)
 }
 
 func (s *Store) RunRetrain(id string) {
@@ -214,6 +264,9 @@ func writeViews(dir string, views []UploadedView) {
 		os.WriteFile(filepath.Join(viewDir, "primitive_rgb.png"), view.RGB, 0644)
 		os.WriteFile(filepath.Join(viewDir, "primitive_depth.png"), view.Depth, 0644)
 		os.WriteFile(filepath.Join(viewDir, "camera.json"), view.CameraJSON, 0644)
+		if len(view.Mask) > 0 {
+			os.WriteFile(filepath.Join(viewDir, "new_mask.png"), view.Mask, 0644)
+		}
 	}
 }
 
@@ -278,7 +331,7 @@ func previewPath(dir string) string {
 func (s *Store) runRemote(id, dir string, scene Scene) {
 	base := publicBaseURL()
 	if base == "" {
-		s.fail(id, errors.New("WORLDSKETCH_PUBLIC_URL is not set — the GPU worker needs a public URL to return results"))
+		s.fail(id, errors.New("WORLDSKETCH_PUBLIC_URL is not set — the GPU worker needs a public URL to return results; run ./scripts/dev.sh (starts a tunnel + sets it) or set it in .env"))
 		return
 	}
 

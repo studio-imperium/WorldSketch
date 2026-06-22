@@ -30,10 +30,14 @@ type runpodView struct {
 	RGB    string          `json:"rgb"`
 	Depth  string          `json:"depth"`
 	Camera json.RawMessage `json:"camera"`
+	Mask   string          `json:"mask,omitempty"` // new-object mask (expansion only)
 }
 
-// buildRunpodInput packs the staged job dir into the worker's input payload:
-// scene + base64 views + the callback URL the worker PUTs world.splat to.
+// buildRunpodInput packs the staged job dir into the worker's input payload: scene +
+// base64 views + the callback URL the worker PUTs the result bundle to. For an expansion
+// it also includes each view's new-object mask so the worker can fuse just the new tile.
+// Each plot is independent — the parent cloud is never shipped or fetched; the viewer
+// stacks per-plot splats.
 func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any, error) {
 	var views []runpodView
 	for _, name := range viewNames {
@@ -44,21 +48,38 @@ func buildRunpodInput(dir string, scene Scene, resultURL string) (map[string]any
 		}
 		depth, _ := os.ReadFile(filepath.Join(viewDir, "primitive_depth.png"))
 		camera, _ := os.ReadFile(filepath.Join(viewDir, "camera.json"))
-		views = append(views, runpodView{
+		view := runpodView{
 			Name:   name,
 			RGB:    base64.StdEncoding.EncodeToString(rgb),
 			Depth:  base64.StdEncoding.EncodeToString(depth),
 			Camera: json.RawMessage(camera),
-		})
+		}
+		if mask, err := os.ReadFile(filepath.Join(viewDir, "new_mask.png")); err == nil {
+			view.Mask = base64.StdEncoding.EncodeToString(mask)
+		}
+		views = append(views, view)
 	}
 	if len(views) == 0 {
 		return nil, errors.New("no views to submit")
 	}
-	return map[string]any{
-		"scene":     scene,
+
+	input := map[string]any{
 		"views":     views,
 		"resultUrl": resultURL,
-	}, nil
+	}
+
+	if scene.isExpansion() {
+		// Copy the parent's vibe: fall back to its prompt when none was supplied, so the new
+		// plot lands in the same stylistic basin. The parent cloud itself is never fetched —
+		// the worker fuses only this plot's masked delta into its own world.ply.
+		if strings.TrimSpace(scene.Prompt) == "" {
+			parentDir := filepath.Join(filepath.Dir(dir), scene.Parent)
+			scene.Prompt = readScene(filepath.Join(parentDir, "scene.json")).Prompt
+		}
+	}
+
+	input["scene"] = scene
+	return input, nil
 }
 
 func buildRunpodRetrainInput(bundleURL, resultURL string) map[string]any {

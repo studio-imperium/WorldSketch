@@ -17,6 +17,8 @@ import (
 const outputDir = "output"
 
 func main() {
+	loadDotEnv() // pick up .env (RunPod creds + tunables) without the shell exporting it
+
 	jobDir := flag.String("job", "", "serverless worker mode: run the pipeline once on this job dir, then exit")
 	flag.Parse()
 	if *jobDir != "" {
@@ -30,10 +32,13 @@ func main() {
 	if runpodConfigured() {
 		log.Printf("RunPod mode: endpoint=%s  results→%s", os.Getenv("RUNPOD_ENDPOINT_ID"), publicBaseURL())
 		if publicBaseURL() == "" {
-			log.Println("  WARNING: WORLDSKETCH_PUBLIC_URL is empty — the worker can't return results")
+			log.Println("  WARNING: WORLDSKETCH_PUBLIC_URL is empty — the GPU worker can't return results, so")
+			log.Println("           builds will fail. Run ./scripts/dev.sh (starts a cloudflare tunnel and sets")
+			log.Println("           it), or set WORLDSKETCH_PUBLIC_URL in .env to a URL the worker can reach.")
 		}
 	} else {
-		log.Println("Local pipeline mode (set RUNPOD_ENDPOINT_ID + RUNPOD_API_KEY + WORLDSKETCH_PUBLIC_URL for serverless)")
+		log.Println("Local pipeline mode — no RunPod creds found. Splat training needs a GPU; add")
+		log.Println("RUNPOD_ENDPOINT_ID + RUNPOD_API_KEY to .env and run ./scripts/dev.sh for serverless.")
 	}
 
 	http.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
@@ -137,6 +142,21 @@ func main() {
 		writeJSON(w, http.StatusOK, job)
 	})
 
+	// Lets the editor show whether builds will actually reach the GPU, so a blank splat is
+	// explained instead of mysterious. mode: "gpu" ready · "gpu_no_url" creds but no tunnel ·
+	// "local" no creds (splat training needs a GPU, so local builds produce only world.ply).
+	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
+		runpod := runpodConfigured()
+		hasURL := publicBaseURL() != ""
+		mode := "local"
+		if runpod && hasURL {
+			mode = "gpu"
+		} else if runpod {
+			mode = "gpu_no_url"
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"mode": mode, "runpod": runpod, "publicUrl": hasURL})
+	})
+
 	os.MkdirAll(outputDir, 0755)
 	http.Handle("/", http.FileServer(http.Dir("../client")))
 
@@ -214,6 +234,7 @@ type UploadedView struct {
 	RGB        []byte
 	Depth      []byte
 	CameraJSON []byte
+	Mask       []byte // new-object mask (expansion only): white where a new primitive is visible
 }
 
 func readGenerateRequest(r *http.Request) (Scene, []UploadedView, error) {
@@ -221,7 +242,10 @@ func readGenerateRequest(r *http.Request) (Scene, []UploadedView, error) {
 		return Scene{}, nil, err
 	}
 
-	sceneFile, _, _ := r.FormFile("scene")
+	sceneFile, _, err := r.FormFile("scene")
+	if err != nil {
+		return Scene{}, nil, fmt.Errorf("missing scene part: %w", err)
+	}
 	defer sceneFile.Close()
 
 	var scene Scene
@@ -239,7 +263,8 @@ func readUploadedView(r *http.Request, name string) UploadedView {
 	rgb, _ := readMultipartFile(r, name+"_rgb")
 	depth, _ := readMultipartFile(r, name+"_depth")
 	camera, _ := readMultipartFile(r, name+"_camera")
-	return UploadedView{Name: name, RGB: rgb, Depth: depth, CameraJSON: camera}
+	mask, _ := readMultipartFile(r, name+"_mask") // present only on expansion submits
+	return UploadedView{Name: name, RGB: rgb, Depth: depth, CameraJSON: camera, Mask: mask}
 }
 
 func readRetrainRequest(r *http.Request) ([]byte, error) {
@@ -258,7 +283,13 @@ func readRetrainRequest(r *http.Request) ([]byte, error) {
 }
 
 func readMultipartFile(r *http.Request, field string) ([]byte, error) {
-	file, _, _ := r.FormFile(field)
+	// FormFile returns a nil file for an absent field (e.g. the per-view _mask, which is
+	// only sent on expansion submits) — guard it so a missing optional part can't panic
+	// the handler.
+	file, _, err := r.FormFile(field)
+	if err != nil {
+		return nil, err
+	}
 	defer file.Close()
 	return io.ReadAll(file)
 }

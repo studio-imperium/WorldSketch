@@ -25,11 +25,20 @@ func RunPipeline(dir string, scene Scene, status func(string)) error {
 	status("estimating depth")
 	RunDepth(dir)
 
-	status("fusing views")
 	plyPath := filepath.Join(dir, "world.ply")
-	if err := WritePLYFromViews(scene, dir, plyPath); err != nil {
-		if err := WritePLY(scene, plyPath, SeedFromString(filepath.Base(dir))); err != nil {
+	if scene.isExpansion() {
+		// Expansion: this plot is independent — fuse ONLY the new tile (masked) into its own
+		// world.ply. No parent cloud is staged or merged; the viewer stacks per-plot splats.
+		status("fusing new plot")
+		if err := WriteExpandedPLY(scene, dir, plyPath); err != nil {
 			return err
+		}
+	} else {
+		status("fusing views")
+		if err := WritePLYFromViews(scene, dir, plyPath); err != nil {
+			if err := WritePLY(scene, plyPath, SeedFromString(filepath.Base(dir))); err != nil {
+				return err
+			}
 		}
 	}
 	if envBool("WS_POINT_CLOUD_ONLY") {
