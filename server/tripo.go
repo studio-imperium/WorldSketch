@@ -257,6 +257,15 @@ func openaiImageEdit(imagePath, scenePrompt string) ([]byte, error) {
 	w.WriteField("prompt", tripoEditPrompt(scenePrompt))
 	w.WriteField("size", envStr("WS_OPENAI_SIZE", "1024x1024"))
 	w.WriteField("n", "1")
+	// input_fidelity=high makes gpt-image-1 hug the input image (keeps the block-out's
+	// silhouettes/layout instead of reimagining the scene); quality trades cost for detail.
+	// Both are optional gpt-image-1 fields — set to "" to omit.
+	if v := envStr("WS_OPENAI_FIDELITY", "high"); v != "" {
+		w.WriteField("input_fidelity", v)
+	}
+	if v := envStr("WS_OPENAI_QUALITY", "high"); v != "" {
+		w.WriteField("quality", v)
+	}
 	if err := w.Close(); err != nil {
 		return nil, err
 	}
@@ -293,18 +302,24 @@ func openaiImageEdit(imagePath, scenePrompt string) ([]byte, error) {
 	return base64.StdEncoding.DecodeString(out.Data[0].B64JSON)
 }
 
-// tripoEditPrompt builds the image-edit instruction: keep the block-out composition,
-// render it as a finished isometric asset on a clean background. The scene prompt (the
-// player's "vibe") leads, then the structural constraints.
+// tripoEditPrompt builds the image-edit instruction. The structural constraints lead so
+// the model treats the player's "vibe" as surface style/mood, not license to redesign the
+// scene — the block-out's exact shapes, counts, and layout must survive. Override the whole
+// thing with WS_TRIPO_EDIT_PROMPT (use {vibe} where the scene prompt should be spliced).
 func tripoEditPrompt(scenePrompt string) string {
-	base := "Render this rough 3D block-out as a single finished, detailed isometric game asset " +
-		"with clean studio lighting on a plain neutral background, preserving the overall shapes, " +
-		"layout, and proportions."
 	scenePrompt = strings.TrimSpace(scenePrompt)
+	if tmpl := envStr("WS_TRIPO_EDIT_PROMPT", ""); tmpl != "" {
+		return strings.ReplaceAll(tmpl, "{vibe}", scenePrompt)
+	}
+	base := "Re-render this 3D block-out as a finished, textured isometric game asset. " +
+		"Keep the block-out's main objects true to their shapes, sizes, positions, and proportions " +
+		"— a cone stays a cone, a cylinder stays a cylinder, a sphere stays a sphere, a box stays a " +
+		"box; do not reshape or merge them. You may add complementary surrounding scenery and props " +
+		"that fit the setting. Keep the same isometric camera angle."
 	if scenePrompt == "" {
 		return base
 	}
-	return scenePrompt + ". " + base
+	return base + " Setting and style: " + scenePrompt + "."
 }
 
 // tripoGenerate POSTs the image to the TripoSplat API and returns the binary splat. The

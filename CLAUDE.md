@@ -143,7 +143,9 @@ staged dir and exits.
 - **Tripo splat pipeline** (additive, flag-gated): `WS_PIPELINE=tripo` swaps the whole
   image-gen→depth→fusion→train chain for a single-image path — the server takes one captured
   isometric view (`WS_ISO_VIEW`, default `corner_fr_high`), restyles it via OpenAI
-  `gpt-image-1` `/v1/images/edits` (needs `OPENAI_API_KEY`), POSTs the image to the synchronous
+  `gpt-image-1` `/v1/images/edits` (needs `OPENAI_API_KEY`; `input_fidelity=high` via
+  `WS_OPENAI_FIDELITY` keeps the block-out's shapes/layout instead of reimagining the scene —
+  prompt in `tripoEditPrompt`, overridable with `WS_TRIPO_EDIT_PROMPT`), POSTs the image to the synchronous
   TripoSplat API (`TRIPO_API_URL`, `/generate`, `output_format=splat`), and writes the returned
   `world.splat` directly. No depth/fusion/local-training/RunPod on this path; colliders are still
   served from scene primitives (the Tripo splat is in its own frame, so they may not align). The
