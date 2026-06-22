@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -199,7 +200,10 @@ func readGenerateRequest(r *http.Request) (Scene, []UploadedView, error) {
 		return Scene{}, nil, err
 	}
 
-	sceneFile, _, _ := r.FormFile("scene")
+	sceneFile, _, err := r.FormFile("scene")
+	if err != nil {
+		return Scene{}, nil, fmt.Errorf("missing scene part: %w", err)
+	}
 	defer sceneFile.Close()
 
 	var scene Scene
@@ -222,7 +226,13 @@ func readUploadedView(r *http.Request, name string) UploadedView {
 }
 
 func readMultipartFile(r *http.Request, field string) ([]byte, error) {
-	file, _, _ := r.FormFile(field)
+	// FormFile returns a nil file for an absent field (e.g. the per-view _mask, which is
+	// only sent on expansion submits) — guard it so a missing optional part can't panic
+	// the handler.
+	file, _, err := r.FormFile(field)
+	if err != nil {
+		return nil, err
+	}
 	defer file.Close()
 	return io.ReadAll(file)
 }
