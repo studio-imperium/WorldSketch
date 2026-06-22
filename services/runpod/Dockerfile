@@ -48,6 +48,7 @@ if purelib:
 names = (
     "flash_attn",
     "flash_attn_3",
+    "flash_attn3",
     "flash_attn_interface.py",
     "flash_attn-",
     "flash_attn_",
@@ -76,7 +77,7 @@ import importlib
 import sys
 import traceback
 
-prefixes = ("flash_attn", "flash_attn_3", "flash_attn_interface")
+prefixes = ("flash_attn", "flash_attn_3", "flash_attn3", "flash_attn_interface")
 def is_flash(name):
     return any(name == prefix or name.startswith(prefix + ".") for prefix in prefixes)
 
@@ -84,7 +85,7 @@ original_find_spec = importlib.util.find_spec
 original_import_module = importlib.import_module
 original_import = builtins.__import__
 
-for name in ("flash_attn", "flash_attn_3", "flash_attn_interface"):
+for name in prefixes:
     print(f"[build] {name} spec: {importlib.util.find_spec(name)}")
 
 def find_spec_without_flash(name, *args, **kwargs):
@@ -123,5 +124,6 @@ COPY . /workspace/WorldSketch
 RUN cd /workspace/WorldSketch/server && go build -o worldsketch-server .
 ENV WORLDSKETCH_REPO=/workspace/WorldSketch
 ENV WORLDSKETCH_PYTHON=python3
+ENV PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 CMD ["python3", "/workspace/WorldSketch/services/runpod/handler.py"]

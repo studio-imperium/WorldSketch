@@ -1,6 +1,8 @@
 package main
 
 import (
+	"archive/zip"
+	"bytes"
 	"encoding/json"
 	"flag"
 	"io"
@@ -54,7 +56,8 @@ func main() {
 	http.HandleFunc("/api/jobs/", func(w http.ResponseWriter, r *http.Request) {
 		id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
 
-		// Result callback: the GPU worker PUTs world.splat here when it finishes.
+		// Result callback: the GPU worker PUTs a result zip here when it finishes.
+		// Older workers may still PUT raw world.splat bytes; keep accepting both.
 		if r.Method == http.MethodPut && strings.HasSuffix(id, "/result") {
 			id = strings.TrimSuffix(id, "/result")
 			if !store.validResultToken(id, r.URL.Query().Get("token")) {
@@ -66,13 +69,14 @@ func main() {
 				http.Error(w, "empty result body", http.StatusBadRequest)
 				return
 			}
-			if err := os.WriteFile(filepath.Join(outputDir, id, "world.splat"), data, 0644); err != nil {
+			bytes, err := receiveWorkerResult(filepath.Join(outputDir, id), data)
+			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
-			log.Printf("[%s] result received: %d bytes", id, len(data))
+			log.Printf("[%s] result received: %d bytes", id, bytes)
 			store.markDone(id)
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": len(data)})
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": bytes})
 			return
 		}
 
@@ -119,9 +123,61 @@ func main() {
 	}
 }
 
+func receiveWorkerResult(dir string, data []byte) (int, error) {
+	if len(data) >= 4 && string(data[:4]) == "PK\x03\x04" {
+		return extractWorkerBundle(dir, data)
+	}
+	return len(data), os.WriteFile(filepath.Join(dir, "world.splat"), data, 0644)
+}
+
+func extractWorkerBundle(dir string, data []byte) (int, error) {
+	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	if err != nil {
+		return 0, err
+	}
+
+	total := 0
+	for _, file := range reader.File {
+		name := filepath.Clean(file.Name)
+		if filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) || name == ".." {
+			return total, os.ErrPermission
+		}
+		target := filepath.Join(dir, name)
+		if file.FileInfo().IsDir() {
+			if err := os.MkdirAll(target, 0755); err != nil {
+				return total, err
+			}
+			continue
+		}
+		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
+			return total, err
+		}
+		src, err := file.Open()
+		if err != nil {
+			return total, err
+		}
+		dst, err := os.Create(target)
+		if err != nil {
+			src.Close()
+			return total, err
+		}
+		n, copyErr := io.Copy(dst, src)
+		closeErr := dst.Close()
+		src.Close()
+		total += int(n)
+		if copyErr != nil {
+			return total, copyErr
+		}
+		if closeErr != nil {
+			return total, closeErr
+		}
+	}
+	return total, nil
+}
+
 // runOnce executes the pipeline a single time on a prepared job dir and exits.
 // This is the serverless worker entrypoint: the RunPod handler stages inputs into
-// the dir, runs this, then ships the resulting world.splat back.
+// the dir, runs this, then ships the resulting artifacts back.
 func runOnce(dir string) {
 	scene := readScene(filepath.Join(dir, "scene.json"))
 	if err := RunPipeline(dir, scene, func(stage string) { log.Println("[pipeline]", stage) }); err != nil {

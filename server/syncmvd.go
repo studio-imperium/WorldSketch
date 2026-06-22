@@ -49,10 +49,13 @@ func RunSyncMVD(dir, scenePrompt string) error {
 		"--cfg", fmt.Sprintf("%g", envFloat("WS_CFG", 6.5)),
 		"--canny", fmt.Sprintf("%g", envFloat("WS_CANNY_STRENGTH", 0.9)),
 		"--depth-scale", fmt.Sprintf("%g", envFloat("WS_DEPTH_STRENGTH", 0.6)),
-		"--sync", strconv.Itoa(envInt("WS_SYNC", 1)),
+		"--sync", strconv.Itoa(envInt("WS_SYNC", 0)),
+		"--sync-space", envStr("WS_SYNC_SPACE", "rgb"),
+		"--sync-interval", strconv.Itoa(envInt("WS_SYNC_INTERVAL", 1)),
 		"--sync-weight", fmt.Sprintf("%g", envFloat("WS_SYNC_WEIGHT", 1.0)),
 		"--sync-voxel", fmt.Sprintf("%g", envFloat("WS_SYNC_VOXEL", 0.25)),
 		"--sync-taper", fmt.Sprintf("%g", envFloat("WS_SYNC_TAPER", 0.7)),
+		"--sync-batch", strconv.Itoa(envInt("WS_SYNC_BATCH", 1)),
 	}
 	cmd := exec.Command(pythonBin(), args...)
 	cmd.Dir = "."

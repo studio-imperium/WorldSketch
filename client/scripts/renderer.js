@@ -1,7 +1,7 @@
 import * as THREE from "three"
 import { createOrbit } from "/scripts/controls.js"
 import { generateScene } from "/scripts/api.js"
-import { captureViews } from "/scripts/capture.js"
+import { captureViews, captureFrame } from "/scripts/capture.js"
 import { createPrimitive, round, serializePrimitive } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
 
@@ -46,6 +46,7 @@ const rotationAxes = {
 let selected = null
 let nextId = 1
 let lastJobId = null // the most recent generated plot — the parent for the next expansion
+let parentFrame = null // the camera frame that plot was captured with — reused so expansions align
 let activeTool = "pointer"
 let activeColor = "#232323"
 let primitiveDrag = null
@@ -97,7 +98,9 @@ const els = {
 }
 
 function setActiveTool(tool) {
+	const changed = activeTool !== tool
 	activeTool = tool
+	if (changed) select(null)
 	for (const button of els.toolButtons) {
 		button.classList.toggle("active", button.dataset.tool === tool)
 	}
@@ -500,23 +503,33 @@ async function generate(prompt) {
 
 	try {
 		const helpers = [placementPreview, rotationGizmo].filter(Boolean)
-		const views = await captureViews(renderer, scene, camera, helpers, selected, expanding ? newMeshes : null)
+		// Subjects = the non-locked pieces (during expansion, exactly the new objects).
+		// Expansion reuses the parent plot's frame so its cameras line up with the parent
+		// views we inpaint onto, and renders a mask of just the new meshes.
+		const captureSubjects = primitives.filter(primitive => !primitive.userData.locked)
+		const frame = expanding && parentFrame ? parentFrame : captureFrame(captureSubjects)
+		const views = await captureViews(renderer, scene, camera, helpers, selected, captureSubjects, {
+			maskMeshes: expanding ? newMeshes : null,
+			frame,
+		})
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
-		els.downloadPly.href = job.plyUrl
-		els.downloadCollision.href = job.collisionUrl
-		els.downloadBundle.href = job.bundleUrl
+		if (job.plyUrl) els.downloadPly.href = job.plyUrl
+		if (job.collisionUrl) els.downloadCollision.href = job.collisionUrl
+		if (job.bundleUrl) els.downloadBundle.href = job.bundleUrl
 		if (job.splatUrl) {
 			els.viewSplat.href = `/splat-viewer.html?src=${encodeURIComponent(job.splatUrl)}&collisions=${encodeURIComponent(job.collisionUrl)}`
 			els.download.href = job.splatUrl
 			els.viewSplat.classList.remove("hidden")
 			els.download.classList.remove("hidden")
 		}
-		els.downloadPly.classList.remove("hidden")
-		els.downloadCollision.classList.remove("hidden")
-		els.downloadBundle.classList.remove("hidden")
+		els.downloadPly.classList.toggle("hidden", !job.plyUrl)
+		els.downloadCollision.classList.toggle("hidden", !job.collisionUrl)
+		els.downloadBundle.classList.toggle("hidden", !job.bundleUrl)
 		showWorldResult(job)
-		// Freeze this result so the next objects are decorated to match it.
+		// Freeze this result so the next objects are decorated to match it, and remember
+		// the frame so the expansion's cameras line up with these views.
 		if (job.id) lastJobId = job.id
+		parentFrame = frame
 		markGeneratedExisting()
 		els.generate.disabled = false
 	} catch (err) {

@@ -14,4 +14,18 @@ type Camera struct {
 	Far      float64 `json:"far"`
 }
 
-var viewNames = []string{"front", "back", "left", "right", "top", "corner_fl", "corner_fr", "corner_bl", "corner_br"}
+var viewNames = []string{
+	"front",
+	"back",
+	"left",
+	"right",
+	"top",
+	"corner_fl_high",
+	"corner_fr_high",
+	"corner_bl_high",
+	"corner_br_high",
+	"corner_fl_low",
+	"corner_fr_low",
+	"corner_bl_low",
+	"corner_br_low",
+}

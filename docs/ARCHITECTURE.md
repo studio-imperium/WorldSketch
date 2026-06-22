@@ -32,7 +32,7 @@ The key trick: the primitives do double duty.
 ```
 ┌────────────────────────── BROWSER (authoring + playback) ──────────────────────────┐
 │  client/index.html  ── Three.js editor: place/move/scale/rotate primitives          │
-│  client/scripts/capture.js  ── renders 9 views (RGB + depth + camera) at 512²        │
+│  client/scripts/capture.js  ── renders 13 views (RGB + depth + camera) at 512²       │
 │  client/scripts/api.js      ── POST scene + views → /api/generate, poll job          │
 │  client/splat-viewer.html   ── gaussian-splats-3d viewer + collider wireframe        │
 │  client/viewer.html         ── PLY point-cloud viewer + collider wireframe           │
@@ -93,7 +93,7 @@ in-process (`jobs.go`).
 3. **Image generation.** Default path `RunComfy` (`comfy.go`): for each view it writes
    a **canny edge** map (`WriteEdgeMap`, Sobel) and a **depth-control** hint
    (`WriteDepthControl`), uploads them to ComfyUI, and builds one **batched** workflow
-   — all 9 views stacked into a single `batch=N` latent and denoised in one KSampler
+   — all views stacked into a single `batch=N` latent and denoised in one KSampler
    call (img2img, ControlNet canny in series with ControlNet depth). Output:
    `generated_rgb.png` per view. Alternate path `WS_IMAGEGEN=syncmvd` → `syncmvd.py`.
 4. **Depth estimation.** `depth.py` runs **Depth-Anything-V2-Small** on each
@@ -177,9 +177,14 @@ locally). Defaults in `.env.example` and read in `server/config.go`.
 |---|---|---|
 | `WS_STEPS` / `WS_CFG` / `WS_DENOISE` | 7 / 6.5 / 0.5 | KSampler steps / guidance / img2img strength |
 | `WS_CANNY_STRENGTH` / `WS_DEPTH_STRENGTH` | 0.9 / 0.6 | ControlNet conditioning strengths |
-| `WS_DEDUPE` | 0.025 | point-cloud dedupe radius (smaller = denser) |
+| `WS_FUSION_STRIDE` | 1 | pixel stride for fusing each generated view (higher = faster/sparser) |
+| `WS_DEDUPE` | 0.015 | point-cloud dedupe radius (smaller = denser) |
 | `WS_SPARSE_VOXEL` / `WS_SPARSE_MIN_NEIGHBORS` | 0.1 / 4 | sparse-point cull (lower neighbors = keep more) |
 | `WS_COLOR_CULL_THRESHOLD` | 0.8 | how aggressively to drop off-color points |
+| `WS_SPLAT_STEPS` / `WS_SPLAT_SIZE` | 3000 / 512 | gsplat optimization steps / render target resolution |
+| `WS_SPLAT_MAX_POINTS` | 0 | gaussian budget; 0 means no growth beyond fused PLY count |
+| `WS_SPLAT_MAX_SCALE` / `WS_SPLAT_DENSIFY_FRAC` | 0.07 / 0.1 | gaussian size cap / clone fraction during densification |
+| `WS_SPLAT_REFINE_EVERY` / `WS_SPLAT_DENSIFY_STOP_FRAC` | 100 / 0.6 | densify-prune cadence / when cloning stops |
 | `WS_IMAGEGEN` | (ComfyUI) | `syncmvd` switches to the diffusers path |
 | `WS_EXPAND_DENOISE` / `WS_EXPAND_MASK_GROW` | 0.8 / 6 | expansion: img2img strength inside the new-object mask / px the mask is dilated for seam blending |
 | `WORLDSKETCH_PYTHON` | venv → `python3` | python interpreter for the ML scripts |
@@ -201,18 +206,18 @@ design choices below are the load-bearing ones.
 
 ### 3a. Why ControlNet img2img on primitive renders
 
-Generating a coherent 3D scene from text alone gives you 9 views that don't agree.
+Generating a coherent 3D scene from text alone gives you views that don't agree.
 Conditioning each view on the **primitive render** (img2img init) + its **canny
 silhouette** + its **depth map** (depth ControlNet) pins geometry to the blockout you
 drew, so the diffusion mostly adds *material/texture* rather than moving surfaces.
-Doing it as a single **batched** diffusion keeps the GPU saturated vs. 9 round-trips.
+Doing it as a single **batched** diffusion keeps the GPU saturated vs. per-view round-trips.
 The base prompt deliberately asks for *shadowless, diffuse, overcast* lighting — baked
 directional shadows fuse into the splat as dark splotches, so flat lighting fuses
 cleaner.
 
 ### 3b. The consistency problem → SyncMVD
 
-Even with depth-CN, the 9 views are diffused **independently**, so the same surface
+Even with depth-CN, the views are diffused **independently**, so the same surface
 can get different texture across views → ghosting / floaters when fused. **SyncMVD**
 (synchronized multi-view diffusion) addresses this by making the views *share one
 appearance through the known 3D geometry during denoising*: at each step, decode the

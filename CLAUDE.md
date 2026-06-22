@@ -37,7 +37,7 @@ depth = `services/ml/depth.py`; fusion = `server/fusion.go`; training =
 | Path | What |
 |---|---|
 | `client/` | Three.js editor (`index.html`) + PLY viewer + splat viewer. No build step — static files served by the Go server. |
-| `client/scripts/capture.js` | Renders the **9 views** the pipeline consumes. Camera math here MUST match `server/fusion.go`. |
+| `client/scripts/capture.js` | Renders the **13 views** the pipeline consumes. Camera math here MUST match `server/fusion.go`. |
 | `server/` | Go coordinator + full pipeline (port **8067**). Serves the client, runs/queues jobs, serves artifacts. |
 | `services/ml/` | Python GPU code: `train_splat.py` (gsplat), `depth.py`, `syncmvd.py`, `geometry.py` (projection math). |
 | `services/runpod/` | Serverless worker: `handler.py` + `Dockerfile`. |
@@ -70,8 +70,9 @@ mode: `worldsketch-server -job <dir>` runs the pipeline once on a staged dir and
 
 ## Hard invariants (break these and the output silently degrades)
 
-- **The 9 view names are a contract.** `front, back, left, right, top, corner_fl,
-  corner_fr, corner_bl, corner_br` — defined in `server/views.go` (`viewNames`),
+- **The 13 view names are a contract.** `front, back, left, right, top,
+  corner_fl_high, corner_fr_high, corner_bl_high, corner_br_high,
+  corner_fl_low, corner_fr_low, corner_bl_low, corner_br_low` — defined in `server/views.go` (`viewNames`),
   produced in `client/scripts/capture.js`, consumed in `fusion.go` and
   `geometry.py`. Change one, change all four.
 - **Camera convention must match across capture / fusion / geometry.** Unprojection
