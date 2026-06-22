@@ -85,6 +85,14 @@ func (s *Store) Run(id string) {
 	dir := filepath.Join(s.root, id)
 	scene := readScene(filepath.Join(dir, "scene.json"))
 
+	// Expansion: grow an existing plot by inpainting only the new objects into its
+	// frozen world, then fusing the delta onto the parent point cloud. Local-only for
+	// now (the GPU worker doesn't yet have the parent artifacts).
+	if scene.isExpansion() {
+		s.runExpansion(id, dir, scene)
+		return
+	}
+
 	// Serverless: hand the whole pipeline to the RunPod GPU worker instead of
 	// running ComfyUI + gsplat locally. The worker PUTs world.splat back to us.
 	if runpodConfigured() {
@@ -119,16 +127,7 @@ func (s *Store) Run(id string) {
 		return
 	}
 
-	s.mu.Lock()
-	job := s.jobs[id]
-	job.Status = "done"
-	job.PlyURL = "/api/jobs/" + id + "/world.ply"
-	job.CollisionURL = "/api/jobs/" + id + "/collisions.json"
-	job.BundleURL = "/api/jobs/" + id + "/training-bundle.zip"
-	job.PreviewURL = "/api/jobs/" + id + "/preview.png"
-	job.SplatURL = "/api/jobs/" + id + "/world.splat"
-	job.UpdatedAt = time.Now()
-	s.mu.Unlock()
+	s.complete(id)
 }
 
 func writeViews(dir string, views []UploadedView) {
@@ -138,6 +137,9 @@ func writeViews(dir string, views []UploadedView) {
 		os.WriteFile(filepath.Join(viewDir, "primitive_rgb.png"), view.RGB, 0644)
 		os.WriteFile(filepath.Join(viewDir, "primitive_depth.png"), view.Depth, 0644)
 		os.WriteFile(filepath.Join(viewDir, "camera.json"), view.CameraJSON, 0644)
+		if len(view.Mask) > 0 {
+			os.WriteFile(filepath.Join(viewDir, "new_mask.png"), view.Mask, 0644)
+		}
 	}
 }
 

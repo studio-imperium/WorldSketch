@@ -29,6 +29,8 @@ export function serializePrimitive(mesh) {
 		rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z].map(round),
 		scale: mesh.scale.toArray().map(round),
 		color: `#${mesh.material.color.getHexString()}`,
+		// existing = already decorated by a prior generation (frozen during expansion).
+		existing: mesh.userData.existing === true,
 	}
 }
 

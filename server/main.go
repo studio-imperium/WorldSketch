@@ -135,6 +135,7 @@ type UploadedView struct {
 	RGB        []byte
 	Depth      []byte
 	CameraJSON []byte
+	Mask       []byte // new-object mask (expansion only): white where a new primitive is visible
 }
 
 func readGenerateRequest(r *http.Request) (Scene, []UploadedView, error) {
@@ -160,7 +161,8 @@ func readUploadedView(r *http.Request, name string) UploadedView {
 	rgb, _ := readMultipartFile(r, name+"_rgb")
 	depth, _ := readMultipartFile(r, name+"_depth")
 	camera, _ := readMultipartFile(r, name+"_camera")
-	return UploadedView{Name: name, RGB: rgb, Depth: depth, CameraJSON: camera}
+	mask, _ := readMultipartFile(r, name+"_mask") // present only on expansion submits
+	return UploadedView{Name: name, RGB: rgb, Depth: depth, CameraJSON: camera, Mask: mask}
 }
 
 func readMultipartFile(r *http.Request, field string) ([]byte, error) {

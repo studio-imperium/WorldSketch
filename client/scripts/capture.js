@@ -4,11 +4,17 @@ const size = 512
 const names = ["front", "back", "left", "right", "top", "corner_fl", "corner_fr", "corner_bl", "corner_br"]
 
 
-export async function captureViews(renderer, scene, camera, helpers, selected) {
+// maskMeshes (optional): when generating an expansion, the meshes that are *new* since
+// the parent plot. For each view we also render a white-on-black mask of just those
+// meshes — the region the server inpaints + fuses while keeping the existing world frozen.
+export async function captureViews(renderer, scene, camera, helpers, selected, maskMeshes = null) {
 	const original = snapshot(camera, renderer)
 	const target = new THREE.WebGLRenderTarget(size, size)
 	const depthMaterial = createDepthMaterial(camera)
 	const views = []
+
+	const maskSet = maskMeshes && maskMeshes.length ? new Set(maskMeshes) : null
+	const maskMaterial = maskSet ? new THREE.MeshBasicMaterial({ color: 0xffffff }) : null
 
 	setHelpers(helpers, false)
 	const selectionOutlines = selected ? selected.children.filter(child => child.userData.isSelectionOutline) : []
@@ -28,21 +34,44 @@ export async function captureViews(renderer, scene, camera, helpers, selected) {
 		const depth = await captureTarget(renderer, scene, camera, target, 0x000000)
 		scene.overrideMaterial = null
 
+		const mask = maskSet ? await captureMask(renderer, scene, camera, target, maskSet, maskMaterial) : null
+
 		views.push({
 			name,
 			rgb,
 			depth,
+			mask,
 			camera: cameraPayload(camera, name),
 		})
 	}
 
 	target.dispose()
 	depthMaterial.dispose()
+	if (maskMaterial) maskMaterial.dispose()
 	restore(camera, renderer, original)
 	setHelpers(helpers, true)
 	for (const outline of selectionOutlines) outline.visible = true
 
 	return views
+}
+
+// captureMask renders only the new meshes as white on black: hide every other mesh,
+// force a flat white material, snapshot, then restore visibility.
+async function captureMask(renderer, scene, camera, target, maskSet, maskMaterial) {
+	const restored = []
+	scene.traverse(object => {
+		if (object.isMesh) {
+			restored.push([object, object.visible])
+			object.visible = maskSet.has(object)
+		}
+	})
+
+	scene.overrideMaterial = maskMaterial
+	const blob = await captureTarget(renderer, scene, camera, target, 0x000000)
+	scene.overrideMaterial = null
+
+	for (const [object, visible] of restored) object.visible = visible
+	return blob
 }
 
 function poseCamera(camera, name) {

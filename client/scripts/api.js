@@ -7,6 +7,8 @@ export async function generateScene(scene, views, onStatus) {
 		body.append(`${view.name}_rgb`, view.rgb, "primitive_rgb.png")
 		body.append(`${view.name}_depth`, view.depth, "primitive_depth.png")
 		body.append(`${view.name}_camera`, new Blob([JSON.stringify(view.camera, null, 2)], { type: "application/json" }), "camera.json")
+		// Expansion only: the new-object mask the server inpaints + fuses.
+		if (view.mask) body.append(`${view.name}_mask`, view.mask, "new_mask.png")
 	}
 
 	const res = await fetch("/api/generate", {

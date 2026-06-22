@@ -181,6 +181,7 @@ locally). Defaults in `.env.example` and read in `server/config.go`.
 | `WS_SPARSE_VOXEL` / `WS_SPARSE_MIN_NEIGHBORS` | 0.1 / 4 | sparse-point cull (lower neighbors = keep more) |
 | `WS_COLOR_CULL_THRESHOLD` | 0.8 | how aggressively to drop off-color points |
 | `WS_IMAGEGEN` | (ComfyUI) | `syncmvd` switches to the diffusers path |
+| `WS_EXPAND_DENOISE` / `WS_EXPAND_MASK_GROW` | 0.8 / 6 | expansion: img2img strength inside the new-object mask / px the mask is dilated for seam blending |
 | `WORLDSKETCH_PYTHON` | venv → `python3` | python interpreter for the ML scripts |
 
 ### Tests
@@ -265,6 +266,12 @@ The north star is **walk inside your sketch**:
 - **D — first-person player**: splat renderer + kinematic capsule controller doing
   collision against the analytic colliders. The biggest single build; the payoff.
 - **E — SyncMVD** (optional quality): swap image-gen if depth-CN consistency isn't enough.
+
+A parallel track is **growing a world instead of regenerating it**: expand an existing
+plot by inpainting only the newly-added objects into its frozen views and fusing the
+delta onto the existing point cloud, so additions are decorated to *match* what's already
+there. Design + the model-optimisation levers it shares with SyncMVD/gsplat:
+[world-expansion-plan.md](world-expansion-plan.md).
 
 Full rationale, effort estimates, and ordering: [generation-pipeline-plan.md](generation-pipeline-plan.md).
 

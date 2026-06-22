@@ -41,6 +41,13 @@ func WritePLYFromViews(scene Scene, dir, path string) error {
 }
 
 func pointsFromView(camera Camera, rgb image.Image, primitiveDepth image.Image, generatedDepth image.Image) []Point {
+	return pointsFromViewMasked(camera, rgb, primitiveDepth, generatedDepth, nil)
+}
+
+// pointsFromViewMasked unprojects a view to world points. When mask is non-nil, only
+// pixels where the mask is bright (white = new object) are emitted — this is how
+// expansion fuses just the delta and leaves the existing world's points untouched.
+func pointsFromViewMasked(camera Camera, rgb image.Image, primitiveDepth image.Image, generatedDepth image.Image, mask image.Image) []Point {
 	bounds := primitiveDepth.Bounds()
 	w := bounds.Dx()
 	h := bounds.Dy()
@@ -52,6 +59,9 @@ func pointsFromView(camera Camera, rgb image.Image, primitiveDepth image.Image, 
 
 	for y := 0; y < h; y += stride {
 		for x := 0; x < w; x += stride {
+			if mask != nil && grayAt(mask, x, y) < 0.5 {
+				continue // outside the new-object region — belongs to the frozen world
+			}
 			pd := grayAt(primitiveDepth, x, y)
 			if pd < 0.01 {
 				continue

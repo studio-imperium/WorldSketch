@@ -88,8 +88,13 @@ mode: `worldsketch-server -job <dir>` runs the pipeline once on a staged dir and
 ## Conventions & knobs
 
 - **Tunable pipeline params** are env vars (`WS_STEPS`, `WS_CFG`, `WS_DENOISE`,
-  `WS_DEDUPE`, `WS_SPARSE_*`, …). Set them where the pipeline *runs* (RunPod env for
-  serverless, `.env`/shell for local). No rebuild needed. See `.env.example`.
+  `WS_DEDUPE`, `WS_SPARSE_*`, `WS_EXPAND_*`, …). Set them where the pipeline *runs*
+  (RunPod env for serverless, `.env`/shell for local). No rebuild needed. See `.env.example`.
+- **World expansion** (`server/expand.go` + `inpaint.go`): a scene with a `parent` job id
+  grows that plot — new (non-`existing`) primitives are inpainted into the parent's frozen
+  views (masked img2img via a per-view `new_mask`) and fused onto the parent `world.ply`,
+  so the existing world is preserved and new objects are decorated to match. Local-only
+  for now. Design + model-optimisation research: [docs/world-expansion-plan.md](docs/world-expansion-plan.md).
 - **Image-gen backend** is selected by `WS_IMAGEGEN` (`syncmvd` → diffusers path,
   else ComfyUI). See `server/syncmvd.go`.
 - **Python interpreter**: `WORLDSKETCH_PYTHON`, else `services/ml/.venv`, else `python3`.

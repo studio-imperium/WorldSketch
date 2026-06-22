@@ -45,6 +45,7 @@ const rotationAxes = {
 
 let selected = null
 let nextId = 1
+let lastJobId = null // the most recent generated plot — the parent for the next expansion
 let activeTool = "pointer"
 let activeColor = "#232323"
 let primitiveDrag = null
@@ -374,16 +375,42 @@ function clearScene() {
 	syncRotationGizmo()
 }
 
+// isExpanding: a plot already exists and at least one of its primitives is frozen, so
+// this generation grows that plot rather than starting fresh.
+function isExpanding() {
+	return Boolean(lastJobId) && primitives.some(primitive => primitive.userData.existing)
+}
+
+// newPrimitiveMeshes: the meshes added since the last generation — the delta to decorate.
+function newPrimitiveMeshes() {
+	return primitives.filter(primitive => !primitive.userData.existing)
+}
+
 function serializeScene(prompt = "") {
 	return {
 		version: 1,
 		prompt,
+		parent: isExpanding() ? lastJobId : "",
 		bounds: {
 			min: [-10, 0, -10],
 			max: [10, 5, 10],
 		},
 		primitives: primitives.map(serializePrimitive),
 	}
+}
+
+// markGeneratedExisting freezes everything that was just decorated: it becomes the
+// existing world (locked + dimmed) that the next batch of objects is matched against.
+function markGeneratedExisting() {
+	for (const mesh of primitives) {
+		mesh.userData.existing = true
+		mesh.userData.locked = true
+		if (mesh.material) {
+			mesh.material.transparent = true
+			mesh.material.opacity = 0.5
+		}
+	}
+	select(null)
 }
 
 function setStatus(message) {
@@ -400,6 +427,7 @@ function compactStatus(message) {
 	if (message.toLowerCase().includes("capturing")) return "CAPTURE"
 	if (message.toLowerCase().includes("queued")) return "QUEUED"
 	if (message.toLowerCase().includes("generating")) return "IMAGES"
+	if (message.toLowerCase().includes("decorat")) return "DECOR"
 	if (message.toLowerCase().includes("depth")) return "DEPTH"
 	if (message.toLowerCase().includes("fusing")) return "FUSING"
 	if (message.toLowerCase().includes("training")) return "SPLAT"
@@ -450,6 +478,12 @@ function downloadWorld() {
 }
 
 async function generate(prompt) {
+	const expanding = isExpanding()
+	const newMeshes = newPrimitiveMeshes()
+	if (expanding && newMeshes.length === 0) {
+		setStatus("Add new objects to decorate into the world.")
+		return
+	}
 	if (!primitives.some(primitive => !primitive.userData.locked)) {
 		setStatus("Add at least one primitive.")
 		return
@@ -462,10 +496,11 @@ async function generate(prompt) {
 	els.downloadPly.classList.add("hidden")
 	els.downloadCollision.classList.add("hidden")
 	els.downloadBundle.classList.add("hidden")
-	setStatus("Capturing views")
+	setStatus(expanding ? "Capturing new objects" : "Capturing views")
 
 	try {
-		const views = await captureViews(renderer, scene, camera, [placementPreview, rotationGizmo].filter(Boolean), selected)
+		const helpers = [placementPreview, rotationGizmo].filter(Boolean)
+		const views = await captureViews(renderer, scene, camera, helpers, selected, expanding ? newMeshes : null)
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
 		els.downloadPly.href = job.plyUrl
 		els.downloadCollision.href = job.collisionUrl
@@ -480,6 +515,9 @@ async function generate(prompt) {
 		els.downloadCollision.classList.remove("hidden")
 		els.downloadBundle.classList.remove("hidden")
 		showWorldResult(job)
+		// Freeze this result so the next objects are decorated to match it.
+		if (job.id) lastJobId = job.id
+		markGeneratedExisting()
 		els.generate.disabled = false
 	} catch (err) {
 		showWorldError(err.message)
