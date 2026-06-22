@@ -46,7 +46,6 @@ const rotationAxes = {
 let selected = null
 let nextId = 1
 let lastJobId = null // the most recent generated plot — the parent for the next expansion
-let parentFrame = null // the camera frame that plot was captured with — reused so expansions align
 let activeTool = "pointer"
 let activeColor = "#232323"
 let primitiveDrag = null
@@ -77,6 +76,13 @@ scene.add(sun)
 
 const bounds = new THREE.Box3(new THREE.Vector3(-10, 0, -10), new THREE.Vector3(10, 5, 10))
 
+// World expansion: new plots are ground tiles laid down next to the current one.
+const tileSize = bounds.max.x - bounds.min.x // 20×20, matches the starting ground
+const tileGap = 0.4 // a hair of seam between tiles so they read as separate plots
+const addPlotDirs = [[1, 0], [0, 1], [-1, 0], [0, -1]] // E, S, W, N — cycled per Add plot
+let activeOrigin = new THREE.Vector3(0, 0, 0) // world-space centre of the plot you're building in
+let addPlotCount = 0
+
 const els = {
 	status: document.getElementById("status"),
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
@@ -95,6 +101,7 @@ const els = {
 	worldPreview: document.getElementById("world_preview"),
 	worldSpinner: document.getElementById("world_spinner"),
 	worldStatus: document.getElementById("world_status"),
+	addPlot: document.getElementById("add_plot_btn"),
 }
 
 function setActiveTool(tool) {
@@ -118,9 +125,12 @@ function addPrimitive(type, seed) {
 	const mesh = createPrimitive(type, id, seed ?? { color: activeColor })
 	// A seeded (duplicated/loaded) piece that's already rotated stays angled too.
 	if (seed?.rotation?.some(value => value !== 0)) mesh.userData.manualRotation = true
+	if (seed?.isGround) mesh.userData.isGround = true
+	if (seed?.existing) mesh.userData.existing = true
 	group.add(mesh)
 	primitives.push(mesh)
 	select(mesh)
+	return mesh
 }
 
 function isShapeTool(tool) {
@@ -389,17 +399,68 @@ function newPrimitiveMeshes() {
 	return primitives.filter(primitive => !primitive.userData.existing)
 }
 
+// worldBounds is the union of every ground tile (plus the standard 0..5 height), so the
+// server's fusion keep-region grows to cover all the plots instead of culling the new tile.
+function worldBounds() {
+	let minX = Infinity, minZ = Infinity, maxX = -Infinity, maxZ = -Infinity
+	for (const mesh of primitives) {
+		if (!mesh.userData.isGround) continue
+		const hx = Math.abs(mesh.scale.x) / 2
+		const hz = Math.abs(mesh.scale.z) / 2
+		minX = Math.min(minX, mesh.position.x - hx)
+		maxX = Math.max(maxX, mesh.position.x + hx)
+		minZ = Math.min(minZ, mesh.position.z - hz)
+		maxZ = Math.max(maxZ, mesh.position.z + hz)
+	}
+	if (!Number.isFinite(minX)) { minX = -10; maxX = 10; minZ = -10; maxZ = 10 }
+	return { min: [minX, 0, minZ], max: [maxX, 5, maxZ] }
+}
+
 function serializeScene(prompt = "") {
 	return {
 		version: 1,
 		prompt,
 		parent: isExpanding() ? lastJobId : "",
-		bounds: {
-			min: [-10, 0, -10],
-			max: [10, 5, 10],
-		},
+		bounds: worldBounds(),
 		primitives: primitives.map(serializePrimitive),
 	}
+}
+
+// addPlot lays down a fresh ground tile next to the current plot and makes it the active
+// build area. Objects you place there are "new"; the next Generate decorates them to match
+// the existing plot and fuses them into the world (see docs/world-expansion-plan.md).
+function addPlot() {
+	if (!lastJobId) {
+		setStatus("Generate your first plot, then Add plot to extend it.")
+		return
+	}
+	const [dx, dz] = addPlotDirs[addPlotCount % addPlotDirs.length]
+	addPlotCount++
+	activeOrigin = new THREE.Vector3(
+		activeOrigin.x + dx * (tileSize + tileGap),
+		0,
+		activeOrigin.z + dz * (tileSize + tileGap),
+	)
+
+	const ground = addPrimitive("box", {
+		type: "box",
+		position: [activeOrigin.x, 0.05, activeOrigin.z],
+		rotation: [0, 0, 0],
+		scale: [tileSize, 0.1, tileSize],
+		color: "#587553",
+		isGround: true,
+	})
+	select(null)
+
+	// Frame the camera on the new tile so you can build in it.
+	const box = new THREE.Box3().setFromCenterAndSize(
+		new THREE.Vector3(activeOrigin.x, 1.5, activeOrigin.z),
+		new THREE.Vector3(tileSize, 5, tileSize),
+	)
+	orbit.frame(box)
+	setActiveTool("box")
+	setStatus("New plot added — build here, then Generate to extend the world.")
+	void ground
 }
 
 // markGeneratedExisting freezes everything that was just decorated: it becomes the
@@ -503,14 +564,13 @@ async function generate(prompt) {
 
 	try {
 		const helpers = [placementPreview, rotationGizmo].filter(Boolean)
-		// Subjects = the non-locked pieces (during expansion, exactly the new objects).
-		// Expansion reuses the parent plot's frame so its cameras line up with the parent
-		// views we inpaint onto, and renders a mask of just the new meshes.
+		// Subjects = the non-locked pieces: during expansion that's the new plot tile + its
+		// objects, so the cameras frame the new tile (with the existing plot at the seam),
+		// and we render a mask of just those new meshes to inpaint + fuse.
 		const captureSubjects = primitives.filter(primitive => !primitive.userData.locked)
-		const frame = expanding && parentFrame ? parentFrame : captureFrame(captureSubjects)
 		const views = await captureViews(renderer, scene, camera, helpers, selected, captureSubjects, {
 			maskMeshes: expanding ? newMeshes : null,
-			frame,
+			frame: captureFrame(captureSubjects),
 		})
 		const job = await generateScene(serializeScene(prompt), views, setStatus)
 		if (job.plyUrl) els.downloadPly.href = job.plyUrl
@@ -526,10 +586,8 @@ async function generate(prompt) {
 		els.downloadCollision.classList.toggle("hidden", !job.collisionUrl)
 		els.downloadBundle.classList.toggle("hidden", !job.bundleUrl)
 		showWorldResult(job)
-		// Freeze this result so the next objects are decorated to match it, and remember
-		// the frame so the expansion's cameras line up with these views.
+		// Freeze this result so the next plot is decorated to match it.
 		if (job.id) lastJobId = job.id
-		parentFrame = frame
 		markGeneratedExisting()
 		els.generate.disabled = false
 	} catch (err) {
@@ -552,6 +610,8 @@ els.generate.addEventListener("click", () => {
 })
 
 els.cancelGenerate.addEventListener("click", () => els.generateModal.close())
+
+if (els.addPlot) els.addPlot.addEventListener("click", addPlot)
 
 els.generateForm.addEventListener("submit", (event) => {
 	event.preventDefault()
@@ -872,6 +932,7 @@ addPrimitive("box", {
 	scale: [bounds.max.x - bounds.min.x, 0.1, bounds.max.z - bounds.min.z],
 	color: "#587553",
 	locked: true,
+	isGround: true,
 })
 select(null)
 setActiveTool("pointer")

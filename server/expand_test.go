@@ -120,9 +120,10 @@ func TestPointsFromViewMaskGating(t *testing.T) {
 	}
 	blackMask := image.NewGray(image.Rect(0, 0, 64, 64))
 
+	min, max := defaultCullBounds()
 	unmasked := pointsFromView(cam, rgb, depth, depth)
-	allWhite := pointsFromViewMasked(cam, rgb, depth, depth, whiteMask)
-	allBlack := pointsFromViewMasked(cam, rgb, depth, depth, blackMask)
+	allWhite := pointsFromViewMasked(cam, rgb, depth, depth, whiteMask, min, max)
+	allBlack := pointsFromViewMasked(cam, rgb, depth, depth, blackMask, min, max)
 
 	if len(unmasked) == 0 {
 		t.Fatal("expected some points from the synthetic view")
@@ -244,6 +245,29 @@ func TestNewPrimitivesAndIsExpansion(t *testing.T) {
 	}
 	if (Scene{}).isExpansion() {
 		t.Fatal("scene without a parent should not be an expansion")
+	}
+}
+
+func TestSceneCullBounds(t *testing.T) {
+	// Default single plot → the original ±16 / [-1,9] keep-box (no regression).
+	def := Scene{Bounds: Bounds{Min: Vec3{-10, 0, -10}, Max: Vec3{10, 5, 10}}}
+	min, max := sceneCullBounds(def)
+	if min != (Vec3{-16, -1, -16}) || max != (Vec3{16, 9, 16}) {
+		t.Fatalf("single-plot bounds regressed: min=%v max=%v", min, max)
+	}
+
+	// An adjacent tile out at +20 must fall INSIDE the grown keep-box (else fusion would
+	// discard the whole new plot — the bug this fixes).
+	tiled := Scene{Bounds: Bounds{Min: Vec3{-10, 0, -10}, Max: Vec3{30, 5, 10}}}
+	tmin, tmax := sceneCullBounds(tiled)
+	p := Vec3{20, 1, 0} // a point on the second tile
+	if outside(p, tmin, tmax) {
+		t.Fatalf("adjacent-tile point %v wrongly culled by bounds min=%v max=%v", p, tmin, tmax)
+	}
+	// ...and it WOULD have been culled by the old fixed box.
+	dmin, dmax := defaultCullBounds()
+	if !outside(p, dmin, dmax) {
+		t.Fatal("expected the old fixed ±16 box to cull the adjacent-tile point (sanity check)")
 	}
 }
 

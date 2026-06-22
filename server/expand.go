@@ -85,6 +85,7 @@ func writePNG(path string, img image.Image) error {
 // missing (e.g. a serverless parent that only returned a .splat).
 func WriteExpandedPLY(scene Scene, dir, parentDir, path string) error {
 	parentPoints := readPointsPLY(filepath.Join(parentDir, "world.ply"))
+	min, max := sceneCullBounds(scene)
 
 	newPoints := make([]Point, 0, 120000)
 	for _, name := range viewNames {
@@ -100,7 +101,7 @@ func WriteExpandedPLY(scene Scene, dir, parentDir, path string) error {
 		if rgb == nil || primitiveDepth == nil {
 			continue
 		}
-		newPoints = append(newPoints, pointsFromViewMasked(camera, rgb, primitiveDepth, generatedDepth, mask)...)
+		newPoints = append(newPoints, pointsFromViewMasked(camera, rgb, primitiveDepth, generatedDepth, mask, min, max)...)
 	}
 
 	newPoints = dedupe(newPoints, envFloat("WS_DEDUPE", 0.025))
@@ -195,8 +196,15 @@ func (s *Store) runExpansion(id, dir string, scene Scene) {
 		return
 	}
 
+	// Copy the parent's vibe: fall back to its prompt when the expansion submit didn't
+	// supply one, so the new plot lands in the same stylistic basin.
+	prompt := scene.Prompt
+	if strings.TrimSpace(prompt) == "" {
+		prompt = readScene(filepath.Join(parentDir, "scene.json")).Prompt
+	}
+
 	s.set(id, "decorating new objects", "")
-	if err := RunComfyInpaint(dir, parentDir, scene.Prompt); err != nil {
+	if err := RunComfyInpaint(dir, parentDir, prompt); err != nil {
 		s.fail(id, err)
 		return
 	}
