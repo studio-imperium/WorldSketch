@@ -4,7 +4,14 @@ export function createOrbit(canvas, camera) {
 	const target = new THREE.Vector3(0, 0.6, 0)
 	const spherical = new THREE.Spherical()
 	const offset = new THREE.Vector3()
+	const worldUp = new THREE.Vector3(0, 1, 0)
+	const panRight = new THREE.Vector3()
+	const panUp = new THREE.Vector3()
+	const moveFwd = new THREE.Vector3()
+	const moveRight = new THREE.Vector3()
+	const heldKeys = new Set()
 	let dragging = false
+	let panning = false
 	let lastX = 0
 	let lastY = 0
 	let moved = false
@@ -16,7 +23,7 @@ export function createOrbit(canvas, camera) {
 
 	function update() {
 		spherical.phi = Math.max(0.08, Math.min(Math.PI - 0.08, spherical.phi))
-		spherical.radius = Math.max(2, Math.min(24, spherical.radius))
+		spherical.radius = Math.max(1.5, Math.min(120, spherical.radius))
 		camera.position.copy(target).add(offset.setFromSpherical(spherical))
 		camera.lookAt(target)
 	}
@@ -24,9 +31,13 @@ export function createOrbit(canvas, camera) {
 	sync()
 	update()
 
+	canvas.addEventListener("contextmenu", (event) => event.preventDefault())
+
 	canvas.addEventListener("pointerdown", (event) => {
 		dragging = true
 		moved = false
+		// Right / middle button, or Shift+drag → pan (move the pivot). Left drag → orbit.
+		panning = event.button === 2 || event.button === 1 || event.shiftKey
 		lastX = event.clientX
 		lastY = event.clientY
 		canvas.setPointerCapture(event.pointerId)
@@ -39,13 +50,24 @@ export function createOrbit(canvas, camera) {
 		lastX = event.clientX
 		lastY = event.clientY
 		if (Math.abs(dx) + Math.abs(dy) > 3) moved = true
-		spherical.theta -= dx * 0.006
-		spherical.phi -= dy * 0.006
+		if (panning) {
+			// Slide the pivot (and the camera with it) across the screen plane, scaled by
+			// distance so panning feels the same whether zoomed in or out.
+			const factor = spherical.radius * 0.0018
+			camera.updateMatrixWorld()
+			panRight.setFromMatrixColumn(camera.matrixWorld, 0)
+			panUp.setFromMatrixColumn(camera.matrixWorld, 1)
+			target.addScaledVector(panRight, -dx * factor).addScaledVector(panUp, dy * factor)
+		} else {
+			spherical.theta -= dx * 0.006
+			spherical.phi -= dy * 0.006
+		}
 		update()
 	})
 
 	canvas.addEventListener("pointerup", (event) => {
 		dragging = false
+		panning = false
 		canvas.releasePointerCapture(event.pointerId)
 	})
 
@@ -55,10 +77,49 @@ export function createOrbit(canvas, camera) {
 		update()
 	}, { passive: false })
 
+	// WASD / arrow keys fly the pivot across the ground (Q/E lower/raise it) — applyMovement()
+	// is ticked each animation frame so holding a key glides smoothly.
+	const moveKeys = new Set(["w", "a", "s", "d", "q", "e", "arrowup", "arrowdown", "arrowleft", "arrowright"])
+	function isTyping() {
+		const el = document.activeElement
+		return Boolean(el) && (el.tagName === "INPUT" || el.tagName === "TEXTAREA" || el.isContentEditable)
+	}
+	window.addEventListener("keydown", (event) => {
+		if (isTyping() || event.metaKey || event.ctrlKey || event.altKey) return
+		const key = event.key.toLowerCase()
+		if (!moveKeys.has(key)) return
+		heldKeys.add(key)
+		event.preventDefault()
+	})
+	window.addEventListener("keyup", (event) => heldKeys.delete(event.key.toLowerCase()))
+	window.addEventListener("blur", () => heldKeys.clear())
+
+	function applyMovement() {
+		if (!heldKeys.size) return
+		camera.getWorldDirection(moveFwd)
+		moveFwd.y = 0
+		if (moveFwd.lengthSq() < 1e-6) moveFwd.set(0, 0, -1)
+		moveFwd.normalize()
+		moveRight.crossVectors(moveFwd, worldUp).normalize()
+		const step = spherical.radius * 0.02
+		let fwd = 0, strafe = 0, lift = 0
+		if (heldKeys.has("w") || heldKeys.has("arrowup")) fwd += 1
+		if (heldKeys.has("s") || heldKeys.has("arrowdown")) fwd -= 1
+		if (heldKeys.has("d") || heldKeys.has("arrowright")) strafe += 1
+		if (heldKeys.has("a") || heldKeys.has("arrowleft")) strafe -= 1
+		if (heldKeys.has("e")) lift += 1
+		if (heldKeys.has("q")) lift -= 1
+		if (!fwd && !strafe && !lift) return
+		target.addScaledVector(moveFwd, fwd * step).addScaledVector(moveRight, strafe * step)
+		target.y += lift * step
+		update()
+	}
+
 	return {
 		target,
 		moved: () => moved,
 		update,
+		applyMovement,
 		frame(box) {
 			const center = new THREE.Vector3()
 			const size = new THREE.Vector3()

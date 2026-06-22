@@ -1023,6 +1023,8 @@ function clearWorld() {
 		locked: true,
 		isGround: true,
 	})
+	// Recenter the camera back onto the fresh plot.
+	orbit.frame(new THREE.Box3().setFromCenterAndSize(new THREE.Vector3(0, 1.2, 0), new THREE.Vector3(tileSize, 5, tileSize)))
 	select(null)
 	setActiveTool("pointer")
 	renderPlotsPanel()
@@ -1246,6 +1248,8 @@ els.worldTile.addEventListener("click", () => {
 })
 
 renderer.domElement.addEventListener("pointerdown", (event) => {
+	// Right / middle / shift-drag → let the camera pan (handled by the orbit controls).
+	if (event.button !== 0 || event.shiftKey) return
 	if (activeTool === "eraser" || isShapeTool(activeTool)) return
 
 	// Dragging empty space orbits — with the rotate tool that's how you reposition to
@@ -1336,6 +1340,7 @@ renderer.domElement.addEventListener("pointerup", (event) => {
 }, { capture: true })
 
 renderer.domElement.addEventListener("pointerup", (event) => {
+	if (event.button !== 0) return // right/middle = camera pan, not select
 	if (primitiveDrag) return
 	if (orbit.moved()) return
 	if (placeActiveShape(event)) return
@@ -1573,6 +1578,7 @@ window.addEventListener("resize", () => {
 })
 
 function animate() {
+	orbit.applyMovement() // WASD / arrow-key fly
 	sky.position.copy(camera.position)
 	renderer.render(scene, camera)
 	requestAnimationFrame(animate)
