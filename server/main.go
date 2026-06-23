@@ -39,7 +39,7 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := r.ParseMultipartForm(24 << 20); err != nil {
+	if err := r.ParseMultipartForm(48 << 20); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -58,9 +58,15 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	materialImage, err := readOptionalFormFile(r, "material_image", 20<<20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	edited := image
 	if !envBool("WS_SKIP_OPENAI", false) {
-		edited, err = openAIEdit(image, prompt)
+		edited, err = openAIEdit(image, materialImage, prompt)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -88,20 +94,27 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"densityCells":         int(envFloat("WS_CULL_DENSITY_CELLS", 28)),
 		"densityKeepFrac":      envFloat("WS_CULL_DENSITY_FRAC", 0.08),
 		"radiusKeepPercentile": envFloat("WS_CULL_RADIUS_PCT", 0.9),
+		"bottomCullPercentile": envFloat("WS_CULL_BOTTOM_PCT", 0.9),
+		"bottomCullSlack":      envFloat("WS_CULL_BOTTOM_SLACK", 0.015),
+		"floorCullSlack":       envFloat("WS_CULL_FLOOR_SLACK", 0.015),
 		"groundPercentile":     envFloat("WS_CULL_GROUND_PCT", 0.92),
 		"heightCapFactor":      envFloat("WS_CULL_HEIGHT_CAP", 1.8),
 		"belowGroundFactor":    envFloat("WS_CULL_BELOW_GROUND", 0.12),
 		"floorPercentile":      envFloat("WS_CULL_FLOOR_PCT", 0.97),
 		"floorY":               envFloat("WS_CULL_FLOOR_Y", 0),
-		"inset":                envFloat("WS_CULL_INSET", 0.98),
+		"inset":                envFloat("WS_CULL_INSET", 1),
 		"postScale":            envFloat("WS_CULL_POST_SCALE", 1),
+		"tile":                 envBool("WS_CULL_TILE", true),
+		"overfit":              envFloat("WS_CULL_OVERFIT", 1.15),
+		"edgeThickness":        envFloat("WS_CULL_EDGE_THICKNESS", 0.35),
+		"edgeMargin":           envFloat("WS_CULL_EDGE_MARGIN", 1.5),
 		"debug":                envBool("WS_CULL_DEBUG", false),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(cfg)
 }
 
-func openAIEdit(image []byte, userPrompt string) ([]byte, error) {
+func openAIEdit(image, materialImage []byte, userPrompt string) ([]byte, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	if key == "" {
 		return nil, errors.New("OPENAI_API_KEY is not set")
@@ -120,12 +133,30 @@ func openAIEdit(image []byte, userPrompt string) ([]byte, error) {
 	optField(writer, "background", env("WS_IMAGE_BACKGROUND", "transparent"))
 	optField(writer, "output_format", env("WS_IMAGE_FORMAT", "png"))
 
-	part, err := createPNGFormFile(writer, "image", "plot-guide.png")
-	if err != nil {
-		return nil, err
+	images := []struct {
+		name string
+		data []byte
+	}{
+		{name: "plot-guide.png", data: image},
 	}
-	if _, err := part.Write(image); err != nil {
-		return nil, err
+	if len(materialImage) > 0 {
+		images = append(images, struct {
+			name string
+			data []byte
+		}{name: "plot-materials.png", data: materialImage})
+	}
+	field := "image"
+	if len(images) > 1 {
+		field = "image[]"
+	}
+	for _, img := range images {
+		part, err := createPNGFormFile(writer, field, img.name)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := part.Write(img.data); err != nil {
+			return nil, err
+		}
 	}
 	if err := writer.Close(); err != nil {
 		return nil, err
@@ -169,7 +200,7 @@ func openAIEdit(image []byte, userPrompt string) ([]byte, error) {
 		return nil, err
 	}
 
-	saveGeneration(image, out, userPrompt)
+	saveGeneration(image, materialImage, out, userPrompt)
 	return out, nil
 }
 
@@ -177,7 +208,7 @@ func openAIEdit(image []byte, userPrompt string) ([]byte, error) {
 // prompt into the backend output folder so the (input, prompt -> output) pairs
 // can be collected for finetuning. Failures are logged but never block a
 // request.
-func saveGeneration(input, output []byte, userPrompt string) {
+func saveGeneration(input, materialInput, output []byte, userPrompt string) {
 	if !envBool("WS_SAVE_GENERATIONS", true) {
 		return
 	}
@@ -191,11 +222,16 @@ func saveGeneration(input, output []byte, userPrompt string) {
 	stamp := time.Now().Format("20060102-150405.000")
 	base := filepath.Join(dir, stamp)
 
-	for name, data := range map[string][]byte{
+	files := map[string][]byte{
 		base + "-input.png":  input,
 		base + "-output.png": output,
 		base + "-prompt.txt": []byte(userPrompt),
-	} {
+	}
+	if len(materialInput) > 0 {
+		files[base+"-materials.png"] = materialInput
+	}
+
+	for name, data := range files {
 		if err := os.WriteFile(name, data, 0o644); err != nil {
 			log.Printf("saveGeneration: write %s: %v", name, err)
 		}
@@ -288,7 +324,24 @@ func imagePrompt(userPrompt string) string {
 	if prompt == "" {
 		prompt = "a coherent stylized natural game environment"
 	}
-	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's existing proportions, position, silhouette, and the overall color tones of the blockout; do not move, add, remove, resize, or reimagine objects. Replace flat primitive materials with believable detailed natural materials while matching the original hues. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
+	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Image 1 is the strict geometry guide with readable edges. Image 2, when provided, is a flat unlit material-ID map: use it to preserve material identity. Surfaces with the same flat input color in Image 2 must remain the same material family and same general hue/tone in the output, across the whole plot. Treat the blockout as a STRICT geometric reference: every object must keep its exact size, height, thickness, footprint, and relative scale — match the blockout shape-for-shape. Do NOT enlarge, thicken, inflate, or change any object's proportions or aspect ratio. The ground base is a FLAT THIN slab: keep it thin and flat, never turn it into a tall block, plinth, or pedestal. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's position, silhouette, and the overall color tones; do not move, add, remove, resize, or reimagine objects. Material and color discipline is critical: every surface that has the same input color must remain the same material family and same general hue/tone in the output. If multiple ground/baseplate surfaces share the same green input color, make them one consistent grass material with only subtle texture variation, not different grass species, brightness levels, or color palettes. Replace flat primitive materials with believable detailed natural materials while matching the original hues. Render it as shadowless albedo/reference material: no cast shadows, no contact shadows, no ambient-occlusion blobs, no dark underside shadow plates, no directional sunlight, and no dramatic lighting. Use flat, even, fully ambient illumination so every surface is uniformly lit and the ground stays an even flat tone. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
+}
+
+func readOptionalFormFile(r *http.Request, name string, maxBytes int64) ([]byte, error) {
+	file, _, err := r.FormFile(name)
+	if errors.Is(err, http.ErrMissingFile) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("read %s: %w", name, err)
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes))
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func mustField(writer *multipart.Writer, key, value string) {

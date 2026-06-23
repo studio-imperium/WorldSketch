@@ -1,8 +1,8 @@
 import * as THREE from "three"
-import { PackedSplats, SparkRenderer, SplatMesh } from "spark"
+import { SparkRenderer, SplatMesh } from "spark"
 import { generatePlot } from "/scripts/api.js"
 import { capturePlotGuide } from "/scripts/capture.js"
-import { clearSelectionOutline, createEdgeOutline, createPrimitive, createSelectionOutline, disposeObject } from "/scripts/primitives.js"
+import { clearSelectionOutline, createPrimitive, createSelectionOutline, createSquareFrameOutline, disposeObject } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
 
 const root = document.getElementById("canvas")
@@ -26,6 +26,7 @@ const backgroundColor = new THREE.Color(0xeef5f2)
 const shapeTools = new Set(["box", "sphere", "cylinder", "cone"])
 const plotSize = 8
 const plotStep = 8
+const plusSize = plotSize * 0.86 // expansion panels sit inside the cell so there's a margin vs real plots
 const accent = 0xb8ff38
 
 // Tripo splats arrive with a hallucinated backdrop, drifting floor level, and a
@@ -38,13 +39,21 @@ const SPLAT_CROP = {
 	densityCells: 28, // voxel-grid resolution across the raw XZ extent
 	densityKeepFrac: 0.08, // a cell is "occupied" if it holds >= this fraction of the peak cell count
 	radiusKeepPercentile: 0.9, // protected-core radius: opacity+density culls only apply OUTSIDE this distance percentile (1 = protect all/off, lower = harsher)
+	bottomCullPercentile: 0.9, // hard first pass: drop stored-Y values below this floor percentile (high stored-Y = below the plot)
+	bottomCullSlack: 0.015, // raw footprint span allowed below that percentile before hard culling
+	floorCullSlack: 0.015, // plot-local units allowed below the final seated floor before hard culling
 	groundPercentile: 0.92, // stored-Y percentile used to crop a height window
 	heightCapFactor: 1.8, // keep height up to this multiple of the footprint span
 	belowGroundFactor: 0.12, // keep a little below the ground plane (roots / dirt)
 	floorPercentile: 0.97, // height percentile grounded to floorY; <1 ignores a sparse tail below the base, 1 = literal lowest gaussian
 	floorY: 0, // plot-local Y the floor is grounded to (ground top is 0.05)
-	inset: 0.98, // shrink the footprint slightly so edges sit inside the plot
-	postScale: 1, // extra uniform scale applied AFTER the corner-fit (>1 overflows the plot, <1 shrinks)
+	inset: 1, // footprint as a fraction of the plot; 1 = tiles abut seamlessly, <1 leaves a gap
+	postScale: 1, // extra uniform scale applied AFTER the fit (>1 overflows, <1 shrinks)
+	// --- Tiling: make plots line up seamlessly regardless of content ---
+	tile: true, // overfit + square-crop to an exact tile, then bevel edges to a uniform thickness
+	overfit: 1.15, // scale content past the tile before cropping, so every edge is a clean cut through solid ground
+	edgeThickness: 0.35, // uniform ground thickness (plot-local units) kept at the tile edge so neighbours match
+	edgeMargin: 1.5, // distance (plot-local units) over which the edge cap ramps from edgeThickness up to full height
 	debug: false, // log per-stage splat counts + extents to the console
 }
 
@@ -100,7 +109,9 @@ root.appendChild(renderer.domElement)
 
 const sky = createSky()
 scene.add(sky)
-scene.add(new SparkRenderer({ renderer }))
+const sparkRenderer = new SparkRenderer({ renderer })
+scene.add(sparkRenderer)
+scene.userData.sparkRenderer = sparkRenderer // captured guides hide this so splats never leak into the GPT block-out
 scene.add(new THREE.HemisphereLight(0xffffff, 0x4a5d42, 2.25))
 
 const sun = new THREE.DirectionalLight(0xffffff, 1.8)
@@ -166,7 +177,11 @@ class Plot {
 			disposeObject(this.selectionOutline)
 			this.selectionOutline = null
 		}
-		if (selected) this.selectionOutline = createEdgeOutline(this.ground, 0xffffff)
+		if (selected) {
+			this.selectionOutline = createSquareFrameOutline(plotSize, 0.25, 0xffffff, 0.5)
+			this.selectionOutline.position.y = 0.07
+			this.group.add(this.selectionOutline)
+		}
 	}
 
 	setGenerated(mesh) {
@@ -270,53 +285,19 @@ function createPlus(gx, gz) {
 	group.userData = { isPlus: true, gx, gz }
 
 	const fill = new THREE.Mesh(
-		new THREE.PlaneGeometry(plotSize, plotSize),
-		new THREE.MeshBasicMaterial({
-			color: 0xffffff,
-			transparent: true,
-			opacity: 0.12,
-			depthTest: true,
-			depthWrite: false,
-			side: THREE.DoubleSide,
-		}),
+		new THREE.PlaneGeometry(plusSize, plusSize),
+		new THREE.MeshBasicMaterial({ color: 0xaab4ae, depthWrite: false, side: THREE.DoubleSide }),
 	)
 	fill.name = "plus_fill"
 	fill.rotation.x = -Math.PI / 2
 
-	const borderPoints = [
-		[-plotSize * 0.5, 0, -plotSize * 0.5],
-		[plotSize * 0.5, 0, -plotSize * 0.5],
-		[plotSize * 0.5, 0, plotSize * 0.5],
-		[-plotSize * 0.5, 0, plotSize * 0.5],
-		[-plotSize * 0.5, 0, -plotSize * 0.5],
-	].flat()
-	const borderGeometry = new THREE.BufferGeometry()
-	borderGeometry.setAttribute("position", new THREE.Float32BufferAttribute(borderPoints, 3))
-	const border = new THREE.Line(
-		borderGeometry,
-		new THREE.LineDashedMaterial({
-			color: 0xffffff,
-			transparent: true,
-			opacity: 0.42,
-			dashSize: 0.28,
-			gapSize: 0.24,
-			depthTest: true,
-			depthWrite: false,
-		}),
-	)
-	border.name = "plus_border"
-	border.computeLineDistances()
-
-	const plusMaterial = new THREE.MeshBasicMaterial({
-		color: 0xffffff,
-		transparent: true,
-		opacity: 0.62,
-		depthTest: true,
-		depthWrite: false,
-	})
+	// One opaque, single-color "+" so the two arms don't blend brighter where they
+	// overlap (the old transparent arms doubled up in the middle).
+	const plusMaterial = new THREE.MeshBasicMaterial({ color: 0xf2f5f3, depthTest: true, depthWrite: false })
 	const plusMark = new THREE.Group()
 	plusMark.name = "plus_mark"
 	plusMark.position.y = 0.08
+	plusMark.renderOrder = 1
 	const horizontal = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.08, 0.24), plusMaterial)
 	const vertical = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.08, 1.5), plusMaterial)
 	plusMark.add(horizontal, vertical)
@@ -326,7 +307,7 @@ function createPlus(gx, gz) {
 		new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false }),
 	)
 	hit.userData = group.userData
-	group.add(fill, border, plusMark, hit)
+	group.add(fill, plusMark, hit)
 	return group
 }
 
@@ -394,16 +375,26 @@ function syncPlacementPreview() {
 function selectPrimitive(mesh) {
 	if (selectedPrimitive) clearSelectionOutline(selectedPrimitive)
 	selectedPrimitive = mesh
-	if (mesh) createSelectionOutline(mesh, accent)
+	if (mesh) createSelectionOutline(mesh, 0xffffff)
 }
 
 function applyColor(color) {
 	activeColor = color
-	if (selectedPrimitive) selectedPrimitive.material.color.set(color)
+	if (selectedPrimitive) {
+		selectedPrimitive.material.color.set(color)
+	} else {
+		for (const plot of selectedPlotsForColor()) plot.ground.material.color.set(color)
+	}
 	if (placementPreview) placementPreview.material.color.set(color)
 	for (const swatch of els.colorSwatches) {
 		swatch.classList.toggle("active", swatch.dataset.color.toLowerCase() === color.toLowerCase())
 	}
+}
+
+function selectedPlotsForColor() {
+	const selected = new Set(plots.selected())
+	if (focusedPlot) selected.add(focusedPlot)
+	return selected
 }
 
 function focusPlot(plot) {
@@ -731,6 +722,14 @@ function focusPointerDown(event) {
 		return
 	}
 
+	const groundHit = activeTool === "pointer" ? surfaceHit(event) : null
+	if (groundHit?.object?.userData.isGround) {
+		selectPrimitive(null)
+		focusedPlot.setSelected(true)
+		startFocusOrbit(event)
+		return
+	}
+
 	startFocusOrbit(event)
 }
 
@@ -752,7 +751,7 @@ async function generateSelected(prompt) {
 			if (wasGenerated) plot.setDraftVisible(true)
 			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean))
 			if (wasGenerated) plot.setDraftVisible(false)
-			const bytes = await generatePlot({ prompt, image: guide })
+			const bytes = await generatePlot({ prompt, image: guide.guide, materialImage: guide.materialMap })
 			await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.raw.splat` })
 		}
 		setStatus("")
@@ -770,9 +769,12 @@ async function generateSelected(prompt) {
 async function applySplatBytes(bytes, plot, { prompt, fileName } = {}) {
 	const raw = new SplatMesh({ fileBytes: bytes, fileName: fileName || `${plot.id}.raw.splat` })
 	await raw.initialized
+	// cropAndFitSplat culls + seats the SAME mesh in place and returns it (or null).
 	const splat = await cropAndFitSplat(raw, plot)
-	disposeObject(raw)
-	if (!splat) throw new Error("Splat loaded, but had no visible bounds after cropping.")
+	if (!splat) {
+		disposeObject(raw)
+		throw new Error("Splat loaded, but had no visible bounds after cropping.")
+	}
 	if (prompt !== undefined) plot.prompt = prompt
 	plot.setGenerated(splat)
 }
@@ -810,12 +812,46 @@ function percentile(sorted, q) {
 	return sorted[pos]
 }
 
-// Read every gaussian out of a freshly-loaded Tripo splat, discard the backdrop /
-// fringe, and rebuild a clean SplatMesh seated squarely in the plot. Returns the
-// new (cropped) mesh, or null if nothing survives. The source mesh is left for the
-// caller to dispose. The stored model is upside-down, so world-up = decreasing
-// stored-Y; the negative Y scale flips it upright and the high-Y percentile is the
-// ground plane.
+function smoothstep(edge0, edge1, x) {
+	const t = Math.min(1, Math.max(0, (x - edge0) / (edge1 - edge0)))
+	return t * t * (3 - 2 * t)
+}
+
+function splatBounds(keep, xs, ys, zs) {
+	let minX = Infinity
+	let maxX = -Infinity
+	let minZ = Infinity
+	let maxZ = -Infinity
+	const localY = []
+	for (let i = 0; i < keep.length; i++) {
+		if (!keep[i]) continue
+		if (xs[i] < minX) minX = xs[i]
+		if (xs[i] > maxX) maxX = xs[i]
+		if (zs[i] < minZ) minZ = zs[i]
+		if (zs[i] > maxZ) maxZ = zs[i]
+		localY.push(ys[i])
+	}
+	if (!localY.length) return null
+	localY.sort((a, b) => a - b)
+	return {
+		minX,
+		maxX,
+		minZ,
+		maxZ,
+		centerX: (minX + maxX) / 2,
+		centerZ: (minZ + maxZ) / 2,
+		boxX: Math.max(1e-3, maxX - minX),
+		boxZ: Math.max(1e-3, maxZ - minZ),
+		floorLocalY: percentile(localY, SPLAT_CROP.floorPercentile),
+	}
+}
+
+// Cull a freshly-loaded Tripo splat (backdrop, fringe, out-of-tile content) IN
+// PLACE and seat it squarely in the plot, returning the same mesh (or null if
+// nothing survives — caller disposes on null). Culling in place keeps measurement
+// and rendering in one coordinate space. The stored model is upside-down, so
+// world-up = decreasing stored-Y; the negative Y scale flips it upright and the
+// high-Y percentile is the ground plane.
 async function cropAndFitSplat(source, plot) {
 	const packed = source.packedSplats
 	const total = packed?.numSplats ?? 0
@@ -833,21 +869,52 @@ async function cropAndFitSplat(source, plot) {
 		ops[i] = opacity
 	})
 
+	// 0. Hard bottom cut: the stored model is upside-down, so high stored-Y values
+	//    become low/below-floor content after the flip. Do this before protected-core
+	//    logic so the central subject cannot preserve the underside smear.
+	let rawMinX = Infinity
+	let rawMaxX = -Infinity
+	let rawMinZ = Infinity
+	let rawMaxZ = -Infinity
+	for (let i = 0; i < total; i++) {
+		if (xs[i] < rawMinX) rawMinX = xs[i]
+		if (xs[i] > rawMaxX) rawMaxX = xs[i]
+		if (zs[i] < rawMinZ) rawMinZ = zs[i]
+		if (zs[i] > rawMaxZ) rawMaxZ = zs[i]
+	}
+	const rawSpan = Math.max(1e-3, rawMaxX - rawMinX, rawMaxZ - rawMinZ)
+	const bottomY = percentile(ys.slice().sort(), SPLAT_CROP.bottomCullPercentile)
+	const bottomLimitY = bottomY + SPLAT_CROP.bottomCullSlack * rawSpan
+	for (let i = 0; i < total; i++) if (ys[i] > bottomLimitY) keep[i] = 0
+
 	// 1. Protected core: the inner radiusKeepPercentile of splats (by distance from
 	//    the content center) are kept unconditionally. Opacity + density culling
 	//    only touch splats OUTSIDE this radius, so the central subject is never
 	//    eaten — harsher (lower) percentiles expose more of the periphery to culling.
 	//    radiusKeepPercentile = 1 protects everything (opacity + density disabled).
-	const originX = percentile(xs.slice().sort(), 0.5)
-	const originZ = percentile(zs.slice().sort(), 0.5)
+	const keptX = []
+	const keptZ = []
+	for (let i = 0; i < total; i++) {
+		if (!keep[i]) continue
+		keptX.push(xs[i])
+		keptZ.push(zs[i])
+	}
+	if (!keptX.length) return null
+	const originX = percentile(keptX.sort((a, b) => a - b), 0.5)
+	const originZ = percentile(keptZ.sort((a, b) => a - b), 0.5)
 	const inCore = new Uint8Array(total)
 	if (SPLAT_CROP.radiusKeepPercentile >= 1) {
 		inCore.fill(1)
 	} else {
-		const dist = new Float32Array(total)
-		for (let i = 0; i < total; i++) dist[i] = Math.hypot(xs[i] - originX, zs[i] - originZ)
-		const coreRadius = percentile(dist.slice().sort(), SPLAT_CROP.radiusKeepPercentile)
-		for (let i = 0; i < total; i++) inCore[i] = dist[i] <= coreRadius ? 1 : 0
+		const dist = []
+		const distByIndex = new Float32Array(total)
+		for (let i = 0; i < total; i++) {
+			if (!keep[i]) continue
+			distByIndex[i] = Math.hypot(xs[i] - originX, zs[i] - originZ)
+			dist.push(distByIndex[i])
+		}
+		const coreRadius = percentile(dist.sort((a, b) => a - b), SPLAT_CROP.radiusKeepPercentile)
+		for (let i = 0; i < total; i++) inCore[i] = keep[i] && distByIndex[i] <= coreRadius ? 1 : 0
 	}
 
 	// 2. Opacity cull (periphery only): drop near-transparent gaussians (haze / fog).
@@ -941,73 +1008,96 @@ async function cropAndFitSplat(source, plot) {
 		if (ys[i] < ceilY || ys[i] > underY) keep[i] = 0
 	}
 
-	// 5. Rebuild a SplatMesh from the survivors only (the culled backdrop is gone,
-	//    not just hidden), reusing the same stored coordinates.
-	if (!keep.some(Boolean)) return null
-	const survivors = new PackedSplats()
+	// 5. Rough transform for tile-shaping. This pass may still include faint fringe,
+	//    so it is only used to decide what belongs in the square tile.
+	let bounds = splatBounds(keep, xs, ys, zs)
+	if (!bounds) return null
+	const fill = plot.size * SPLAT_CROP.inset * SPLAT_CROP.postScale
+
+	let scaleX
+	let scaleZ
+	if (SPLAT_CROP.tile) {
+		const s = (fill * SPLAT_CROP.overfit) / Math.min(bounds.boxX, bounds.boxZ)
+		scaleX = s
+		scaleZ = s
+	} else {
+		scaleX = fill / bounds.boxX
+		scaleZ = fill / bounds.boxZ
+	}
+	const scaleY = (scaleX + scaleZ) / 2
+
+	const roughX = i => scaleX * (xs[i] - bounds.centerX)
+	const roughZ = i => scaleZ * (zs[i] - bounds.centerZ)
+	const roughY = i => scaleY * (bounds.floorLocalY - ys[i])
+
+	// 6. Tile shaping: rough-crop to a square, then bevel the ground edge.
+	if (SPLAT_CROP.tile) {
+		const half = fill / 2
+		for (let i = 0; i < total; i++) {
+			if (keep[i] && (Math.abs(roughX(i)) > half || Math.abs(roughZ(i)) > half)) keep[i] = 0
+		}
+		let hMax = SPLAT_CROP.edgeThickness
+		for (let i = 0; i < total; i++) if (keep[i]) hMax = Math.max(hMax, roughY(i))
+		const T = SPLAT_CROP.edgeThickness
+		for (let i = 0; i < total; i++) {
+			if (!keep[i]) continue
+			const edgeDist = half - Math.max(Math.abs(roughX(i)), Math.abs(roughZ(i)))
+			const cap = T + (hMax - T) * smoothstep(0, SPLAT_CROP.edgeMargin, edgeDist)
+			if (roughY(i) > cap) keep[i] = 0
+		}
+	}
+
+	// 7. Final fit: remeasure AFTER tile shaping. This is the important bit: the
+	//    visible survivors, not the discarded skirt/backdrop, determine the scale.
+	bounds = splatBounds(keep, xs, ys, zs)
+	if (!bounds) return null
+	scaleX = fill / bounds.boxX
+	scaleZ = fill / bounds.boxZ
+	const finalScaleY = (scaleX + scaleZ) / 2
+	const finalY = i => finalScaleY * (bounds.floorLocalY - ys[i])
+
+	// 8. Absolute floor clamp: after the final seat transform is known, drop any
+	//    gaussian that would render below the plot floor. This catches soft shadow
+	//    sheets / undersides that survive percentile culling.
+	for (let i = 0; i < total; i++) {
+		if (keep[i] && finalY(i) < -SPLAT_CROP.floorCullSlack) keep[i] = 0
+	}
+	bounds = splatBounds(keep, xs, ys, zs)
+	if (!bounds) return null
+	scaleX = fill / bounds.boxX
+	scaleZ = fill / bounds.boxZ
+	const scaleYFinal = (scaleX + scaleZ) / 2
+
+	// 9. Cull IN PLACE: compact survivors to the front of the source mesh + truncate,
+	//    then apply the transform. Editing the loaded mesh (vs rebuilding) keeps
+	//    measurement and rendering in the same coordinate space.
 	let kept = 0
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
 		if (!keep[i]) return
-		survivors.pushSplat(center, scales, quaternion, opacity, color)
+		packed.setSplat(kept, center, scales, quaternion, opacity, color)
 		kept++
 	})
 	if (!kept) return null
+	packed.numSplats = kept
+	packed.needsUpdate = true
 
-	const mesh = new SplatMesh({ packedSplats: survivors, fileName: `${plot.id}.splat` })
-	await mesh.initialized
-
-	// 6. Seat it from the REBUILT mesh's own gaussians — what actually gets drawn,
-	//    so there's no drift vs render. Per-axis scale lands the XZ extremes on the
-	//    plot corners. The floor is a robust low percentile of height (NOT the single
-	//    lowest gaussian) so a sparse tail hanging below the platform can't float the
-	//    visible base. postScale flows through scaleY, so the floor tracks it.
-	let bMinX = Infinity
-	let bMaxX = -Infinity
-	let bMinZ = Infinity
-	let bMaxZ = -Infinity
-	const localY = []
-	mesh.packedSplats.forEachSplat((i, c) => {
-		if (c.x < bMinX) bMinX = c.x
-		if (c.x > bMaxX) bMaxX = c.x
-		if (c.z < bMinZ) bMinZ = c.z
-		if (c.z > bMaxZ) bMaxZ = c.z
-		localY.push(c.y)
-	})
-	if (!localY.length) {
-		disposeObject(mesh)
-		return null
-	}
-	localY.sort((a, b) => a - b)
-
-	const target = plot.size * SPLAT_CROP.inset * SPLAT_CROP.postScale
-	const sizeX = Math.max(1e-3, bMaxX - bMinX)
-	const sizeZ = Math.max(1e-3, bMaxZ - bMinZ)
-	const scaleX = target / sizeX
-	const scaleZ = target / sizeZ
-	const scaleY = (scaleX + scaleZ) / 2
-	mesh.scale.set(scaleX, -scaleY, scaleZ)
-
-	const centerX = (bMinX + bMaxX) / 2
-	const centerZ = (bMinZ + bMaxZ) / 2
-	// World-down = high local-Y (the negative Y scale flips the model upright), so
-	// the floor is a HIGH percentile of local-Y. Seat it on floorY: world_y at
-	// floorLocalY = position.y - scaleY*floorLocalY = floorY.
-	const floorLocalY = percentile(localY, SPLAT_CROP.floorPercentile)
-	mesh.position.set(-centerX * scaleX, SPLAT_CROP.floorY + floorLocalY * scaleY, -centerZ * scaleZ)
+	source.scale.set(scaleX, -scaleYFinal, scaleZ)
+	source.position.set(-bounds.centerX * scaleX, SPLAT_CROP.floorY + bounds.floorLocalY * scaleYFinal, -bounds.centerZ * scaleZ)
 
 	if (SPLAT_CROP.debug) {
 		console.log("[splat fit]", {
 			raw: total,
 			kept,
 			keptPct: ((kept / total) * 100).toFixed(1) + "%",
-			clusterCells: bestSize,
-			sizeX: sizeX.toFixed(3),
-			sizeZ: sizeZ.toFixed(3),
-			scaleY: scaleY.toFixed(3),
-			floorLocalY: floorLocalY.toFixed(3),
+			tile: SPLAT_CROP.tile,
+			boxX: bounds.boxX.toFixed(3),
+			boxZ: bounds.boxZ.toFixed(3),
+			scaleX: scaleX.toFixed(3),
+			scaleZ: scaleZ.toFixed(3),
+			floorLocalY: bounds.floorLocalY.toFixed(3),
 		})
 	}
-	return mesh
+	return source
 }
 
 renderer.domElement.addEventListener("pointerdown", event => {
@@ -1043,7 +1133,6 @@ renderer.domElement.addEventListener("wheel", event => {
 }, { passive: false })
 
 window.addEventListener("keyup", event => {
-	if (event.key === "Control" || event.key === "Meta") plots.clearSelection()
 	if (event.key === "Escape" && focusedPlot && !els.generateModal.open) exitFocus()
 })
 
@@ -1083,15 +1172,8 @@ els.generateForm.addEventListener("submit", event => {
 function animate(time) {
 	for (const plus of plots.plus) {
 		const wave = (Math.sin(time * 0.004 + plus.position.x + plus.position.z) + 1) / 2
-		const fill = plus.getObjectByName("plus_fill")
-		const border = plus.getObjectByName("plus_border")
 		const mark = plus.getObjectByName("plus_mark")
-		if (fill) fill.material.opacity = 0.08 + wave * 0.08
-		if (border) border.material.opacity = 0.28 + wave * 0.28
-		if (mark) {
-			mark.scale.setScalar(0.92 + wave * 0.16)
-			for (const child of mark.children) child.material.opacity = 0.48 + wave * 0.3
-		}
+		if (mark) mark.scale.setScalar(0.94 + wave * 0.08)
 	}
 	sky.position.copy(camera.position)
 	renderer.render(scene, camera)

@@ -7,20 +7,37 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	const original = snapshot(camera, renderer)
 	const target = new THREE.WebGLRenderTarget(captureSize, captureSize)
 	const hidden = hideOtherPlots(plot)
-	const edges = addEdges(plot)
+	const materialSwap = applyFlatMaterials(plot)
+
+	const spark = scene.userData.sparkRenderer
+	const sparkVisible = spark?.visible
+	if (spark) spark.visible = false
+
+	const outlines = []
+	scene.traverse(object => {
+		if (object.userData.isSelectionOutline && object.visible) {
+			outlines.push(object)
+			object.visible = false
+		}
+	})
 
 	for (const helper of helpers) if (helper) helper.visible = false
 	poseIso(camera, plot)
 	updateSky(scene, camera)
 
-	const blob = await captureTarget(renderer, scene, camera, target)
-
-	for (const helper of helpers) if (helper) helper.visible = true
+	const edges = addEdges(plot)
+	const guide = await captureTarget(renderer, scene, camera, target)
 	for (const object of edges) object.removeFromParent()
+	const materialMap = await captureTarget(renderer, scene, camera, target)
+
+	if (spark) spark.visible = sparkVisible
+	for (const object of outlines) object.visible = true
+	for (const helper of helpers) if (helper) helper.visible = true
+	restoreMaterials(materialSwap)
 	for (const [object, visible] of hidden) object.visible = visible
 	target.dispose()
 	restore(camera, renderer, original)
-	return blob
+	return { guide, materialMap }
 }
 
 function hideOtherPlots(plot) {
@@ -48,6 +65,31 @@ function addEdges(plot) {
 		edges.push(edge)
 	}
 	return edges
+}
+
+function applyFlatMaterials(plot) {
+	const swaps = []
+	for (const mesh of plot.meshesForCapture()) {
+		if (!mesh.material) continue
+		const original = mesh.material
+		const source = Array.isArray(original) ? original[0] : original
+		const color = source?.color?.clone?.() ?? new THREE.Color(0x888888)
+		mesh.material = new THREE.MeshBasicMaterial({
+			color,
+			side: THREE.DoubleSide,
+			depthTest: true,
+			depthWrite: true,
+		})
+		swaps.push([mesh, original, mesh.material])
+	}
+	return swaps
+}
+
+function restoreMaterials(swaps) {
+	for (const [mesh, original, temporary] of swaps) {
+		mesh.material = original
+		temporary.dispose()
+	}
 }
 
 function poseIso(camera, plot) {
