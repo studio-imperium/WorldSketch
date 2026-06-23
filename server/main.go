@@ -45,6 +45,7 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	groundColor := strings.TrimSpace(r.FormValue("ground_color"))
 	file, _, err := r.FormFile("image")
 	if err != nil {
 		http.Error(w, "missing image", http.StatusBadRequest)
@@ -66,7 +67,7 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 
 	edited := image
 	if !envBool("WS_SKIP_OPENAI", false) {
-		edited, err = openAIEdit(image, materialImage, prompt)
+		edited, err = openAIEdit(image, materialImage, prompt, groundColor)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -108,13 +109,15 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"overfit":              envFloat("WS_CULL_OVERFIT", 1.15),
 		"edgeThickness":        envFloat("WS_CULL_EDGE_THICKNESS", 0.35),
 		"edgeMargin":           envFloat("WS_CULL_EDGE_MARGIN", 1.5),
+		"unitScale":            envFloat("WS_CULL_UNIT_SCALE", 3.5),
+		"floorOffset":          envFloat("WS_CULL_FLOOR_OFFSET", -7.3),
 		"debug":                envBool("WS_CULL_DEBUG", false),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(cfg)
 }
 
-func openAIEdit(image, materialImage []byte, userPrompt string) ([]byte, error) {
+func openAIEdit(image, materialImage []byte, userPrompt, groundColor string) ([]byte, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	if key == "" {
 		return nil, errors.New("OPENAI_API_KEY is not set")
@@ -124,7 +127,7 @@ func openAIEdit(image, materialImage []byte, userPrompt string) ([]byte, error) 
 	writer := multipart.NewWriter(&body)
 	mustField(writer, "model", env("WS_IMAGE_MODEL", "gpt-image-1"))
 	mustField(writer, "size", env("WS_IMAGE_SIZE", "1024x1024"))
-	mustField(writer, "prompt", imagePrompt(userPrompt))
+	mustField(writer, "prompt", imagePrompt(userPrompt, groundColor))
 	// Strictness knobs (gpt-image-1): high input fidelity keeps the blockout's
 	// proportions and color tones; transparent background stops it from painting
 	// the hallucinated backdrop wall. Set the env var empty to omit a field.
@@ -319,12 +322,16 @@ func tripoGenerate(image []byte) ([]byte, error) {
 	return data, nil
 }
 
-func imagePrompt(userPrompt string) string {
+func imagePrompt(userPrompt, groundColor string) string {
 	prompt := strings.TrimSpace(userPrompt)
 	if prompt == "" {
 		prompt = "a coherent stylized natural game environment"
 	}
-	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Image 1 is the strict geometry guide with readable edges. Image 2, when provided, is a flat unlit material-ID map: use it to preserve material identity. Surfaces with the same flat input color in Image 2 must remain the same material family and same general hue/tone in the output, across the whole plot. Treat the blockout as a STRICT geometric reference: every object must keep its exact size, height, thickness, footprint, and relative scale — match the blockout shape-for-shape. Do NOT enlarge, thicken, inflate, or change any object's proportions or aspect ratio. The ground base is a FLAT THIN slab: keep it thin and flat, never turn it into a tall block, plinth, or pedestal. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's position, silhouette, and the overall color tones; do not move, add, remove, resize, or reimagine objects. Material and color discipline is critical: every surface that has the same input color must remain the same material family and same general hue/tone in the output. If multiple ground/baseplate surfaces share the same green input color, make them one consistent grass material with only subtle texture variation, not different grass species, brightness levels, or color palettes. Replace flat primitive materials with believable detailed natural materials while matching the original hues. Render it as shadowless albedo/reference material: no cast shadows, no contact shadows, no ambient-occlusion blobs, no dark underside shadow plates, no directional sunlight, and no dramatic lighting. Use flat, even, fully ambient illumination so every surface is uniformly lit and the ground stays an even flat tone. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
+	groundInstruction := ""
+	if groundColor != "" {
+		groundInstruction = " The ground/baseplate input color is " + groundColor + "; preserve that ground hue and material category. If it is sandy, tan, yellow, beige, orange, or brown, the ground must become sand, dry soil, clay, stone, or desert terrain, never green grass. If it is green, use grass, moss, or foliage in that same green tone."
+	}
+	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Image 1 is the strict geometry guide with readable edges. Image 2, when provided, is a flat unlit material-ID map: use it to preserve material identity. Surfaces with the same flat input color in Image 2 must remain the same material family and same general hue/tone in the output, across the whole plot." + groundInstruction + " Treat the blockout as a STRICT geometric reference: every object must keep its exact size, height, thickness, footprint, and relative scale — match the blockout shape-for-shape. Do NOT enlarge, thicken, inflate, or change any object's proportions or aspect ratio. The ground base is a FLAT THIN slab: keep it thin and flat, never turn it into a tall block, plinth, or pedestal. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's position, silhouette, and the overall color tones; do not move, add, remove, resize, or reimagine objects. Material and color discipline is critical: every surface that has the same input color must remain the same material family and same general hue/tone in the output. If multiple ground/baseplate surfaces share the same green input color, make them one consistent grass material with only subtle texture variation, not different grass species, brightness levels, or color palettes. Replace flat primitive materials with believable detailed natural materials while matching the original hues. Render it as shadowless albedo/reference material: no cast shadows, no contact shadows, no ambient-occlusion blobs, no dark underside shadow plates, no directional sunlight, and no dramatic lighting. Use flat, even, fully ambient illumination so every surface is uniformly lit and the ground stays an even flat tone. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
 }
 
 func readOptionalFormFile(r *http.Request, name string, maxBytes int64) ([]byte, error) {

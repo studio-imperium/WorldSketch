@@ -54,6 +54,8 @@ const SPLAT_CROP = {
 	overfit: 1.15, // scale content past the tile before cropping, so every edge is a clean cut through solid ground
 	edgeThickness: 0.35, // uniform ground thickness (plot-local units) kept at the tile edge so neighbours match
 	edgeMargin: 1.5, // distance (plot-local units) over which the edge cap ramps from edgeThickness up to full height
+	unitScale: 3.5, // Tripo/Spark raw units render smaller than the plot-space measurement suggests
+	floorOffset: -7.3, // matching vertical calibration for the Tripo/Spark coordinate frame
 	debug: false, // log per-stage splat counts + extents to the console
 }
 
@@ -751,7 +753,12 @@ async function generateSelected(prompt) {
 			if (wasGenerated) plot.setDraftVisible(true)
 			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean))
 			if (wasGenerated) plot.setDraftVisible(false)
-			const bytes = await generatePlot({ prompt, image: guide.guide, materialImage: guide.materialMap })
+			const bytes = await generatePlot({
+				prompt,
+				image: guide.guide,
+				materialImage: guide.materialMap,
+				groundColor: `#${plot.ground.material.color.getHexString()}`,
+			})
 			await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.raw.splat` })
 		}
 		setStatus("")
@@ -1067,6 +1074,9 @@ async function cropAndFitSplat(source, plot) {
 	scaleX = fill / bounds.boxX
 	scaleZ = fill / bounds.boxZ
 	const scaleYFinal = (scaleX + scaleZ) / 2
+	const renderScaleX = scaleX * SPLAT_CROP.unitScale
+	const renderScaleY = scaleYFinal * SPLAT_CROP.unitScale
+	const renderScaleZ = scaleZ * SPLAT_CROP.unitScale
 
 	// 9. Cull IN PLACE: compact survivors to the front of the source mesh + truncate,
 	//    then apply the transform. Editing the loaded mesh (vs rebuilding) keeps
@@ -1081,8 +1091,12 @@ async function cropAndFitSplat(source, plot) {
 	packed.numSplats = kept
 	packed.needsUpdate = true
 
-	source.scale.set(scaleX, -scaleYFinal, scaleZ)
-	source.position.set(-bounds.centerX * scaleX, SPLAT_CROP.floorY + bounds.floorLocalY * scaleYFinal, -bounds.centerZ * scaleZ)
+	source.scale.set(renderScaleX, -renderScaleY, renderScaleZ)
+	source.position.set(
+		-bounds.centerX * renderScaleX,
+		SPLAT_CROP.floorY + SPLAT_CROP.floorOffset + bounds.floorLocalY * renderScaleY,
+		-bounds.centerZ * renderScaleZ,
+	)
 
 	if (SPLAT_CROP.debug) {
 		console.log("[splat fit]", {
@@ -1094,6 +1108,8 @@ async function cropAndFitSplat(source, plot) {
 			boxZ: bounds.boxZ.toFixed(3),
 			scaleX: scaleX.toFixed(3),
 			scaleZ: scaleZ.toFixed(3),
+			unitScale: SPLAT_CROP.unitScale,
+			floorOffset: SPLAT_CROP.floorOffset,
 			floorLocalY: bounds.floorLocalY.toFixed(3),
 		})
 	}

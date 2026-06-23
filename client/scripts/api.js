@@ -1,6 +1,7 @@
-export async function generatePlot({ prompt, image, materialImage, signal }) {
+export async function generatePlot({ prompt, image, materialImage, groundColor, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt)
+	if (groundColor) form.append("ground_color", groundColor)
 	form.append("image", image, "plot-guide.png")
 	if (materialImage) form.append("material_image", materialImage, "plot-materials.png")
 
