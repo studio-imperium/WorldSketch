@@ -1,306 +1,409 @@
 package main
 
 import (
-	"archive/zip"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
-	"flag"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
-const outputDir = "output"
+const defaultTripoURL = "http://148.153.245.160:18080"
+
+var httpClient = &http.Client{Timeout: 180 * time.Second}
 
 func main() {
-	loadDotEnv() // pick up .env (RunPod creds + tunables) without the shell exporting it
+	mux := http.NewServeMux()
+	mux.HandleFunc("/api/generate-plot", handleGeneratePlot)
+	mux.HandleFunc("/api/config", handleConfig)
+	mux.Handle("/", http.FileServer(http.Dir(filepath.Join(rootDir(), "client"))))
 
-	jobDir := flag.String("job", "", "serverless worker mode: run the pipeline once on this job dir, then exit")
-	renormDir := flag.String("renorm", "", "re-apply WS_TRIPO_* orientation/fit to <jobdir>/world_raw.splat -> world.splat, then exit")
-	flag.Parse()
-	if *jobDir != "" {
-		runOnce(*jobDir)
+	addr := env("PORT", "8067")
+	log.Printf("WorldSketch listening on http://localhost:%s", addr)
+	log.Fatal(http.ListenAndServe(":"+addr, mux))
+}
+
+func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if *renormDir != "" {
-		runRenorm(*renormDir)
+
+	if err := r.ParseMultipartForm(24 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
-	store := NewStore(outputDir)
-	saveDefaultWorkflow(outputDir)
-
-	if runpodConfigured() {
-		log.Printf("RunPod mode: endpoint=%s  results→%s", os.Getenv("RUNPOD_ENDPOINT_ID"), publicBaseURL())
-		if publicBaseURL() == "" {
-			log.Println("  WARNING: WORLDSKETCH_PUBLIC_URL is empty — the GPU worker can't return results, so")
-			log.Println("           builds will fail. Run ./scripts/dev.sh (starts a cloudflare tunnel and sets")
-			log.Println("           it), or set WORLDSKETCH_PUBLIC_URL in .env to a URL the worker can reach.")
-		}
-	} else {
-		log.Println("Local pipeline mode — no RunPod creds found. Splat training needs a GPU; add")
-		log.Println("RUNPOD_ENDPOINT_ID + RUNPOD_API_KEY to .env and run ./scripts/dev.sh for serverless.")
-	}
-
-	http.HandleFunc("/api/generate", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-
-		scene, files, err := readGenerateRequest(r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		job := store.Create(scene, files)
-
-		go store.Run(job.ID)
-		writeJSON(w, http.StatusAccepted, map[string]string{"jobId": job.ID})
-	})
-
-	http.HandleFunc("/api/retrain", func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-			return
-		}
-		r.Body = http.MaxBytesReader(w, r.Body, 512<<20)
-
-		bundle, err := readRetrainRequest(r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-		job, err := store.CreateRetrain(bundle)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
-
-		go store.RunRetrain(job.ID)
-		writeJSON(w, http.StatusAccepted, map[string]string{"jobId": job.ID})
-	})
-
-	http.HandleFunc("/api/jobs/", func(w http.ResponseWriter, r *http.Request) {
-		id := strings.TrimPrefix(r.URL.Path, "/api/jobs/")
-
-		// Result callback: the GPU worker PUTs a result zip here when it finishes.
-		// Older workers may still PUT raw world.splat bytes; keep accepting both.
-		if r.Method == http.MethodPut && strings.HasSuffix(id, "/result") {
-			id = strings.TrimSuffix(id, "/result")
-			if !store.validResultToken(id, r.URL.Query().Get("token")) {
-				http.Error(w, "forbidden", http.StatusForbidden)
-				return
-			}
-			data, err := io.ReadAll(r.Body)
-			if err != nil || len(data) == 0 {
-				http.Error(w, "empty result body", http.StatusBadRequest)
-				return
-			}
-			bytes, err := receiveWorkerResult(filepath.Join(outputDir, id), data)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
-			log.Printf("[%s] result received: %d bytes", id, bytes)
-			store.markDone(id)
-			writeJSON(w, http.StatusOK, map[string]any{"ok": true, "bytes": bytes})
-			return
-		}
-
-		if strings.HasSuffix(id, "/world.ply") {
-			id = strings.TrimSuffix(id, "/world.ply")
-			http.ServeFile(w, r, filepath.Join(outputDir, id, "world.ply"))
-			return
-		}
-		if strings.HasSuffix(id, "/world.splat") {
-			id = strings.TrimSuffix(id, "/world.splat")
-			http.ServeFile(w, r, filepath.Join(outputDir, id, "world.splat"))
-			return
-		}
-		if strings.HasSuffix(id, "/training-bundle.zip") {
-			id = strings.TrimSuffix(id, "/training-bundle.zip")
-			ServeTrainingBundle(w, r, filepath.Join(outputDir, id))
-			return
-		}
-		if strings.HasSuffix(id, "/collisions.json") {
-			id = strings.TrimSuffix(id, "/collisions.json")
-			ServeCollisions(w, r, filepath.Join(outputDir, id))
-			return
-		}
-		if strings.HasSuffix(id, "/preview.png") {
-			id = strings.TrimSuffix(id, "/preview.png")
-			http.ServeFile(w, r, previewPath(filepath.Join(outputDir, id)))
-			return
-		}
-
-		job, ok := store.Get(id)
-		if !ok {
-			http.NotFound(w, r)
-			return
-		}
-		writeJSON(w, http.StatusOK, job)
-	})
-
-	// Lets the editor show whether builds will actually reach the GPU, so a blank splat is
-	// explained instead of mysterious. mode: "gpu" ready · "gpu_no_url" creds but no tunnel ·
-	// "local" no creds (splat training needs a GPU, so local builds produce only world.ply).
-	http.HandleFunc("/api/status", func(w http.ResponseWriter, r *http.Request) {
-		runpod := runpodConfigured()
-		hasURL := publicBaseURL() != ""
-		mode := "local"
-		if runpod && hasURL {
-			mode = "gpu"
-		} else if runpod {
-			mode = "gpu_no_url"
-		}
-		writeJSON(w, http.StatusOK, map[string]any{"mode": mode, "runpod": runpod, "publicUrl": hasURL})
-	})
-
-	os.MkdirAll(outputDir, 0755)
-	http.Handle("/", http.FileServer(http.Dir("../client")))
-
-	log.Println("Hosting files on port 8067")
-	if err := http.ListenAndServe(":8067", nil); err != nil {
-		log.Fatal(err)
-	}
-}
-
-func receiveWorkerResult(dir string, data []byte) (int, error) {
-	if len(data) >= 4 && string(data[:4]) == "PK\x03\x04" {
-		return extractWorkerBundle(dir, data)
-	}
-	return len(data), os.WriteFile(filepath.Join(dir, "world.splat"), data, 0644)
-}
-
-func extractWorkerBundle(dir string, data []byte) (int, error) {
-	reader, err := zip.NewReader(bytes.NewReader(data), int64(len(data)))
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	file, _, err := r.FormFile("image")
 	if err != nil {
-		return 0, err
-	}
-
-	total := 0
-	for _, file := range reader.File {
-		name := filepath.Clean(file.Name)
-		if filepath.IsAbs(name) || strings.HasPrefix(name, ".."+string(filepath.Separator)) || name == ".." {
-			return total, os.ErrPermission
-		}
-		target := filepath.Join(dir, name)
-		if file.FileInfo().IsDir() {
-			if err := os.MkdirAll(target, 0755); err != nil {
-				return total, err
-			}
-			continue
-		}
-		if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
-			return total, err
-		}
-		src, err := file.Open()
-		if err != nil {
-			return total, err
-		}
-		dst, err := os.Create(target)
-		if err != nil {
-			src.Close()
-			return total, err
-		}
-		n, copyErr := io.Copy(dst, src)
-		closeErr := dst.Close()
-		src.Close()
-		total += int(n)
-		if copyErr != nil {
-			return total, copyErr
-		}
-		if closeErr != nil {
-			return total, closeErr
-		}
-	}
-	return total, nil
-}
-
-// runOnce executes the pipeline a single time on a prepared job dir and exits.
-// This is the serverless worker entrypoint: the RunPod handler stages inputs into
-// the dir, runs this, then ships the resulting artifacts back.
-func runOnce(dir string) {
-	scene := readScene(filepath.Join(dir, "scene.json"))
-	if err := RunPipeline(dir, scene, func(stage string) { log.Println("[pipeline]", stage) }); err != nil {
-		log.Fatalf("pipeline failed: %v", err)
-	}
-	log.Println("pipeline complete:", filepath.Join(dir, "world.splat"))
-}
-
-type UploadedView struct {
-	Name       string
-	RGB        []byte
-	Depth      []byte
-	CameraJSON []byte
-	Mask       []byte // new-object mask (expansion only): white where a new primitive is visible
-}
-
-func readGenerateRequest(r *http.Request) (Scene, []UploadedView, error) {
-	if err := r.ParseMultipartForm(96 << 20); err != nil {
-		return Scene{}, nil, err
-	}
-
-	sceneFile, _, err := r.FormFile("scene")
-	if err != nil {
-		return Scene{}, nil, fmt.Errorf("missing scene part: %w", err)
-	}
-	defer sceneFile.Close()
-
-	var scene Scene
-	json.NewDecoder(sceneFile).Decode(&scene)
-
-	views := make([]UploadedView, 0, len(viewNames))
-	for _, name := range viewNames {
-		views = append(views, readUploadedView(r, name))
-	}
-
-	return scene, views, nil
-}
-
-func readUploadedView(r *http.Request, name string) UploadedView {
-	rgb, _ := readMultipartFile(r, name+"_rgb")
-	depth, _ := readMultipartFile(r, name+"_depth")
-	camera, _ := readMultipartFile(r, name+"_camera")
-	mask, _ := readMultipartFile(r, name+"_mask") // present only on expansion submits
-	return UploadedView{Name: name, RGB: rgb, Depth: depth, CameraJSON: camera, Mask: mask}
-}
-
-func readRetrainRequest(r *http.Request) ([]byte, error) {
-	if err := r.ParseMultipartForm(512 << 20); err != nil {
-		return nil, err
-	}
-	file, _, err := r.FormFile("bundle")
-	if err != nil {
-		file, _, err = r.FormFile("training_bundle")
-	}
-	if err != nil {
-		return nil, fmt.Errorf("bundle file is required")
+		http.Error(w, "missing image", http.StatusBadRequest)
+		return
 	}
 	defer file.Close()
-	return io.ReadAll(file)
-}
 
-func readMultipartFile(r *http.Request, field string) ([]byte, error) {
-	// FormFile returns a nil file for an absent field (e.g. the per-view _mask, which is
-	// only sent on expansion submits) — guard it so a missing optional part can't panic
-	// the handler.
-	file, _, err := r.FormFile(field)
+	image, err := io.ReadAll(io.LimitReader(file, 20<<20))
 	if err != nil {
-		return nil, err
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
-	defer file.Close()
-	return io.ReadAll(file)
+
+	edited := image
+	if !envBool("WS_SKIP_OPENAI", false) {
+		edited, err = openAIEdit(image, prompt)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+	}
+
+	splat, err := tripoGenerate(edited)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	saveSplat(splat)
+
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `inline; filename="plot.splat"`)
+	_, _ = w.Write(splat)
 }
 
-func writeJSON(w http.ResponseWriter, status int, value any) {
+// handleConfig exposes the client-side splat cull/fit knobs so they can be tuned
+// from the server env (WS_CULL_*) without rebuilding the client. Defaults here
+// must match the SPLAT_CROP defaults in client/scripts/renderer.js.
+func handleConfig(w http.ResponseWriter, r *http.Request) {
+	cfg := map[string]any{
+		"opacityFloor":         envFloat("WS_CULL_OPACITY", 0.04),
+		"densityCells":         int(envFloat("WS_CULL_DENSITY_CELLS", 28)),
+		"densityKeepFrac":      envFloat("WS_CULL_DENSITY_FRAC", 0.08),
+		"radiusKeepPercentile": envFloat("WS_CULL_RADIUS_PCT", 0.9),
+		"groundPercentile":     envFloat("WS_CULL_GROUND_PCT", 0.92),
+		"heightCapFactor":      envFloat("WS_CULL_HEIGHT_CAP", 1.8),
+		"belowGroundFactor":    envFloat("WS_CULL_BELOW_GROUND", 0.12),
+		"floorPercentile":      envFloat("WS_CULL_FLOOR_PCT", 0.97),
+		"floorY":               envFloat("WS_CULL_FLOOR_Y", 0),
+		"inset":                envFloat("WS_CULL_INSET", 0.98),
+		"postScale":            envFloat("WS_CULL_POST_SCALE", 1),
+		"debug":                envBool("WS_CULL_DEBUG", false),
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(value)
+	_ = json.NewEncoder(w).Encode(cfg)
+}
+
+func openAIEdit(image []byte, userPrompt string) ([]byte, error) {
+	key := os.Getenv("OPENAI_API_KEY")
+	if key == "" {
+		return nil, errors.New("OPENAI_API_KEY is not set")
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	mustField(writer, "model", env("WS_IMAGE_MODEL", "gpt-image-1"))
+	mustField(writer, "size", env("WS_IMAGE_SIZE", "1024x1024"))
+	mustField(writer, "prompt", imagePrompt(userPrompt))
+	// Strictness knobs (gpt-image-1): high input fidelity keeps the blockout's
+	// proportions and color tones; transparent background stops it from painting
+	// the hallucinated backdrop wall. Set the env var empty to omit a field.
+	optField(writer, "quality", env("WS_IMAGE_QUALITY", "high"))
+	optField(writer, "input_fidelity", env("WS_IMAGE_FIDELITY", "high"))
+	optField(writer, "background", env("WS_IMAGE_BACKGROUND", "transparent"))
+	optField(writer, "output_format", env("WS_IMAGE_FORMAT", "png"))
+
+	part, err := createPNGFormFile(writer, "image", "plot-guide.png")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := part.Write(image); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/images/edits", &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("openai image edit failed: %s", string(data))
+	}
+
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, err
+	}
+
+	var out []byte
+	if b64 := findString(parsed, "b64_json", "image_base64", "base64"); b64 != "" {
+		out, err = base64.StdEncoding.DecodeString(stripDataURL(b64))
+	} else if url := findString(parsed, "url"); url != "" {
+		out, err = fetchBytes(url)
+	} else {
+		return nil, errors.New("openai image edit returned no image")
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	saveGeneration(image, out, userPrompt)
+	return out, nil
+}
+
+// saveGeneration writes the block-out guide, the GPT-image output, and the
+// prompt into the backend output folder so the (input, prompt -> output) pairs
+// can be collected for finetuning. Failures are logged but never block a
+// request.
+func saveGeneration(input, output []byte, userPrompt string) {
+	if !envBool("WS_SAVE_GENERATIONS", true) {
+		return
+	}
+
+	dir := env("WS_OUTPUT_DIR", filepath.Join(rootDir(), "server", "output"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("saveGeneration: mkdir %s: %v", dir, err)
+		return
+	}
+
+	stamp := time.Now().Format("20060102-150405.000")
+	base := filepath.Join(dir, stamp)
+
+	for name, data := range map[string][]byte{
+		base + "-input.png":  input,
+		base + "-output.png": output,
+		base + "-prompt.txt": []byte(userPrompt),
+	} {
+		if err := os.WriteFile(name, data, 0o644); err != nil {
+			log.Printf("saveGeneration: write %s: %v", name, err)
+		}
+	}
+}
+
+// saveSplat writes the raw Tripo splat into the output folder so it can be
+// re-uploaded to a plot (via the client "Upload splat" button) to A/B-test the
+// cull/fit pipeline against a fixed input. Failures are logged, never fatal.
+func saveSplat(splat []byte) {
+	if !envBool("WS_SAVE_GENERATIONS", true) {
+		return
+	}
+
+	dir := env("WS_OUTPUT_DIR", filepath.Join(rootDir(), "server", "output"))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		log.Printf("saveSplat: mkdir %s: %v", dir, err)
+		return
+	}
+
+	name := filepath.Join(dir, time.Now().Format("20060102-150405.000")+".splat")
+	if err := os.WriteFile(name, splat, 0o644); err != nil {
+		log.Printf("saveSplat: write %s: %v", name, err)
+	}
+}
+
+func tripoGenerate(image []byte) ([]byte, error) {
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	mustField(writer, "seed", env("WS_TRIPO_SEED", "0"))
+	mustField(writer, "steps", env("WS_TRIPO_STEPS", "30"))
+	mustField(writer, "guidance_scale", env("WS_TRIPO_GUIDANCE", "3.5"))
+	mustField(writer, "num_gaussians", env("WS_TRIPO_GAUSSIANS", "700000"))
+	mustField(writer, "output_format", env("WS_TRIPO_FORMAT", "splat"))
+
+	part, err := createPNGFormFile(writer, "image", "plot.png")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := part.Write(image); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	base := strings.TrimRight(env("TRIPOSPLAT_URL", defaultTripoURL), "/")
+	req, err := http.NewRequest(http.MethodPost, base+"/generate", &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("triposplat failed: %s", string(data))
+	}
+
+	if strings.Contains(res.Header.Get("Content-Type"), "application/json") {
+		var parsed map[string]any
+		if err := json.Unmarshal(data, &parsed); err != nil {
+			return nil, err
+		}
+		if b64 := findString(parsed, "splat_base64", "file_base64", "base64", "data"); b64 != "" {
+			decoded, err := base64.StdEncoding.DecodeString(stripDataURL(b64))
+			if err == nil {
+				return decoded, nil
+			}
+		}
+		if url := findString(parsed, "splat_url", "file_url", "url", "output"); url != "" {
+			return fetchBytes(url)
+		}
+		return nil, errors.New("triposplat returned json without a splat")
+	}
+
+	return data, nil
+}
+
+func imagePrompt(userPrompt string) string {
+	prompt := strings.TrimSpace(userPrompt)
+	if prompt == "" {
+		prompt = "a coherent stylized natural game environment"
+	}
+	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's existing proportions, position, silhouette, and the overall color tones of the blockout; do not move, add, remove, resize, or reimagine objects. Replace flat primitive materials with believable detailed natural materials while matching the original hues. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
+}
+
+func mustField(writer *multipart.Writer, key, value string) {
+	if err := writer.WriteField(key, value); err != nil {
+		panic(err)
+	}
+}
+
+// optField writes a multipart field only when the value is non-empty, so a knob
+// can be disabled by setting its env var to "".
+func optField(writer *multipart.Writer, key, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	mustField(writer, key, value)
+}
+
+func createPNGFormFile(writer *multipart.Writer, field, filename string) (io.Writer, error) {
+	header := make(textproto.MIMEHeader)
+	header.Set("Content-Disposition", fmt.Sprintf(`form-data; name="%s"; filename="%s"`, field, filename))
+	header.Set("Content-Type", "image/png")
+	return writer.CreatePart(header)
+}
+
+func findString(value any, names ...string) string {
+	nameSet := map[string]bool{}
+	for _, name := range names {
+		nameSet[name] = true
+	}
+	var walk func(any) string
+	walk = func(v any) string {
+		switch x := v.(type) {
+		case map[string]any:
+			for k, v := range x {
+				if nameSet[k] {
+					if s, ok := v.(string); ok && s != "" {
+						return s
+					}
+				}
+			}
+			for _, v := range x {
+				if s := walk(v); s != "" {
+					return s
+				}
+			}
+		case []any:
+			for _, v := range x {
+				if s := walk(v); s != "" {
+					return s
+				}
+			}
+		}
+		return ""
+	}
+	return walk(value)
+}
+
+func stripDataURL(value string) string {
+	if comma := strings.IndexByte(value, ','); comma >= 0 && strings.Contains(value[:comma], "base64") {
+		return value[comma+1:]
+	}
+	return value
+}
+
+func fetchBytes(url string) ([]byte, error) {
+	res, err := httpClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("fetch %s failed with %d", url, res.StatusCode)
+	}
+	return io.ReadAll(res.Body)
+}
+
+func env(name, fallback string) string {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	return value
+}
+
+func envBool(name string, fallback bool) bool {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func envFloat(name string, fallback float64) float64 {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func rootDir() string {
+	wd, err := os.Getwd()
+	if err != nil {
+		return "."
+	}
+	if filepath.Base(wd) == "server" {
+		return filepath.Dir(wd)
+	}
+	return wd
 }

@@ -7,35 +7,62 @@ const colors = {
 	cone: "#8e826a",
 }
 
-export function createPrimitive(type, id, seed) {
+export function createPrimitive(type, id, seed = {}) {
 	const material = new THREE.MeshStandardMaterial({
-		color: seed?.color ?? colors[type],
+		color: seed.color ?? colors[type],
 		roughness: 0.86,
 		metalness: 0,
 	})
 	const mesh = new THREE.Mesh(geometryFor(type), material)
-	mesh.userData = { id, type, locked: Boolean(seed?.locked) }
-	mesh.position.fromArray(seed?.position ?? [0, 0.5, 0])
-	mesh.rotation.fromArray(seed?.rotation ?? [0, 0, 0])
-	mesh.scale.fromArray(seed?.scale ?? defaultScale(type))
+	mesh.userData = { id, type, locked: Boolean(seed.locked) }
+	mesh.position.fromArray(seed.position ?? [0, 0.5, 0])
+	mesh.rotation.fromArray(seed.rotation ?? [0, 0, 0])
+	mesh.scale.fromArray(seed.scale ?? defaultScale(type))
 	return mesh
 }
 
-export function serializePrimitive(mesh) {
-	return {
-		id: mesh.userData.id,
-		type: mesh.userData.type,
-		position: mesh.position.toArray().map(round),
-		rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z].map(round),
-		scale: mesh.scale.toArray().map(round),
-		color: `#${mesh.material.color.getHexString()}`,
-		// existing = already decorated by a prior generation (frozen during expansion).
-		existing: mesh.userData.existing === true,
-	}
+export function createSelectionOutline(mesh, color = 0xb8ff38) {
+	const outline = new THREE.Mesh(
+		mesh.geometry.clone(),
+		new THREE.MeshBasicMaterial({
+			color,
+			side: THREE.BackSide,
+			depthTest: true,
+			depthWrite: false,
+		}),
+	)
+	outline.name = "selection_outline"
+	outline.userData.isSelectionOutline = true
+	outline.scale.setScalar(1.045)
+	mesh.add(outline)
+	return outline
 }
 
-export function round(value) {
-	return Math.round(value * 1000) / 1000
+export function createEdgeOutline(mesh, color = 0xffffff) {
+	const geometry = new THREE.EdgesGeometry(mesh.geometry)
+	const material = new THREE.LineBasicMaterial({ color, depthTest: true, depthWrite: false })
+	const outline = new THREE.LineSegments(geometry, material)
+	outline.name = "selection_outline"
+	outline.userData.isSelectionOutline = true
+	outline.renderOrder = 2
+	mesh.add(outline)
+	return outline
+}
+
+export function clearSelectionOutline(mesh) {
+	const outline = mesh?.children.find(child => child.userData.isSelectionOutline)
+	if (outline) disposeObject(outline)
+}
+
+export function disposeObject(object) {
+	object.traverse(child => {
+		if (child.geometry) child.geometry.dispose()
+		if (child.material) {
+			const materials = Array.isArray(child.material) ? child.material : [child.material]
+			for (const material of materials) material.dispose()
+		}
+	})
+	object.removeFromParent()
 }
 
 function geometryFor(type) {
@@ -47,6 +74,5 @@ function geometryFor(type) {
 
 function defaultScale(type) {
 	if (type === "cylinder") return [1, 2, 1]
-	if (type === "cone") return [1, 1, 1]
 	return [1, 1, 1]
 }

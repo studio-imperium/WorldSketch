@@ -1,5 +1,0 @@
-pillow
-numpy
-diffusers
-accelerate
-gsplat==1.5.3

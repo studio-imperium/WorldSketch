@@ -1,238 +1,76 @@
 import * as THREE from "three"
 
-const size = 512
-const names = [
-	"front",
-	"back",
-	"left",
-	"right",
-	"top",
-	"corner_fl_high",
-	"corner_fr_high",
-	"corner_bl_high",
-	"corner_br_high",
-	"corner_fl_low",
-	"corner_fr_low",
-	"corner_bl_low",
-	"corner_br_low",
-]
+const captureSize = 1024
+const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x151515, transparent: true, opacity: 0.58 })
 
-
-// subjects: meshes to auto-frame the 13 cameras around (ground tile + objects on it).
-// options.maskMeshes: during expansion, the *new* meshes — we also render a white-on-black
-//   mask of just those so the server inpaints + fuses only the delta.
-export async function captureViews(renderer, scene, camera, helpers, selected, subjects = [], options = {}) {
-	const { maskMeshes = null } = options
+export async function capturePlotGuide(renderer, scene, camera, plot, helpers = []) {
 	const original = snapshot(camera, renderer)
-	const target = new THREE.WebGLRenderTarget(size, size)
-	const depthMaterial = createDepthMaterial(camera)
-	const views = []
-	const frames = captureFrames(subjects)
+	const target = new THREE.WebGLRenderTarget(captureSize, captureSize)
+	const hidden = hideOtherPlots(plot)
+	const edges = addEdges(plot)
 
-	const maskSet = maskMeshes && maskMeshes.length ? new Set(maskMeshes) : null
-	const maskMaterial = maskSet ? new THREE.MeshBasicMaterial({ color: 0xffffff }) : null
+	for (const helper of helpers) if (helper) helper.visible = false
+	poseIso(camera, plot)
+	updateSky(scene, camera)
 
-	setHelpers(helpers, false)
-	const selectionOutlines = selected ? selected.children.filter(child => child.userData.isSelectionOutline) : []
-	for (const outline of selectionOutlines) outline.visible = false
+	const blob = await captureTarget(renderer, scene, camera, target)
 
-	for (const name of names) {
-		poseCamera(camera, name, frames)
-		updateSky(scene, camera)
-		camera.aspect = 1
-		camera.updateProjectionMatrix()
-		camera.updateMatrixWorld(true)
-		depthMaterial.uniforms.near.value = camera.near
-		depthMaterial.uniforms.far.value = camera.far
-
-		const rgb = await captureTarget(renderer, scene, camera, target, 0xeef5f2)
-		scene.overrideMaterial = depthMaterial
-		const depth = await captureTarget(renderer, scene, camera, target, 0x000000)
-		scene.overrideMaterial = null
-
-		const mask = maskSet ? await captureMask(renderer, scene, camera, target, maskSet, maskMaterial) : null
-
-		views.push({
-			name,
-			rgb,
-			depth,
-			mask,
-			camera: cameraPayload(camera, name),
-		})
-	}
-
+	for (const helper of helpers) if (helper) helper.visible = true
+	for (const object of edges) object.removeFromParent()
+	for (const [object, visible] of hidden) object.visible = visible
 	target.dispose()
-	depthMaterial.dispose()
-	if (maskMaterial) maskMaterial.dispose()
 	restore(camera, renderer, original)
-	setHelpers(helpers, true)
-	for (const outline of selectionOutlines) outline.visible = true
-
-	return views
-}
-
-// captureMask renders only the new meshes as white on black: hide every other mesh,
-// force a flat white material, snapshot, then restore visibility.
-async function captureMask(renderer, scene, camera, target, maskSet, maskMaterial) {
-	const restored = []
-	scene.traverse(object => {
-		if (object.isMesh) {
-			restored.push([object, object.visible])
-			object.visible = maskSet.has(object)
-		}
-	})
-
-	scene.overrideMaterial = maskMaterial
-	const blob = await captureTarget(renderer, scene, camera, target, 0x000000)
-	scene.overrideMaterial = null
-
-	for (const [object, visible] of restored) object.visible = visible
 	return blob
 }
 
-function poseCamera(camera, name, frames) {
-	const frame = name === "top" ? frames.ground : frames.subject
-	const { target, radius } = frame
-	camera.near = 0.05
-	camera.fov = 50
-	const zoom = 0.3
-	const topZoom = zoom * 2
-	const straightDistance = Math.max(18, radius * 2.8) * zoom
-	const height = Math.max(4.8, radius * 0.55) * zoom
-	const cornerDistance = Math.max(12, radius * 1.7) * zoom
-	const highCornerHeight = Math.max(8, radius * 0.9) * zoom
-	const lowCornerHeight = Math.max(2.2, radius * 0.2) * zoom
-	const topDistance = topFitDistance(camera, frame) * topZoom
-	const offsets = {
-		front: [0, height, straightDistance],
-		back: [0, height, -straightDistance],
-		left: [-straightDistance, height, 0],
-		right: [straightDistance, height, 0],
-		top: [0.02, topDistance, 0],
-		corner_fl_high: [-cornerDistance, highCornerHeight, cornerDistance],
-		corner_fr_high: [cornerDistance, highCornerHeight, cornerDistance],
-		corner_bl_high: [-cornerDistance, highCornerHeight, -cornerDistance],
-		corner_br_high: [cornerDistance, highCornerHeight, -cornerDistance],
-		corner_fl_low: [-cornerDistance, lowCornerHeight, cornerDistance],
-		corner_fr_low: [cornerDistance, lowCornerHeight, cornerDistance],
-		corner_bl_low: [-cornerDistance, lowCornerHeight, -cornerDistance],
-		corner_br_low: [cornerDistance, lowCornerHeight, -cornerDistance],
-	}
-	camera.position.copy(target).add(new THREE.Vector3(...offsets[name]))
-	camera.lookAt(target)
-	camera.far = Math.max(48, Math.max(straightDistance, topDistance, cornerDistance) + radius * 2 + 12)
-}
-
-// Split the framed subjects into the ground tile(s) and the objects on them. Keyed on
-// isGround (not locked) so a freshly-added, still-unlocked expansion tile is framed as
-// ground too — the top view fits the tile, the side views frame the objects.
-function captureFrames(subjects) {
-	return {
-		subject: captureFrame(subjects.filter(subject => !subject.userData.isGround)),
-		ground: captureFrame(subjects.filter(subject => subject.userData.isGround), 0),
-	}
-}
-
-function captureFrame(subjects, minTargetY = 1.2) {
-	const box = new THREE.Box3()
-	const subjectBox = new THREE.Box3()
-	let hasSubject = false
-
-	for (const subject of subjects) {
-		if (!subject.visible) continue
-		subject.updateMatrixWorld(true)
-		subjectBox.setFromObject(subject)
-		if (subjectBox.isEmpty()) continue
-		box.union(subjectBox)
-		hasSubject = true
-	}
-
-	if (!hasSubject) {
-		return {
-			target: new THREE.Vector3(0, 1.6, 0),
-			radius: 7,
+function hideOtherPlots(plot) {
+	const hidden = []
+	for (const other of plot.manager.plots) {
+		const visible = other.group.visible
+		if (other !== plot) {
+			hidden.push([other.group, visible])
+			other.group.visible = false
 		}
 	}
+	return hidden
+}
 
-	const target = box.getCenter(new THREE.Vector3())
-	const size = box.getSize(new THREE.Vector3())
-	target.y = Math.max(minTargetY, target.y)
-	return {
-		box: box.clone(),
-		target,
-		radius: Math.max(4, size.length() * 0.5),
+function addEdges(plot) {
+	const edges = []
+	for (const mesh of plot.meshesForCapture()) {
+		if (!mesh.geometry) continue
+		const edge = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), edgeMaterial)
+		edge.position.copy(mesh.position)
+		edge.quaternion.copy(mesh.quaternion)
+		edge.scale.copy(mesh.scale)
+		edge.renderOrder = 20
+		plot.group.add(edge)
+		edges.push(edge)
 	}
+	return edges
 }
 
-function topFitDistance(camera, frame) {
-	const box = frame.box
-	if (!box) return Math.max(22, frame.radius * 3.2)
-	const width = Math.max(box.max.x - box.min.x, box.max.z - box.min.z)
-	const half = width * 0.5
-	const margin = 1.02
-	return Math.max(4, half * margin / Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5))
+function poseIso(camera, plot) {
+	const center = plot.center
+	const distance = plot.size * 1.35
+	camera.fov = 42
+	camera.aspect = 1
+	camera.near = 0.03
+	camera.far = Math.max(48, plot.size * 8)
+	camera.position.set(center.x + distance, center.y + plot.size * 0.92, center.z + distance)
+	camera.lookAt(center.x, center.y + 0.55, center.z)
+	camera.updateProjectionMatrix()
+	camera.updateMatrixWorld(true)
 }
 
-function cameraPayload(camera, name) {
-	const forward = new THREE.Vector3()
-	const right = new THREE.Vector3()
-	const up = new THREE.Vector3()
-
-	camera.getWorldDirection(forward)
-	right.setFromMatrixColumn(camera.matrixWorld, 0).normalize()
-	up.setFromMatrixColumn(camera.matrixWorld, 1).normalize()
-
-	return {
-		name,
-		width: size,
-		height: size,
-		position: camera.position.toArray(),
-		forward: forward.toArray(),
-		right: right.toArray(),
-		up: up.toArray(),
-		fov: camera.fov,
-		aspect: camera.aspect,
-		near: camera.near,
-		far: camera.far,
-	}
-}
-
-function createDepthMaterial(camera) {
-	const material = new THREE.ShaderMaterial({
-		uniforms: {
-			near: { value: camera.near },
-			far: { value: camera.far },
-		},
-		vertexShader: `
-			varying float viewZ;
-			void main() {
-				vec4 mvPosition = modelViewMatrix * vec4(position, 1.0);
-				viewZ = -mvPosition.z;
-				gl_Position = projectionMatrix * mvPosition;
-			}
-		`,
-		fragmentShader: `
-			uniform float near;
-			uniform float far;
-			varying float viewZ;
-			void main() {
-				float depth = clamp((viewZ - near) / (far - near), 0.0, 1.0);
-				gl_FragColor = vec4(vec3(depth), 1.0);
-			}
-		`,
-	})
-	material.toneMapped = false
-	return material
-}
-
-async function captureTarget(renderer, scene, camera, target, clearColor) {
+function captureTarget(renderer, scene, camera, target) {
 	renderer.setRenderTarget(target)
-	renderer.setClearColor(clearColor, 1)
+	renderer.setClearColor(0xeef5f2, 1)
 	renderer.clear()
 	renderer.render(scene, camera)
 
-	const pixels = new Uint8Array(size * size * 4)
-	renderer.readRenderTargetPixels(target, 0, 0, size, size, pixels)
+	const pixels = new Uint8Array(captureSize * captureSize * 4)
+	renderer.readRenderTargetPixels(target, 0, 0, captureSize, captureSize, pixels)
 	renderer.setRenderTarget(null)
 
 	return pixelsToBlob(pixels)
@@ -240,21 +78,19 @@ async function captureTarget(renderer, scene, camera, target, clearColor) {
 
 function pixelsToBlob(pixels) {
 	const canvas = document.createElement("canvas")
-	canvas.width = size
-	canvas.height = size
-	const ctx = canvas.getContext("2d")
-	const image = ctx.createImageData(size, size)
+	canvas.width = captureSize
+	canvas.height = captureSize
+	const context = canvas.getContext("2d")
+	const image = context.createImageData(captureSize, captureSize)
 
-	for (let y = 0; y < size; y++) {
-		const src = y * size * 4
-		const dst = (size - y - 1) * size * 4
-		image.data.set(pixels.subarray(src, src + size * 4), dst)
+	for (let y = 0; y < captureSize; y++) {
+		const src = y * captureSize * 4
+		const dst = (captureSize - y - 1) * captureSize * 4
+		image.data.set(pixels.subarray(src, src + captureSize * 4), dst)
 	}
 
-	ctx.putImageData(image, 0, 0)
-	const data = canvas.toDataURL("image/png").split(",")[1]
-	const bytes = Uint8Array.from(atob(data), c => c.charCodeAt(0))
-	return new Blob([bytes], { type: "image/png" })
+	context.putImageData(image, 0, 0)
+	return new Promise(resolve => canvas.toBlob(resolve, "image/png"))
 }
 
 function snapshot(camera, renderer) {
@@ -284,8 +120,4 @@ function updateSky(scene, camera) {
 	scene.traverse(object => {
 		if (object.userData.sky) object.position.copy(camera.position)
 	})
-}
-
-function setHelpers(helpers, visible) {
-	for (const helper of helpers) helper.visible = visible
 }

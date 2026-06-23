@@ -1,3 +1,3 @@
-module gausy
+module worldsketch/server
 
-go 1.22.12
+go 1.23

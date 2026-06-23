@@ -222,6 +222,10 @@ button {
 
 .generate-btn:disabled {
 	opacity: 0.55;
+	background: #d6d9de !important;
+	border-color: #d6d9de !important;
+	color: #7a828d !important;
+	cursor: default;
 }
 
 .generate-panel > a.btn,
