@@ -240,6 +240,14 @@ button {
 	display: none;
 }
 
+.collider-toggle {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4rem;
+	cursor: pointer;
+	padding: 0.15rem 0.1rem;
+}
+
 .generate-btn svg {
 	width: 1.45rem;
 	height: 1.45rem;

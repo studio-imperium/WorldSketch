@@ -102,6 +102,50 @@ const els = {
 	generateForm: document.getElementById("generate_form"),
 	cancelGenerate: document.getElementById("cancel_generate_btn"),
 	scenePrompt: document.getElementById("scene_prompt"),
+	showColliders: document.getElementById("show_colliders_input"),
+}
+
+// "Colliders" overlay: re-show a generated plot's (otherwise hidden) primitives as a
+// bright wireframe drawn over the splat, to check how well the splat lines up with them.
+const colliderColor = 0xb8ff38
+let showColliders = false
+
+// Toggle a primitive between its normal solid look and a wireframe-over-everything
+// collider overlay, by mutating its OWN material so disposeObject stays correct.
+function setColliderStyle(mesh, on) {
+	const mat = mesh.material
+	if (on) {
+		if (!mesh.userData.colliderSnapshot) {
+			mesh.userData.colliderSnapshot = {
+				wireframe: mat.wireframe, transparent: mat.transparent, opacity: mat.opacity,
+				depthTest: mat.depthTest, depthWrite: mat.depthWrite,
+				color: mat.color.getHex(), renderOrder: mesh.renderOrder,
+			}
+		}
+		mat.wireframe = true
+		mat.transparent = true
+		mat.opacity = 0.9
+		mat.depthTest = false // draw over the splat
+		mat.depthWrite = false
+		mat.color.set(colliderColor)
+		mesh.renderOrder = 999
+		mat.needsUpdate = true
+	} else if (mesh.userData.colliderSnapshot) {
+		const s = mesh.userData.colliderSnapshot
+		mat.wireframe = s.wireframe
+		mat.transparent = s.transparent
+		mat.opacity = s.opacity
+		mat.depthTest = s.depthTest
+		mat.depthWrite = s.depthWrite
+		mat.color.setHex(s.color)
+		mesh.renderOrder = s.renderOrder
+		mat.needsUpdate = true
+		mesh.userData.colliderSnapshot = null
+	}
+}
+
+function applyColliderVisibility() {
+	for (const plot of plots.plots) plot.setCollidersVisible(showColliders)
 }
 
 renderer.setSize(window.innerWidth, window.innerHeight)
@@ -193,11 +237,24 @@ class Plot {
 		this.ground.visible = false
 		for (const primitive of this.primitives) primitive.visible = false
 		this.state = "generated"
+		this.setCollidersVisible(showColliders) // honor the toggle for the new splat
 	}
 
 	setDraftVisible(visible) {
 		this.ground.visible = visible
-		for (const primitive of this.primitives) primitive.visible = visible
+		for (const primitive of this.primitives) {
+			primitive.visible = visible
+			setColliderStyle(primitive, false) // back to solid for editing/capture
+		}
+	}
+
+	// Overlay the original primitives as wireframe colliders on the generated splat.
+	setCollidersVisible(show) {
+		if (this.state !== "generated") return
+		for (const primitive of this.primitives) {
+			primitive.visible = show
+			setColliderStyle(primitive, show)
+		}
 	}
 
 	setFaded(faded) {
@@ -1162,6 +1219,11 @@ for (const button of els.toolButtons) button.addEventListener("click", () => set
 for (const swatch of els.colorSwatches) swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
 
 els.exitFocus.addEventListener("click", exitFocus)
+
+els.showColliders?.addEventListener("change", () => {
+	showColliders = els.showColliders.checked
+	applyColliderVisibility()
+})
 
 els.generate.addEventListener("click", () => {
 	if (els.generate.disabled) return
