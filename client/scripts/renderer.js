@@ -1,7 +1,7 @@
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { generatePlot } from "/scripts/api.js"
-import { capturePlotGuide, captureRegionGuide } from "/scripts/capture.js"
+import { capturePlotGuide, captureRegionGuide, capturePlotPhoto } from "/scripts/capture.js"
 import { resolveOrientation, orientArrays, orientCenter, orientQuaternion, isIdentity } from "/scripts/orient.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, createSquareFrameOutline, disposeObject } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
@@ -158,6 +158,7 @@ const els = {
 	chatForm: document.getElementById("chat_form"),
 	chatInput: document.getElementById("chat_input"),
 	chatSend: document.getElementById("chat_send"),
+	chatEdit: document.getElementById("chat_edit"),
 	historyList: document.getElementById("history_list"),
 	historyEmpty: document.getElementById("history_empty"),
 	historyClear: document.getElementById("history_clear"),
@@ -709,6 +710,8 @@ function generationTargets() {
 function syncGenerateButton() {
 	const targets = generationTargets()
 	if (els.chatSend) els.chatSend.disabled = generating || targets.length === 0
+	// Snip & edit only makes sense once a plot has a render to edit.
+	if (els.chatEdit) els.chatEdit.disabled = generating || targets[0]?.state !== "generated"
 	if (els.chatInput) els.chatInput.disabled = generating
 	syncCombineHint()
 }
@@ -1495,6 +1498,51 @@ function submitChat() {
 	generateSelected(prompt)
 }
 
+// Snip & edit: take an isometric photo of the current plot's render and ask the
+// image model to apply the chat text as an edit ("make it greener", "add flowers"),
+// then rebuild the splat through the same pipeline and re-seat it on the plot.
+async function editFocusedPlot(rawPrompt) {
+	if (generating || !els.chatInput) return
+	const prompt = (rawPrompt ?? "").trim()
+	const plot = generationTargets()[0]
+	if (!plot) {
+		setStatus("Select or focus a plot first")
+		return
+	}
+	if (plot.state !== "generated") {
+		setStatus("Generate a world first, then edit it")
+		return
+	}
+	if (!prompt) {
+		els.chatInput.focus()
+		return
+	}
+
+	generating = true
+	syncGenerateButton()
+	setStatus("Editing")
+	await loadCullConfig()
+
+	try {
+		const { photo } = await capturePlotPhoto(renderer, scene, camera, plot, [placementPreview].filter(Boolean))
+		const bytes = await generatePlot({
+			prompt,
+			image: photo,
+			groundColor: `#${plot.ground.material.color.getHexString()}`,
+			mode: "edit",
+		})
+		const rawCopy = bytes.slice()
+		await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.edit.splat` })
+		await saveGeneration(plot, prompt, rawCopy)
+		setStatus("")
+	} catch (error) {
+		setStatus(error.message)
+	} finally {
+		generating = false
+		syncGenerateButton()
+	}
+}
+
 function percentile(sorted, q) {
 	if (!sorted.length) return 0
 	const pos = Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))
@@ -2204,6 +2252,9 @@ els.chatInput?.addEventListener("keydown", event => {
 })
 
 els.chatInput?.addEventListener("input", autoGrowChat)
+
+// Snip & edit the current world from the chat text (e.g. "make it greener").
+els.chatEdit?.addEventListener("click", () => editFocusedPlot(els.chatInput?.value))
 
 els.historyClear?.addEventListener("click", async () => {
 	if (!(await listGenerations()).length) return
