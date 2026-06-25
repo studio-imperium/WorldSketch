@@ -1556,12 +1556,23 @@ async function cropAndFitSplat(source, plot) {
 		}
 		const splatCenterY = (bounds.minY + bounds.maxY) / 2
 		const splatSpanY = Math.max(1e-3, bounds.maxY - bounds.minY)
-		const s = (prim.size.x / bounds.boxX + prim.size.y / splatSpanY + prim.size.z / bounds.boxZ) / 3
-		source.scale.set(s, -s, s)
+		// Per-axis scale: stretch each axis so the splat's box exactly fills the primitives'
+		// box. Guarantees same size + position even when Tripo's single-view reconstruction
+		// gets the proportions wrong (it tends to come back squat); the cost is the splat is
+		// stretched to fit, which is the right trade when matching the block-out is the goal.
+		const sx = prim.size.x / bounds.boxX
+		const sy = prim.size.y / splatSpanY
+		const sz = prim.size.z / bounds.boxZ
+		if (CULL.debug) console.log("[no-floor placement]", {
+			primSize: [+prim.size.x.toFixed(3), +prim.size.y.toFixed(3), +prim.size.z.toFixed(3)],
+			splatSpan: [+bounds.boxX.toFixed(3), +splatSpanY.toFixed(3), +bounds.boxZ.toFixed(3)],
+			scale: [+sx.toFixed(3), +sy.toFixed(3), +sz.toFixed(3)],
+		})
+		source.scale.set(sx, -sy, sz)
 		source.position.set(
-			prim.center.x - s * bounds.centerX,
-			prim.center.y + s * splatCenterY,
-			prim.center.z - s * bounds.centerZ,
+			prim.center.x - sx * bounds.centerX,
+			prim.center.y + sy * splatCenterY,
+			prim.center.z - sz * bounds.centerZ,
 		)
 		plot.splatFloorY = null
 		plot.splatBox = new THREE.Box3(
