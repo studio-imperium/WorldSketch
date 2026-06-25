@@ -639,7 +639,9 @@ function focusPlot(plot) {
 	// No plot-level frame outline anymore — the baseplate uses the regular primitive
 	// selection outline, shown only while it's actually selected.
 	syncPlotFocusFade()
-	focusOrbit.target.set(plot.center.x, 0.8, plot.center.z)
+	// Frame the focused cell at its own height (plot.center.y = gy*8), not the ground,
+	// so focusing an upper-layer cell actually looks at it.
+	focusOrbit.target.set(plot.center.x, plot.center.y + 0.8, plot.center.z)
 	focusOrbit.radius = 10
 	focusOrbit.theta = Math.PI * 0.25
 	focusOrbit.phi = Math.PI * 0.32
