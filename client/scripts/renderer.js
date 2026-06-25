@@ -138,6 +138,8 @@ let generating = false
 const overview = {
 	target: new THREE.Vector3(0, 0, 0),
 	distance: 34,
+	theta: Math.PI * 0.25, // azimuth; orbit the lattice in 3D (drag), shift+drag pans
+	phi: Math.PI * 0.32, // elevation from +Y
 }
 
 const focusOrbit = {
@@ -789,8 +791,9 @@ function allPrimitives() {
 }
 
 function updateOverviewCamera() {
-	camera.up.set(0, 0, -1)
-	camera.position.set(overview.target.x, overview.distance, overview.target.z)
+	overview.phi = Math.max(0.12, Math.min(Math.PI * 0.49, overview.phi))
+	camera.up.set(0, 1, 0)
+	camera.position.copy(overview.target).add(scratch.setFromSpherical(new THREE.Spherical(overview.distance, overview.phi, overview.theta)))
 	camera.lookAt(overview.target)
 	camera.near = 0.03
 	camera.far = 240
@@ -849,6 +852,21 @@ function updateOverviewPan(event) {
 		target: [+overview.target.x.toFixed(2), +overview.target.z.toFixed(2)],
 		distance: +overview.distance.toFixed(2),
 	})
+}
+
+function startOverviewOrbit(event) {
+	drag = { mode: "overview-orbit", pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+	renderer.domElement.setPointerCapture(event.pointerId)
+}
+
+function updateOverviewOrbit(event) {
+	const dx = event.clientX - drag.x
+	const dy = event.clientY - drag.y
+	drag.x = event.clientX
+	drag.y = event.clientY
+	overview.theta -= dx * 0.006
+	overview.phi -= dy * 0.006
+	updateOverviewCamera()
 }
 
 function startFocusOrbit(event) {
@@ -951,7 +969,9 @@ function overviewPointerDown(event) {
 	}
 
 	plots.clearSelection()
-	startOverviewPan(event)
+	// Drag empty space orbits the lattice; shift+drag pans.
+	if (event.shiftKey) startOverviewPan(event)
+	else startOverviewOrbit(event)
 }
 
 function focusPointerDown(event) {
@@ -1696,7 +1716,8 @@ renderer.domElement.addEventListener("pointerdown", event => {
 	if (generating) {
 		// While generating, only camera movement is allowed — no placing or editing.
 		if (focusedPlot) startFocusOrbit(event)
-		else startOverviewPan(event)
+		else if (event.shiftKey) startOverviewPan(event)
+		else startOverviewOrbit(event)
 		return
 	}
 	if (focusedPlot) focusPointerDown(event)
@@ -1705,6 +1726,7 @@ renderer.domElement.addEventListener("pointerdown", event => {
 
 renderer.domElement.addEventListener("pointermove", event => {
 	if (drag?.mode === "overview-pan") updateOverviewPan(event)
+	else if (drag?.mode === "overview-orbit") updateOverviewOrbit(event)
 	else if (drag?.mode === "focus-orbit") updateFocusOrbit(event)
 	else if (drag && ["primitive", "scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
 	else updatePlacement(event)
