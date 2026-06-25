@@ -270,6 +270,7 @@ class Plot {
 		this.prompt = ""
 		this.primitives = []
 		this.gaussian = null
+		this.genId = null // server gen-id of this plot's latest render; passed as a style anchor so the other selected plots match
 		this.selectionOutline = null
 		this.floorHelper = null
 		this.splatFloorHelper = null
@@ -657,8 +658,15 @@ function exitFocus() {
 }
 
 function generationTargets() {
-	if (focusedPlot) return [focusedPlot]
-	return plots.selected()
+	// An explicit ⌘/Ctrl-click selection (1+ plots) always wins. Otherwise build EVERY plot
+	// that has something drawn on it, so one Generate fills the whole sketch instead of only
+	// the focused tile (that focus short-circuit was why a multi-plot sketch built one tile).
+	// Fall back to the focused plot when nothing's drawn yet.
+	const selected = plots.selected()
+	if (selected.length) return selected
+	const drawn = plots.plots.filter(plot => plot.primitives.length)
+	if (drawn.length) return drawn
+	return focusedPlot ? [focusedPlot] : []
 }
 
 function syncGenerateButton() {
@@ -987,6 +995,12 @@ function focusPointerDown(event) {
 	startFocusOrbit(event)
 }
 
+// The world's locked theme, set on the first successful CONNECTED render: every later plot in
+// a multi-select batch reuses this ground colour and is style-matched to this render, so the
+// tiles stay one consistent world.
+let worldThemeGenId = null
+let worldThemeGroundColor = null
+
 async function generateSelected(prompt) {
 	const targets = generationTargets()
 	if (!targets.length) return
@@ -996,30 +1010,66 @@ async function generateSelected(prompt) {
 	setStatus("Generating")
 	await loadCullConfig()
 
+	// "Connected" mode kicks in ONLY when you've explicitly selected 2+ plots: they share one
+	// prompt + ground colour and each render after the first is style-anchored to it, so the
+	// server matches the anchor's materials/palette/lighting and the tiles read as one world
+	// (the shared floor plane already lines their heights up). Otherwise every target generates
+	// INDEPENDENTLY — its own ground colour, no anchor — i.e. plain "build everything I drew".
+	const matched = plots.selected().length >= 2
+	const sharedGround = worldThemeGroundColor || `#${(focusedPlot || targets[0]).ground.material.color.getHexString()}`
+	let anchorGenId = matched ? (worldThemeGenId || targets.map(plot => plot.genId).find(Boolean) || null) : null
+	const failures = []
 	try {
 		for (let index = 0; index < targets.length; index++) {
 			const plot = targets[index]
-			const wasGenerated = plot.state === "generated"
-			plot.state = "generating"
+			// An empty tile (bare ground, no shapes) has nothing to reconstruct — skip it with
+			// a clear note instead of burning an API call on a flat square that culls to nothing.
+			if (!plot.primitives.length) {
+				failures.push(`${plot.id} is empty — add shapes to it first`)
+				continue
+			}
 			setStatus(targets.length === 1 ? "Generating" : `Generating ${index + 1}/${targets.length}`)
-			if (wasGenerated) plot.setDraftVisible(true)
-			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean), { markers: CULL.orient && CULL.markers })
-			if (wasGenerated) plot.setDraftVisible(false)
-			const bytes = await generatePlot({
-				prompt,
-				image: guide.guide,
-				materialImage: guide.materialMap,
-				groundColor: `#${plot.ground.material.color.getHexString()}`,
-			})
-			// Copy the raw bytes before the splat loader (which may detach the buffer)
-			// so the history blob is independent and re-cullable on restore.
-			const rawCopy = bytes.slice()
-			await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.raw.splat` })
-			await saveGeneration(plot, prompt, rawCopy)
+			try {
+				const wasGenerated = plot.state === "generated"
+				plot.state = "generating"
+				if (wasGenerated) plot.setDraftVisible(true)
+				const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean), { markers: CULL.orient && CULL.markers })
+				if (wasGenerated) plot.setDraftVisible(false)
+				const bytes = await generatePlot({
+					prompt,
+					image: guide.guide,
+					materialImage: guide.materialMap,
+					groundColor: matched ? sharedGround : `#${plot.ground.material.color.getHexString()}`,
+					referenceId: anchorGenId,
+				})
+				const genId = bytes.genId
+				// Copy the raw bytes before the splat loader (which may detach the buffer)
+				// so the history blob is independent and re-cullable on restore.
+				const rawCopy = bytes.slice()
+				await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.raw.splat` })
+				await saveGeneration(plot, prompt, rawCopy)
+				if (matched && genId) {
+					plot.genId = genId
+					if (!anchorGenId) anchorGenId = genId // first render becomes the anchor the rest match
+					if (!worldThemeGenId) {
+						worldThemeGenId = genId // lock the world theme to this first render
+						worldThemeGroundColor = sharedGround
+					}
+				}
+			} catch (error) {
+				// One tile failing shouldn't abort the rest of a multi-plot build — note it and
+				// roll this plot back to a visible state, then carry on.
+				failures.push(`${plot.id}: ${error.message}`)
+				if (plot.gaussian) {
+					plot.state = "generated"
+					plot.setDraftVisible(false)
+				} else {
+					plot.state = "draft"
+					plot.setDraftVisible(true)
+				}
+			}
 		}
-		setStatus("")
-	} catch (error) {
-		setStatus(error.message)
+		setStatus(failures.length ? `Done — ${failures.length} of ${targets.length} failed (${failures.join("; ")})` : "")
 	} finally {
 		generating = false
 		syncGenerateButton()
