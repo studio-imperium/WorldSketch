@@ -254,11 +254,12 @@ sun.position.set(5, 8, 3)
 scene.add(sun)
 
 class Plot {
-	constructor(manager, gx, gz) {
+	constructor(manager, gx, gy, gz) {
 		this.manager = manager
 		this.gx = gx
+		this.gy = gy // lattice level: cells stack vertically, each an 8-unit cube
 		this.gz = gz
-		this.id = `${gx},${gz}`
+		this.id = `${gx},${gy},${gz}`
 		this.size = plotSize
 		this.selected = false
 		this.state = "draft"
@@ -270,7 +271,7 @@ class Plot {
 		this.splatFloorHelper = null
 		this.splatFloorY = null // plot-local Y the splat's detected floor was seated to
 		this.group = new THREE.Group()
-		this.group.position.set(gx * plotStep, 0, gz * plotStep)
+		this.group.position.set(gx * plotStep, gy * plotStep, gz * plotStep)
 		this.ground = createPrimitive("box", `plot_${this.id}`, {
 			position: [0, 0.025, 0],
 			scale: [plotSize, 0.05, plotSize],
@@ -436,13 +437,13 @@ class PlotManager {
 		return [...this.map.values()]
 	}
 
-	has(gx, gz) {
-		return this.map.has(key(gx, gz))
+	has(gx, gy, gz) {
+		return this.map.has(key(gx, gy, gz))
 	}
 
-	add(gx, gz) {
-		if (this.has(gx, gz)) return this.map.get(key(gx, gz))
-		const plot = new Plot(this, gx, gz)
+	add(gx, gy, gz) {
+		if (this.has(gx, gy, gz)) return this.map.get(key(gx, gy, gz))
+		const plot = new Plot(this, gx, gy, gz)
 		this.map.set(plot.id, plot)
 		this.syncPlus()
 		return plot
@@ -458,13 +459,17 @@ class PlotManager {
 	}
 
 	availableCells() {
-		if (this.map.size === 0) return [{ gx: 0, gz: 0 }]
+		if (this.map.size === 0) return [{ gx: 0, gy: 0, gz: 0 }]
 		const cells = new Map()
+		// 6-connected lattice neighbours: 4 horizontal + up, and down when above ground.
 		for (const plot of this.plots) {
-			for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+			const steps = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, 1, 0]]
+			if (plot.gy > 0) steps.push([0, -1, 0])
+			for (const [dx, dy, dz] of steps) {
 				const gx = plot.gx + dx
+				const gy = plot.gy + dy
 				const gz = plot.gz + dz
-				if (!this.has(gx, gz)) cells.set(key(gx, gz), { gx, gz })
+				if (!this.has(gx, gy, gz)) cells.set(key(gx, gy, gz), { gx, gy, gz })
 			}
 		}
 		return [...cells.values()]
@@ -475,7 +480,7 @@ class PlotManager {
 		this.plus = []
 		if (focusedPlot) return
 		for (const cell of this.availableCells()) {
-			const plus = createPlus(cell.gx, cell.gz)
+			const plus = createPlus(cell.gx, cell.gy, cell.gz)
 			this.plus.push(plus)
 			scene.add(plus)
 		}
@@ -484,8 +489,8 @@ class PlotManager {
 
 const plots = new PlotManager()
 
-function key(gx, gz) {
-	return `${gx},${gz}`
+function key(gx, gy, gz) {
+	return `${gx},${gy},${gz}`
 }
 
 // Centered rounded-rectangle outline (XY plane) so the empty-cell tile matches the
@@ -506,10 +511,10 @@ function roundedRectShape(size, radius) {
 	return shape
 }
 
-function createPlus(gx, gz) {
+function createPlus(gx, gy, gz) {
 	const group = new THREE.Group()
-	group.position.set(gx * plotStep, 0.12, gz * plotStep)
-	group.userData = { isPlus: true, gx, gz }
+	group.position.set(gx * plotStep, gy * plotStep + 0.12, gz * plotStep)
+	group.userData = { isPlus: true, gx, gy, gz }
 
 	const fill = new THREE.Mesh(
 		new THREE.ShapeGeometry(roundedRectShape(plusSize, plusSize * 0.14)),
@@ -919,7 +924,7 @@ function pointerScreenAngle(event, center) {
 function overviewPointerDown(event) {
 	const plus = plusHit(event)
 	if (plus) {
-		const plot = plots.add(plus.gx, plus.gz)
+		const plot = plots.add(plus.gx, plus.gy, plus.gz)
 		plots.clearSelection()
 		plot.setSelected(true)
 		syncGenerateButton()
@@ -1788,7 +1793,7 @@ setActiveTool("pointer")
 if (singlePlotMode) {
 	// Boot straight into a single, already-focused plot (focusPlot handles the
 	// plus-tile suppression, camera, and UI sync).
-	focusPlot(plots.add(0, 0))
+	focusPlot(plots.add(0, 0, 0))
 } else {
 	plots.syncPlus()
 	updateOverviewCamera()
