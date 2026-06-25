@@ -1,11 +1,15 @@
 import * as THREE from "three"
+import { ORIENT_MARKERS, MARKER_INSET } from "/scripts/orient.js"
 
 const captureSize = 1024
 const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x151515, transparent: true, opacity: 0.58 })
 
-export async function capturePlotGuide(renderer, scene, camera, plot, helpers = []) {
+export async function capturePlotGuide(renderer, scene, camera, plot, helpers = [], options = {}) {
 	const original = snapshot(camera, renderer)
-	const target = new THREE.WebGLRenderTarget(captureSize, captureSize)
+	// Tag the target as sRGB so Three.js applies the same linear→sRGB output encoding
+	// it does for the on-screen canvas. Without this the read-back pixels stay in
+	// linear space and the captured colours look noticeably darker than the client.
+	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
 	const hidden = hideOtherPlots(plot)
 	const materialSwap = applyFlatMaterials(plot)
 
@@ -15,7 +19,7 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 
 	const outlines = []
 	scene.traverse(object => {
-		if (object.userData.isSelectionOutline && object.visible) {
+		if ((object.userData.isSelectionOutline || object.userData.isDebugHelper) && object.visible) {
 			outlines.push(object)
 			object.visible = false
 		}
@@ -25,10 +29,20 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	poseIso(camera, plot)
 	updateSky(scene, camera)
 
+	// Orientation fiducials: two adjacent-corner colour tags Tripo reconstructs so
+	// the splat's arbitrary yaw/handedness can be recovered (and then culled) on the
+	// client. See resolveOrientation in orient.js.
+	const markers = options.markers ? addOrientMarkers(plot) : []
+
 	const edges = addEdges(plot)
 	const guide = await captureTarget(renderer, scene, camera, target)
 	for (const object of edges) object.removeFromParent()
 	const materialMap = await captureTarget(renderer, scene, camera, target)
+	for (const marker of markers) {
+		marker.geometry.dispose()
+		marker.material.dispose()
+		marker.removeFromParent()
+	}
 
 	if (spark) spark.visible = sparkVisible
 	for (const object of outlines) object.visible = true
@@ -50,6 +64,27 @@ function hideOtherPlots(plot) {
 		}
 	}
 	return hidden
+}
+
+// Small flat-coloured cubes at two adjacent corners of the plot, sitting on the
+// ground. Added to the plot group only for the capture so Tripo bakes them into the
+// reconstruction; resolveOrientation later detects their hues, recovers the pose,
+// and culls them. Returns the meshes so the caller can remove them afterwards.
+function addOrientMarkers(plot) {
+	const meshes = []
+	const reach = (plot.size / 2) * MARKER_INSET
+	const s = plot.size * 0.07
+	for (const marker of ORIENT_MARKERS) {
+		const mesh = new THREE.Mesh(
+			new THREE.BoxGeometry(s, s, s),
+			new THREE.MeshBasicMaterial({ color: marker.hex, side: THREE.DoubleSide }),
+		)
+		mesh.position.set(marker.corner[0] * reach, s / 2, marker.corner[1] * reach)
+		mesh.renderOrder = 15
+		plot.group.add(mesh)
+		meshes.push(mesh)
+	}
+	return meshes
 }
 
 function addEdges(plot) {

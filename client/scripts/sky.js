@@ -8,7 +8,7 @@ export function createSky() {
 		depthTest: false,
 		uniforms: {
 			top: { value: new THREE.Color("#ffffff") },
-			horizon: { value: new THREE.Color("#eef5f2") },
+			horizon: { value: new THREE.Color("#fcfcfc") },
 		},
 		vertexShader: `
 			varying vec3 worldPosition;

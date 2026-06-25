@@ -72,6 +72,11 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
+	} else {
+		// OpenAI is skipped, so the raw screenshot is what's fed to Tripo.
+		// openAIEdit normally records the (input, prompt -> output) pair; do it
+		// here too so the original screenshot is always saved, not just the splat.
+		saveGeneration(image, materialImage, edited, prompt)
 	}
 
 	splat, err := tripoGenerate(edited)
@@ -86,32 +91,24 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(splat)
 }
 
-// handleConfig exposes the client-side splat cull/fit knobs so they can be tuned
-// from the server env (WS_CULL_*) without rebuilding the client. Defaults here
-// must match the SPLAT_CROP defaults in client/scripts/renderer.js.
+// handleConfig exposes the splat cull/fit knobs so they can be tuned from the
+// server env without rebuilding the client. Three knobs, one per pipeline stage
+// (cull -> seat -> fit); the client (deriveCull in renderer.js) expands strength
+// into the per-stage params. Defaults here must match the CULL defaults there.
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := map[string]any{
-		"opacityFloor":         envFloat("WS_CULL_OPACITY", 0.04),
-		"densityCells":         int(envFloat("WS_CULL_DENSITY_CELLS", 28)),
-		"densityKeepFrac":      envFloat("WS_CULL_DENSITY_FRAC", 0.08),
-		"radiusKeepPercentile": envFloat("WS_CULL_RADIUS_PCT", 0.9),
-		"bottomCullPercentile": envFloat("WS_CULL_BOTTOM_PCT", 0.9),
-		"bottomCullSlack":      envFloat("WS_CULL_BOTTOM_SLACK", 0.015),
-		"floorCullSlack":       envFloat("WS_CULL_FLOOR_SLACK", 0.015),
-		"groundPercentile":     envFloat("WS_CULL_GROUND_PCT", 0.92),
-		"heightCapFactor":      envFloat("WS_CULL_HEIGHT_CAP", 1.8),
-		"belowGroundFactor":    envFloat("WS_CULL_BELOW_GROUND", 0.12),
-		"floorPercentile":      envFloat("WS_CULL_FLOOR_PCT", 0.97),
-		"floorY":               envFloat("WS_CULL_FLOOR_Y", 0),
-		"inset":                envFloat("WS_CULL_INSET", 1),
-		"postScale":            envFloat("WS_CULL_POST_SCALE", 1),
-		"tile":                 envBool("WS_CULL_TILE", true),
-		"overfit":              envFloat("WS_CULL_OVERFIT", 1.15),
-		"edgeThickness":        envFloat("WS_CULL_EDGE_THICKNESS", 0.35),
-		"edgeMargin":           envFloat("WS_CULL_EDGE_MARGIN", 1.5),
-		"unitScale":            envFloat("WS_CULL_UNIT_SCALE", 3.5),
-		"floorOffset":          envFloat("WS_CULL_FLOOR_OFFSET", -7.3),
-		"debug":                envBool("WS_CULL_DEBUG", false),
+		"strength":      envFloat("WS_CULL_STRENGTH", 0.6),       // 0 = keep all, 1 = harshest cull
+		"floorPct":      envFloat("WS_CULL_FLOOR_PCT", 0.97),     // ground-detection percentile
+		"fit":           envFloat("WS_CULL_FIT", 1.0),            // render scale vs the plot footprint
+		"orient":        envBool("WS_ORIENT", true),              // recover Tripo's arbitrary D4 pose
+		"markers":       envBool("WS_ORIENT_MARKER", false),      // off-by-default fiducial fallback (symmetric scenes)
+		"rotate":        envFloat("WS_SPLAT_ROTATE", 4),          // final-stage yaw: 1|2|3|4 -> 90*n deg (4 = none)
+		"yOffset":       envFloat("WS_CULL_Y_OFFSET", 0),         // plot-local Y nudge applied after all transforms
+		"floorMode":     env("WS_FIND_FLOOR_MODE", "surface"),    // floor detection: "surface" (robust median of column-tops) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile)
+		"floorStrength": envFloat("WS_FLOOR_CULL_STRENGTH", 0.6), // strength of an analysis-only cull used JUST to measure the floor (strips backdrop/sub-ground); does NOT cull the rendered splat. 0 = measure on the full cloud
+		"surfaceSigma":  envFloat("WS_FLOOR_SURFACE_SIGMA", 2),   // seat the splat's visible SURFACE on the floor: offset the seat by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above)
+		"seatFloor":     envBool("WS_SEAT_FLOOR", true),          // pin the detected floor to the plot floor plane. false = bypass ALL floor logic, just vertically-center the content (debug/test)
+		"debug":         envBool("WS_CULL_DEBUG", false),
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(cfg)
@@ -264,8 +261,9 @@ func saveSplat(splat []byte) {
 func tripoGenerate(image []byte) ([]byte, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	mustField(writer, "seed", env("WS_TRIPO_SEED", "0"))
+	mustField(writer, "seed", "42") // fixed seed so generations are reproducible
 	mustField(writer, "steps", env("WS_TRIPO_STEPS", "30"))
+	mustField(writer, "preprocess", "true")
 	mustField(writer, "guidance_scale", env("WS_TRIPO_GUIDANCE", "3.5"))
 	mustField(writer, "num_gaussians", env("WS_TRIPO_GAUSSIANS", "700000"))
 	mustField(writer, "output_format", env("WS_TRIPO_FORMAT", "splat"))

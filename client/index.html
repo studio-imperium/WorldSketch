@@ -54,6 +54,18 @@
 				<input type="checkbox" id="show_colliders_input" class="toggle toggle-sm">
 				<span class="text-sm">Colliders</span>
 			</label>
+			<label class="collider-toggle" title="Draw the splat's content bounding box to check how it sits relative to the plot edges">
+				<input type="checkbox" id="show_splat_box_input" class="toggle toggle-sm">
+				<span class="text-sm">Bounds</span>
+			</label>
+			<label class="collider-toggle" title="Draw a grid at the plot floor level (where the splat is seated) so the floor plane is visible at all times">
+				<input type="checkbox" id="show_floor_input" class="toggle toggle-sm">
+				<span class="text-sm">Floor</span>
+			</label>
+			<label class="collider-toggle" title="Draw a grid at the splat's DETECTED floor (what the floor-finding algorithm computed) to see where it landed vs the real ground">
+				<input type="checkbox" id="show_splat_floor_input" class="toggle toggle-sm">
+				<span class="text-sm">Splat floor</span>
+			</label>
 			<p class="status hidden text-sm text-base-content/70" id="status"></p>
 		</section>
 		<dialog class="modal" id="generate_modal">

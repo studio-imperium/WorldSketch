@@ -2,6 +2,7 @@ import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { generatePlot } from "/scripts/api.js"
 import { capturePlotGuide } from "/scripts/capture.js"
+import { resolveOrientation, orientArrays, orientCenter, orientQuaternion, isIdentity } from "/scripts/orient.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, createSquareFrameOutline, disposeObject } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
 
@@ -22,52 +23,103 @@ const rollAxis = new THREE.Vector3()
 const rollQuat = new THREE.Quaternion()
 const normalMatrix = new THREE.Matrix3()
 const materialState = new WeakMap()
-const backgroundColor = new THREE.Color(0xeef5f2)
+const backgroundColor = new THREE.Color(0xfcfcfc)
 const shapeTools = new Set(["box", "sphere", "cylinder", "cone"])
 const plotSize = 8
 const plotStep = 8
-const plusSize = plotSize * 0.86 // expansion panels sit inside the cell so there's a margin vs real plots
+const plusSize = plotSize * 0.66 // expansion panels sit inside the cell so there's a margin vs real plots
 const accent = 0xb8ff38
 
 // Tripo splats arrive with a hallucinated backdrop, drifting floor level, and a
 // non-square footprint. We cull sparse/transparent gaussians, take a conservative
 // square footprint from the dense core, crop to it, then size + seat the result
 // into the plot exactly like a primitive. Tunable here; see cropAndFitSplat.
-// Defaults; overridden at generate time by GET /api/config (WS_CULL_* env vars).
-const SPLAT_CROP = {
-	opacityFloor: 0.04, // drop near-transparent gaussians (haze / fog)
-	densityCells: 28, // voxel-grid resolution across the raw XZ extent
-	densityKeepFrac: 0.08, // a cell is "occupied" if it holds >= this fraction of the peak cell count
-	radiusKeepPercentile: 0.9, // protected-core radius: opacity+density culls only apply OUTSIDE this distance percentile (1 = protect all/off, lower = harsher)
-	bottomCullPercentile: 0.9, // hard first pass: drop stored-Y values below this floor percentile (high stored-Y = below the plot)
-	bottomCullSlack: 0.015, // raw footprint span allowed below that percentile before hard culling
-	floorCullSlack: 0.015, // plot-local units allowed below the final seated floor before hard culling
-	groundPercentile: 0.92, // stored-Y percentile used to crop a height window
-	heightCapFactor: 1.8, // keep height up to this multiple of the footprint span
-	belowGroundFactor: 0.12, // keep a little below the ground plane (roots / dirt)
-	floorPercentile: 0.97, // height percentile grounded to floorY; <1 ignores a sparse tail below the base, 1 = literal lowest gaussian
-	floorY: 0, // plot-local Y the floor is grounded to (ground top is 0.05)
-	inset: 1, // footprint as a fraction of the plot; 1 = tiles abut seamlessly, <1 leaves a gap
-	postScale: 1, // extra uniform scale applied AFTER the fit (>1 overflows, <1 shrinks)
-	// --- Tiling: make plots line up seamlessly regardless of content ---
-	tile: true, // overfit + square-crop to an exact tile, then bevel edges to a uniform thickness
-	overfit: 1.15, // scale content past the tile before cropping, so every edge is a clean cut through solid ground
-	edgeThickness: 0.35, // uniform ground thickness (plot-local units) kept at the tile edge so neighbours match
-	edgeMargin: 1.5, // distance (plot-local units) over which the edge cap ramps from edgeThickness up to full height
-	unitScale: 3.5, // Tripo/Spark raw units render smaller than the plot-space measurement suggests
-	floorOffset: -7.3, // matching vertical calibration for the Tripo/Spark coordinate frame
-	debug: false, // log per-stage splat counts + extents to the console
+//
+// Three knobs drive the whole pipeline, one per stage (cull -> seat -> fit), and
+// are served at generate time by GET /api/config (WS_CULL_STRENGTH / FLOOR_PCT /
+// FIT). Everything else is a structural constant baked in below.
+const CULL = {
+	strength: 0.6, // 0 = keep everything, 1 = harshest cull. 0.6 reproduces the hand-tuned values.
+	floorPct: 0.97, // ground-detection percentile; lower seats the floor higher into the cloud.
+	fit: 1.0, // render scale vs the plot footprint; 1 = true 1:1.
+	orient: true, // recover Tripo's arbitrary D4 pose and rotate the splat into plot-local space.
+	markers: false, // off-by-default fiducial fallback; default path aligns to the colliders.
+	rotate: 4, // final-stage yaw applied after the fit/seat: 1|2|3|4 -> 90*n degrees (4 = none).
+	yOffset: 0, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up).
+	floorMode: "surface", // floor detection: "surface" (robust median of column-tops, default) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile).
+	floorStrength: 0.6, // strength of an ANALYSIS-only cull used solely to measure the floor; strips backdrop/sub-ground so the estimate is clean WITHOUT culling the rendered splat. 0 = measure on the full visible cloud.
+	surfaceSigma: 2, // seat the splat's visible SURFACE (not gaussian centers) on the floor: drop the floor by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above).
+	seatFloor: true, // pin the detected floor to the plot floor plane. false = bypass ALL floor logic and just vertically-center the content (debug/test).
+	debug: false, // log per-stage splat counts + extents to the console.
 }
 
-// Pull cull knobs from the server env (WS_CULL_*) so they can be tuned without a
-// rebuild. Falls back silently to the defaults above if the endpoint is missing.
+// Effective per-stage params cropAndFitSplat reads. The structural fields are
+// fixed; the six cull fields + floor/ground/unitScale are filled by deriveCull().
+const SPLAT_CROP = {
+	// --- Structural constants (not tuned per scene) ---
+	densityCells: 28, // voxel-grid resolution across the raw XZ extent
+	bottomCullSlack: 0.015, // raw footprint span allowed below the bottom percentile before hard culling
+	floorCullSlack: 0, // plot-local units allowed below the final seated floor before hard culling
+	clampBelowFloor: false, // cull gaussians rendering below the seated floor; OFF = no floor culling (keeps noisy ground solid instead of spotty)
+	floorY: 0.05, // plot-local Y the floor is grounded to (top of the ground primitive)
+	floorOffset: 0, // extra vertical calibration on top of floorY
+	inset: 1, // footprint as a fraction of the plot; 1 = tiles abut seamlessly
+	postScale: 1, // extra uniform scale applied AFTER the fit
+	tile: true, // overfit + square-crop to an exact tile, then bevel edges
+	overfit: 1, // scale content past the tile before cropping
+	edgeThickness: 0, // uniform ground thickness kept at the tile edge (0 = no bevel)
+	edgeMargin: 1, // distance over which the edge cap ramps up to full height
+	perimeterFloorBand: 0.12, // tile-edge culling only touches gaussians at/below this height (fraction of content height); taller = a real object, kept even if it overhangs the tile
+	surfaceDensityFrac: 0.05, // surface floor-mode: a column must hold >= this fraction of the peak cell count to be trusted (ignores sparse stray columns)
+	surfaceFloorPercentile: 0.5, // surface (median) mode: percentile of the per-column tops to seat on; 0.5 = median bulk ground (robust), 1 = lowest exposed top (== surface_min)
+	// --- Derived from CULL by deriveCull(); see endpoints there ---
+	floorMode: "surface", // "surface" = lowest exposed column-top; "percentile" = legacy global quantile
+	surfaceSigma: 2, // sigma of vertical gaussian radius to offset the seat from centers to the visible surface
+	opacityFloor: 0,
+	densityKeepFrac: 0,
+	radiusKeepPercentile: 1,
+	bottomCullPercentile: 1,
+	heightCapFactor: 3,
+	belowGroundFactor: 0.3,
+	groundPercentile: 0.92,
+	floorPercentile: 0.97,
+	unitScale: 1,
+	debug: false,
+}
+
+// Expand the three CULL knobs into the per-stage params above. strength linearly
+// interpolates each cull field between a gentle (s=0, barely culls) and harsh
+// (s=1) endpoint; the pairs are chosen so s=0.6 lands on the previously hand-tuned
+// values exactly. floorPct sets the seat/ground percentiles; fit sets unitScale.
+function deriveCull() {
+	const s = Math.min(1, Math.max(0, CULL.strength))
+	const lerp = (gentle, harsh) => gentle + (harsh - gentle) * s
+	SPLAT_CROP.opacityFloor = lerp(0, 0.0667) // higher = drops more haze
+	SPLAT_CROP.densityKeepFrac = lerp(0, 0.1333) // higher = cells must be denser to survive
+	SPLAT_CROP.radiusKeepPercentile = lerp(1, 0.8333) // lower = smaller protected core
+	SPLAT_CROP.bottomCullPercentile = lerp(1, 0.8333) // lower = cuts more below-floor smear
+	SPLAT_CROP.heightCapFactor = lerp(3, 1) // lower = shorter height window
+	SPLAT_CROP.belowGroundFactor = lerp(0.3, 0) // lower = keeps less below the ground
+	SPLAT_CROP.floorPercentile = CULL.floorPct
+	SPLAT_CROP.groundPercentile = Math.max(0, CULL.floorPct - 0.05)
+	SPLAT_CROP.unitScale = CULL.fit
+	SPLAT_CROP.floorMode = CULL.floorMode
+	SPLAT_CROP.surfaceSigma = CULL.surfaceSigma
+	SPLAT_CROP.debug = CULL.debug
+}
+deriveCull()
+
+// Pull the three cull knobs from the server env (WS_CULL_*) so they can be tuned
+// without a rebuild. Falls back silently to the defaults above if the endpoint is
+// missing, then re-derives the effective params.
 async function loadCullConfig() {
 	try {
 		const res = await fetch("/api/config")
-		if (res.ok) Object.assign(SPLAT_CROP, await res.json())
+		if (res.ok) Object.assign(CULL, await res.json())
 	} catch {
 		// keep defaults
 	}
+	deriveCull()
 }
 
 let activeTool = "pointer"
@@ -75,6 +127,10 @@ let activeColor = "#232323"
 let selectedPrimitive = null
 let placementPreview = null
 let focusedPlot = null
+// Temporary single-plot mode: boot straight into one focused plot, hide the
+// expansion ("+") tiles and the exit-focus affordance. Flip to false to restore
+// the multi-plot overview workflow.
+const singlePlotMode = true
 let drag = null
 let nextPrimitiveId = 1
 let generating = false
@@ -103,12 +159,32 @@ const els = {
 	cancelGenerate: document.getElementById("cancel_generate_btn"),
 	scenePrompt: document.getElementById("scene_prompt"),
 	showColliders: document.getElementById("show_colliders_input"),
+	showSplatBox: document.getElementById("show_splat_box_input"),
+	showFloor: document.getElementById("show_floor_input"),
+	showSplatFloor: document.getElementById("show_splat_floor_input"),
 }
 
 // "Colliders" overlay: re-show a generated plot's (otherwise hidden) primitives as a
 // bright wireframe drawn over the splat, to check how well the splat lines up with them.
 const colliderColor = 0xb8ff38
 let showColliders = false
+
+// "Bounds" overlay: draw the splat's true content AABB (computed during the
+// cull/fit) as a wireframe box, to check how the splat sits relative to the plot.
+const boundsColor = 0xff3b8d
+let showSplatBox = false
+
+// "Floor" overlay: a grid at the plot-local floor level (SPLAT_CROP.floorY, the
+// height the splat is seated to) so the floor plane is visible at all times while
+// debugging seating / Y-offset.
+const floorColor = 0x2bb3ff
+let showFloor = false
+
+// "Splat floor" overlay: a grid at the plot-local Y the splat's DETECTED floor was
+// seated to (plot.splatFloorY), so you can see where the floor-finding algorithm
+// thinks the ground is vs where the splat actually renders.
+const splatFloorColor = 0xff8c2b
+let showSplatFloor = false
 
 // Toggle a primitive between its normal solid look and a wireframe-over-everything
 // collider overlay, by mutating its OWN material so disposeObject stays correct.
@@ -148,6 +224,18 @@ function applyColliderVisibility() {
 	for (const plot of plots.plots) plot.setCollidersVisible(showColliders)
 }
 
+function applyBoundsVisibility() {
+	for (const plot of plots.plots) plot.setBoundsVisible(showSplatBox)
+}
+
+function applyFloorVisibility() {
+	for (const plot of plots.plots) plot.setFloorVisible(showFloor)
+}
+
+function applySplatFloorVisibility() {
+	for (const plot of plots.plots) plot.setSplatFloorVisible(showSplatFloor)
+}
+
 renderer.setSize(window.innerWidth, window.innerHeight)
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
 renderer.setClearColor(backgroundColor, 1)
@@ -177,6 +265,9 @@ class Plot {
 		this.primitives = []
 		this.gaussian = null
 		this.selectionOutline = null
+		this.floorHelper = null
+		this.splatFloorHelper = null
+		this.splatFloorY = null // plot-local Y the splat's detected floor was seated to
 		this.group = new THREE.Group()
 		this.group.position.set(gx * plotStep, 0, gz * plotStep)
 		this.ground = createPrimitive("box", `plot_${this.id}`, {
@@ -206,7 +297,8 @@ class Plot {
 		mesh.userData.plot = this
 		this.primitives.push(mesh)
 		this.group.add(mesh)
-		selectPrimitive(mesh)
+		// Don't auto-select on placement — selection only happens when you click a
+		// shape with the pointer tool.
 		return mesh
 	}
 
@@ -238,6 +330,8 @@ class Plot {
 		for (const primitive of this.primitives) primitive.visible = false
 		this.state = "generated"
 		this.setCollidersVisible(showColliders) // honor the toggle for the new splat
+		this.setBoundsVisible(showSplatBox)
+		this.setSplatFloorVisible(showSplatFloor)
 	}
 
 	setDraftVisible(visible) {
@@ -255,6 +349,61 @@ class Plot {
 			primitive.visible = show
 			setColliderStyle(primitive, show)
 		}
+	}
+
+	// Draw the splat's content AABB (captured in cropAndFitSplat) as a wireframe box
+	// in the plot's local space, drawn over the splat so it reads against the edges.
+	setBoundsVisible(show) {
+		if (this.boundsHelper) {
+			this.group.remove(this.boundsHelper)
+			disposeObject(this.boundsHelper)
+			this.boundsHelper = null
+		}
+		if (!show || this.state !== "generated" || !this.splatBox) return
+		this.boundsHelper = new THREE.Box3Helper(this.splatBox, boundsColor)
+		this.boundsHelper.material.depthTest = false
+		this.boundsHelper.renderOrder = 998
+		this.group.add(this.boundsHelper)
+	}
+
+	// Draw a grid at the plot-local floor level (the height the splat is seated to) so
+	// the floor plane stays visible for debugging seating / Y-offset. Unlike the other
+	// overlays this is a fixed reference, shown regardless of plot state.
+	setFloorVisible(show) {
+		if (this.floorHelper) {
+			this.group.remove(this.floorHelper)
+			disposeObject(this.floorHelper)
+			this.floorHelper = null
+		}
+		if (!show) return
+		this.floorHelper = new THREE.GridHelper(plotSize, plotSize, floorColor, floorColor)
+		this.floorHelper.position.y = SPLAT_CROP.floorY
+		this.floorHelper.material.depthTest = false
+		this.floorHelper.material.transparent = true
+		this.floorHelper.material.opacity = 0.6
+		this.floorHelper.renderOrder = 997
+		this.floorHelper.userData.isDebugHelper = true
+		this.group.add(this.floorHelper)
+	}
+
+	// Draw a grid at the plot-local Y the splat's DETECTED floor was seated to
+	// (splatFloorY). Compare it against the actual green ground to see how far off the
+	// floor-finding algorithm landed. Generated plots only (needs a computed floor).
+	setSplatFloorVisible(show) {
+		if (this.splatFloorHelper) {
+			this.group.remove(this.splatFloorHelper)
+			disposeObject(this.splatFloorHelper)
+			this.splatFloorHelper = null
+		}
+		if (!show || this.state !== "generated" || this.splatFloorY == null) return
+		this.splatFloorHelper = new THREE.GridHelper(plotSize, plotSize, splatFloorColor, splatFloorColor)
+		this.splatFloorHelper.position.y = this.splatFloorY
+		this.splatFloorHelper.material.depthTest = false
+		this.splatFloorHelper.material.transparent = true
+		this.splatFloorHelper.material.opacity = 0.6
+		this.splatFloorHelper.renderOrder = 997
+		this.splatFloorHelper.userData.isDebugHelper = true
+		this.group.add(this.splatFloorHelper)
 	}
 
 	setFaded(faded) {
@@ -338,21 +487,40 @@ function key(gx, gz) {
 	return `${gx},${gz}`
 }
 
+// Centered rounded-rectangle outline (XY plane) so the empty-cell tile matches the
+// rounded white UI surfaces instead of a hard-edged grey square.
+function roundedRectShape(size, radius) {
+	const s = size / 2
+	const r = Math.min(radius, s)
+	const shape = new THREE.Shape()
+	shape.moveTo(-s + r, -s)
+	shape.lineTo(s - r, -s)
+	shape.quadraticCurveTo(s, -s, s, -s + r)
+	shape.lineTo(s, s - r)
+	shape.quadraticCurveTo(s, s, s - r, s)
+	shape.lineTo(-s + r, s)
+	shape.quadraticCurveTo(-s, s, -s, s - r)
+	shape.lineTo(-s, -s + r)
+	shape.quadraticCurveTo(-s, -s, -s + r, -s)
+	return shape
+}
+
 function createPlus(gx, gz) {
 	const group = new THREE.Group()
 	group.position.set(gx * plotStep, 0.12, gz * plotStep)
 	group.userData = { isPlus: true, gx, gz }
 
 	const fill = new THREE.Mesh(
-		new THREE.PlaneGeometry(plusSize, plusSize),
-		new THREE.MeshBasicMaterial({ color: 0xaab4ae, depthWrite: false, side: THREE.DoubleSide }),
+		new THREE.ShapeGeometry(roundedRectShape(plusSize, plusSize * 0.14)),
+		new THREE.MeshBasicMaterial({ color: 0xffffff, depthWrite: false, side: THREE.DoubleSide }),
 	)
 	fill.name = "plus_fill"
 	fill.rotation.x = -Math.PI / 2
 
 	// One opaque, single-color "+" so the two arms don't blend brighter where they
-	// overlap (the old transparent arms doubled up in the middle).
-	const plusMaterial = new THREE.MeshBasicMaterial({ color: 0xf2f5f3, depthTest: true, depthWrite: false })
+	// overlap (the old transparent arms doubled up in the middle). Coloured to match
+	// the canvas background so the mark reads as a cut-out from the white tile.
+	const plusMaterial = new THREE.MeshBasicMaterial({ color: backgroundColor, depthTest: true, depthWrite: false })
 	const plusMark = new THREE.Group()
 	plusMark.name = "plus_mark"
 	plusMark.position.y = 0.08
@@ -439,28 +607,21 @@ function selectPrimitive(mesh) {
 
 function applyColor(color) {
 	activeColor = color
-	if (selectedPrimitive) {
-		selectedPrimitive.material.color.set(color)
-	} else {
-		for (const plot of selectedPlotsForColor()) plot.ground.material.color.set(color)
-	}
+	// The baseplate is just another selectable object now, so recolouring it goes
+	// through the normal selected-primitive path — no plot-level special case.
+	if (selectedPrimitive) selectedPrimitive.material.color.set(color)
 	if (placementPreview) placementPreview.material.color.set(color)
 	for (const swatch of els.colorSwatches) {
 		swatch.classList.toggle("active", swatch.dataset.color.toLowerCase() === color.toLowerCase())
 	}
 }
 
-function selectedPlotsForColor() {
-	const selected = new Set(plots.selected())
-	if (focusedPlot) selected.add(focusedPlot)
-	return selected
-}
-
 function focusPlot(plot) {
 	focusedPlot = plot
 	plots.clearSelection()
 	selectPrimitive(null)
-	plot.setSelected(true)
+	// No plot-level frame outline anymore — the baseplate uses the regular primitive
+	// selection outline, shown only while it's actually selected.
 	syncPlotFocusFade()
 	focusOrbit.target.set(plot.center.x, 0.8, plot.center.z)
 	focusOrbit.radius = 10
@@ -498,7 +659,8 @@ function syncGenerateButton() {
 }
 
 function syncFocusUi() {
-	els.exitFocus.classList.toggle("hidden", !focusedPlot)
+	// In single-plot mode there's nothing to exit back to, so keep the button hidden.
+	els.exitFocus.classList.toggle("hidden", singlePlotMode || !focusedPlot)
 }
 
 function setStatus(message) {
@@ -781,10 +943,12 @@ function focusPointerDown(event) {
 		return
 	}
 
-	const groundHit = activeTool === "pointer" ? surfaceHit(event) : null
+	// Baseplate behaves like a regular object: a pointer click selects it (regular
+	// selection outline) so it can be recoloured, but it's locked against
+	// move/scale/rotate/erase — those just orbit the camera, same as empty space.
+	const groundHit = surfaceHit(event)
 	if (groundHit?.object?.userData.isGround) {
-		selectPrimitive(null)
-		focusedPlot.setSelected(true)
+		if (activeTool === "pointer") selectPrimitive(focusedPlot.ground)
 		startFocusOrbit(event)
 		return
 	}
@@ -808,7 +972,7 @@ async function generateSelected(prompt) {
 			plot.state = "generating"
 			setStatus(targets.length === 1 ? "Generating" : `Generating ${index + 1}/${targets.length}`)
 			if (wasGenerated) plot.setDraftVisible(true)
-			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean))
+			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean), { markers: CULL.orient && CULL.markers })
 			if (wasGenerated) plot.setDraftVisible(false)
 			const bytes = await generatePlot({
 				prompt,
@@ -881,11 +1045,132 @@ function smoothstep(edge0, edge1, x) {
 	return t * t * (3 - 2 * t)
 }
 
-function splatBounds(keep, xs, ys, zs) {
+// Surface floor detection. Treat the topmost gaussian in each XZ column as the visible
+// surface (a downward raycast's first hit), build a density-gated set of those
+// per-column tops, then aggregate them into one floor height. Stored-Y is flipped
+// (model is upside-down): the highest world point in a cell is its MIN stored-Y, and
+// world-low ground sits at the HIGH end of stored-Y. So the sorted tops run from object
+// cells (low stored, world-high) up to ground cells (high stored, world-low).
+//
+//   surface_min  -> the single lowest exposed top (max stored). Outlier-sensitive: a
+//                   below-ground smear column drags it down, and that error scales with
+//                   scene height, so the splat seats at a height-dependent Y.
+//   surface(med) -> a robust percentile of the tops (surfaceFloorPercentile, default
+//                   0.5 = median). Ignores the below-ground outliers AND the object
+//                   cells, pinning the bulk ground so floors seat consistently.
+function surfaceFloorLocalY(keep, xs, ys, zs, box, mode = SPLAT_CROP.floorMode) {
+	const cells = SPLAT_CROP.densityCells
+	const spanX = (box.maxX - box.minX) || 1
+	const spanZ = (box.maxZ - box.minZ) || 1
+	const topStoredY = new Float32Array(cells * cells).fill(Infinity) // min stored-Y per cell = highest world point
+	const count = new Int32Array(cells * cells)
+	for (let i = 0; i < keep.length; i++) {
+		if (!keep[i]) continue
+		const cx = Math.min(cells - 1, Math.floor(((xs[i] - box.minX) / spanX) * cells))
+		const cz = Math.min(cells - 1, Math.floor(((zs[i] - box.minZ) / spanZ) * cells))
+		const c = cz * cells + cx
+		count[c]++
+		if (ys[i] < topStoredY[c]) topStoredY[c] = ys[i]
+	}
+	let peak = 0
+	for (let c = 0; c < count.length; c++) if (count[c] > peak) peak = count[c]
+	const minCount = Math.max(2, Math.ceil(peak * SPLAT_CROP.surfaceDensityFrac))
+	// Density-gated column tops, with an ungated fallback so the set is never empty.
+	const tops = []
+	for (let c = 0; c < count.length; c++) if (count[c] >= minCount) tops.push(topStoredY[c])
+	if (!tops.length) for (let c = 0; c < count.length; c++) if (count[c] > 0) tops.push(topStoredY[c])
+	if (!tops.length) return 0
+	tops.sort((a, b) => a - b)
+	if (mode === "surface_min") return tops[tops.length - 1] // max stored = lowest exposed top in world
+	return percentile(tops, SPLAT_CROP.surfaceFloorPercentile) // robust median of the column tops
+}
+
+// Measure the floor on an ANALYSIS-only cull: a throwaway copy of the keep mask with
+// the strength-based backdrop / sub-ground culls applied (driven by CULL.floorStrength).
+// This lets the floor estimate ignore Tripo's thick base slab / hallucinated backdrop
+// WITHOUT removing any of it from the rendered splat — the returned value just overrides
+// floorLocalY in the seat. Returns null when floorStrength <= 0 (measure normally).
+function analysisFloorLocalY(keep, xs, ys, zs, ops) {
+	const s = Math.min(1, Math.max(0, CULL.floorStrength))
+	if (s <= 0) return null
+	const lerp = (g, h) => g + (h - g) * s
+	const opacityFloor = lerp(0, 0.0667)
+	const bottomPct = lerp(1, 0.8333)
+	const heightCap = lerp(3, 1)
+	const belowGround = lerp(0.3, 0)
+	const groundPct = Math.max(0, CULL.floorPct - 0.05)
+
+	const total = keep.length
+	const aKeep = keep.slice()
+	let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+	for (let i = 0; i < total; i++) {
+		if (!aKeep[i]) continue
+		if (xs[i] < minX) minX = xs[i]
+		if (xs[i] > maxX) maxX = xs[i]
+		if (zs[i] < minZ) minZ = zs[i]
+		if (zs[i] > maxZ) maxZ = zs[i]
+	}
+	if (!Number.isFinite(minX)) return null
+	const span = Math.max(1e-3, maxX - minX, maxZ - minZ)
+
+	// Bottom cut: drop the deepest below-floor smear.
+	const sortedY = []
+	for (let i = 0; i < total; i++) if (aKeep[i]) sortedY.push(ys[i])
+	sortedY.sort((a, b) => a - b)
+	const bottomLimit = percentile(sortedY, bottomPct) + SPLAT_CROP.bottomCullSlack * span
+	for (let i = 0; i < total; i++) if (aKeep[i] && ys[i] > bottomLimit) aKeep[i] = 0
+
+	// Opacity cull: drop haze / fog.
+	for (let i = 0; i < total; i++) if (aKeep[i] && ops[i] < opacityFloor) aKeep[i] = 0
+
+	// Height window: drop content well above the ground and the sub-ground slab/backdrop
+	// below it — this is the cull that stops the floor latching onto Tripo's thick base.
+	const keptY = []
+	for (let i = 0; i < total; i++) if (aKeep[i]) keptY.push(ys[i])
+	if (!keptY.length) return null
+	keptY.sort((a, b) => a - b)
+	const groundY = percentile(keptY, groundPct)
+	const ceilY = groundY - heightCap * span // world-up = lower stored-Y
+	const underY = groundY + belowGround * span
+	for (let i = 0; i < total; i++) {
+		if (!aKeep[i]) continue
+		if (ys[i] < ceilY || ys[i] > underY) aKeep[i] = 0
+	}
+
+	const ab = splatBounds(aKeep, xs, ys, zs)
+	return ab ? ab.floorLocalY : null
+}
+
+// Median vertical radius of the gaussians near the floor (within a band of centerFloorY),
+// used to offset the seat from gaussian centers to the visible surface. Falls back to the
+// whole kept set if too few floor gaussians are in-band.
+function medianFloorRadius(keep, ys, rad, centerFloorY) {
+	let minY = Infinity, maxY = -Infinity
+	for (let i = 0; i < keep.length; i++) {
+		if (!keep[i]) continue
+		if (ys[i] < minY) minY = ys[i]
+		if (ys[i] > maxY) maxY = ys[i]
+	}
+	if (!Number.isFinite(minY)) return 0
+	const band = 0.1 * Math.max(1e-3, maxY - minY)
+	const sel = []
+	for (let i = 0; i < keep.length; i++) if (keep[i] && Math.abs(ys[i] - centerFloorY) <= band) sel.push(rad[i])
+	if (sel.length < 16) {
+		sel.length = 0
+		for (let i = 0; i < keep.length; i++) if (keep[i]) sel.push(rad[i])
+	}
+	if (!sel.length) return 0
+	sel.sort((a, b) => a - b)
+	return percentile(sel, 0.5)
+}
+
+function splatBounds(keep, xs, ys, zs, floorOverride = null) {
 	let minX = Infinity
 	let maxX = -Infinity
 	let minZ = Infinity
 	let maxZ = -Infinity
+	let minY = Infinity
+	let maxY = -Infinity
 	const localY = []
 	for (let i = 0; i < keep.length; i++) {
 		if (!keep[i]) continue
@@ -893,20 +1178,30 @@ function splatBounds(keep, xs, ys, zs) {
 		if (xs[i] > maxX) maxX = xs[i]
 		if (zs[i] < minZ) minZ = zs[i]
 		if (zs[i] > maxZ) maxZ = zs[i]
+		if (ys[i] < minY) minY = ys[i]
+		if (ys[i] > maxY) maxY = ys[i]
 		localY.push(ys[i])
 	}
 	if (!localY.length) return null
 	localY.sort((a, b) => a - b)
+	const box = { minX, maxX, minZ, maxZ }
+	const floorLocalY = floorOverride != null
+		? floorOverride
+		: SPLAT_CROP.floorMode === "percentile"
+			? percentile(localY, SPLAT_CROP.floorPercentile)
+			: surfaceFloorLocalY(keep, xs, ys, zs, box)
 	return {
 		minX,
 		maxX,
 		minZ,
 		maxZ,
+		minY,
+		maxY,
 		centerX: (minX + maxX) / 2,
 		centerZ: (minZ + maxZ) / 2,
 		boxX: Math.max(1e-3, maxX - minX),
 		boxZ: Math.max(1e-3, maxZ - minZ),
-		floorLocalY: percentile(localY, SPLAT_CROP.floorPercentile),
+		floorLocalY,
 	}
 }
 
@@ -925,12 +1220,26 @@ async function cropAndFitSplat(source, plot) {
 	const ys = new Float32Array(total)
 	const zs = new Float32Array(total)
 	const ops = new Float32Array(total)
+	const rs = new Float32Array(total) // gaussian colour, cached for orientation scoring + marker detection
+	const gs = new Float32Array(total)
+	const bs = new Float32Array(total)
+	const rad = new Float32Array(total) // gaussian vertical (world-Y) std dev, for surface-aware floor seating
 	const keep = new Uint8Array(total).fill(1)
-	packed.forEachSplat((i, center, _scales, _quaternion, opacity) => {
+	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
 		xs[i] = center.x
 		ys[i] = center.y
 		zs[i] = center.z
 		ops[i] = opacity
+		rs[i] = color.r
+		gs[i] = color.g
+		bs[i] = color.b
+		// Vertical (world-Y) std dev of the gaussian = |row-1 of its rotation matrix · scales|.
+		// The D4 orientation only spins X-Z, so the Y-extent is orientation-invariant and can
+		// be read straight from the raw quaternion here.
+		const r10 = 2 * (quaternion.x * quaternion.y + quaternion.w * quaternion.z)
+		const r11 = 1 - 2 * (quaternion.x * quaternion.x + quaternion.z * quaternion.z)
+		const r12 = 2 * (quaternion.y * quaternion.z - quaternion.w * quaternion.x)
+		rad[i] = Math.hypot(r10 * scales.x, r11 * scales.y, r12 * scales.z)
 	})
 
 	// 0. Hard bottom cut: the stored model is upside-down, so high stored-Y values
@@ -1072,9 +1381,39 @@ async function cropAndFitSplat(source, plot) {
 		if (ys[i] < ceilY || ys[i] > underY) keep[i] = 0
 	}
 
+	// 4b. Orientation: Tripo lands the cloud at an arbitrary D4 pose (one of 4 yaws x
+	//     optional handedness flip). Recover it from the capture's corner fiducials
+	//     (or, failing that, by aligning to the colliders) and rotate/reflect the
+	//     working arrays so every downstream stage sees the splat in plot-local space.
+	//     The same transform is applied to the packed centres + quaternions below.
+	let orient = { yawDeg: 0, mirror: false }
+	if (CULL.orient) {
+		const keptIdx = []
+		for (let i = 0; i < total; i++) if (keep[i]) keptIdx.push(i)
+		const res = resolveOrientation({ xs, ys, zs, rs, gs, bs, kept: keptIdx, groundY, plot, markers: CULL.markers, debug: CULL.debug })
+		orient = res.orient
+		if (res.markerCull) for (let i = 0; i < total; i++) if (res.markerCull[i]) keep[i] = 0
+		orientArrays(orient, xs, zs, total)
+		if (CULL.debug) console.log("[orient]", { source: res.source, yawDeg: orient.yawDeg, mirror: orient.mirror, scores: res.scores })
+	}
+
+	// Floor seating, computed once and reused for every bounds pass below:
+	//  1. Measure the gaussian-CENTER floor — on a throwaway analysis cull (backdrop /
+	//     sub-ground removed) if floorStrength > 0, else on the full kept set.
+	//  2. Drop it by surfaceSigma * (vertical radius of the floor gaussians) so we seat
+	//     the splat's visible SURFACE on the floor plane, not the centers. Pinning centers
+	//     floats the surface up by ~radius*renderScaleY — the "ground hovers N blocks up" bug.
+	let centerFloorY = analysisFloorLocalY(keep, xs, ys, zs, ops)
+	if (centerFloorY == null) {
+		const cb = splatBounds(keep, xs, ys, zs)
+		centerFloorY = cb ? cb.floorLocalY : 0
+	}
+	const floorRadius = medianFloorRadius(keep, ys, rad, centerFloorY)
+	const seatFloorY = centerFloorY - SPLAT_CROP.surfaceSigma * floorRadius
+
 	// 5. Rough transform for tile-shaping. This pass may still include faint fringe,
 	//    so it is only used to decide what belongs in the square tile.
-	let bounds = splatBounds(keep, xs, ys, zs)
+	let bounds = splatBounds(keep, xs, ys, zs, seatFloorY)
 	if (!bounds) return null
 	const fill = plot.size * SPLAT_CROP.inset * SPLAT_CROP.postScale
 
@@ -1094,17 +1433,23 @@ async function cropAndFitSplat(source, plot) {
 	const roughZ = i => scaleZ * (zs[i] - bounds.centerZ)
 	const roughY = i => scaleY * (bounds.floorLocalY - ys[i])
 
-	// 6. Tile shaping: rough-crop to a square, then bevel the ground edge.
+	// 6. Tile shaping: rough-crop to a square, then bevel the ground edge — but ONLY
+	//    for gaussians at/around floor level. roughY is 0 at the floor and grows
+	//    upward, so anything taller than perimeterFloorBand is a real object and is
+	//    left intact even where it overhangs the tile edge; only the ground sheet /
+	//    backdrop skirt at the perimeter gets cropped.
 	if (SPLAT_CROP.tile) {
 		const half = fill / 2
-		for (let i = 0; i < total; i++) {
-			if (keep[i] && (Math.abs(roughX(i)) > half || Math.abs(roughZ(i)) > half)) keep[i] = 0
-		}
 		let hMax = SPLAT_CROP.edgeThickness
 		for (let i = 0; i < total; i++) if (keep[i]) hMax = Math.max(hMax, roughY(i))
+		const floorBand = SPLAT_CROP.perimeterFloorBand * hMax
+		const nearFloor = i => roughY(i) <= floorBand
+		for (let i = 0; i < total; i++) {
+			if (keep[i] && nearFloor(i) && (Math.abs(roughX(i)) > half || Math.abs(roughZ(i)) > half)) keep[i] = 0
+		}
 		const T = SPLAT_CROP.edgeThickness
 		for (let i = 0; i < total; i++) {
-			if (!keep[i]) continue
+			if (!keep[i] || !nearFloor(i)) continue
 			const edgeDist = half - Math.max(Math.abs(roughX(i)), Math.abs(roughZ(i)))
 			const cap = T + (hMax - T) * smoothstep(0, SPLAT_CROP.edgeMargin, edgeDist)
 			if (roughY(i) > cap) keep[i] = 0
@@ -1113,21 +1458,23 @@ async function cropAndFitSplat(source, plot) {
 
 	// 7. Final fit: remeasure AFTER tile shaping. This is the important bit: the
 	//    visible survivors, not the discarded skirt/backdrop, determine the scale.
-	bounds = splatBounds(keep, xs, ys, zs)
+	bounds = splatBounds(keep, xs, ys, zs, seatFloorY)
 	if (!bounds) return null
 	scaleX = fill / bounds.boxX
 	scaleZ = fill / bounds.boxZ
 	const finalScaleY = (scaleX + scaleZ) / 2
 	const finalY = i => finalScaleY * (bounds.floorLocalY - ys[i])
 
-	// 8. Absolute floor clamp: after the final seat transform is known, drop any
-	//    gaussian that would render below the plot floor. This catches soft shadow
-	//    sheets / undersides that survive percentile culling.
-	for (let i = 0; i < total; i++) {
-		if (keep[i] && finalY(i) < -SPLAT_CROP.floorCullSlack) keep[i] = 0
+	// 8. Absolute floor clamp (opt-in): drop any gaussian that would render below the
+	//    plot floor. Off by default — culling here punches holes in noisy ground
+	//    surfaces (the "spotty floor"), so we keep the floor solid and do NOT cull it.
+	if (SPLAT_CROP.clampBelowFloor) {
+		for (let i = 0; i < total; i++) {
+			if (keep[i] && finalY(i) < -SPLAT_CROP.floorCullSlack) keep[i] = 0
+		}
+		bounds = splatBounds(keep, xs, ys, zs, seatFloorY)
+		if (!bounds) return null
 	}
-	bounds = splatBounds(keep, xs, ys, zs)
-	if (!bounds) return null
 	scaleX = fill / bounds.boxX
 	scaleZ = fill / bounds.boxZ
 	const scaleYFinal = (scaleX + scaleZ) / 2
@@ -1141,6 +1488,10 @@ async function cropAndFitSplat(source, plot) {
 	let kept = 0
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
 		if (!keep[i]) return
+		if (!isIdentity(orient)) {
+			orientCenter(orient, center) // same D4 transform applied to xs/zs above
+			orientQuaternion(orient, quaternion)
+		}
 		packed.setSplat(kept, center, scales, quaternion, opacity, color)
 		kept++
 	})
@@ -1148,14 +1499,70 @@ async function cropAndFitSplat(source, plot) {
 	packed.numSplats = kept
 	packed.needsUpdate = true
 
+	// seatFloor on: pin the detected floor (bounds.floorLocalY) to the plot floor plane.
+	// off (debug): bypass all floor logic and seat the content's vertical CENTER instead,
+	// so we can see where the raw splat naturally sits relative to the floor grid.
+	const seatY = CULL.seatFloor ? bounds.floorLocalY : (bounds.minY + bounds.maxY) / 2
 	source.scale.set(renderScaleX, -renderScaleY, renderScaleZ)
 	source.position.set(
 		-bounds.centerX * renderScaleX,
-		SPLAT_CROP.floorY + SPLAT_CROP.floorOffset + bounds.floorLocalY * renderScaleY,
+		SPLAT_CROP.floorY + SPLAT_CROP.floorOffset + seatY * renderScaleY,
 		-bounds.centerZ * renderScaleZ,
 	)
 
+	// Final-stage yaw applied AFTER the fit/seat as a manual orientation override:
+	// WS_SPLAT_ROTATE = 1|2|3|4 -> 90*n degrees about the plot's vertical axis (4 = 360
+	// = none). Rotating the seated mesh about the plot centre = rotate the mesh AND
+	// post-rotate its seat position by the same yaw (rendered' = Ry * rendered).
+	const rot = (((Math.round(CULL.rotate) % 4) + 4) % 4) // 1->90 2->180 3->270 4/0->none
+	if (rot) {
+		const yaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), (rot * Math.PI) / 2)
+		source.quaternion.copy(yaw)
+		source.position.applyQuaternion(yaw)
+	}
+
+	// The seat lands the splat exactly one content-height too high, so drop the whole
+	// splat by its own world-space height to sit the floor on the plane.
+	const splatHeight = (bounds.maxY - bounds.minY) * renderScaleY
+	if (CULL.seatFloor) source.position.y -= splatHeight/3
+
+	// Final vertical nudge (WS_CULL_Y_OFFSET), applied after the seat + yaw so it's a
+	// pure plot-local Y shift independent of every other transform.
+	source.position.y += CULL.yOffset
+
+	// Plot-local Y the detected floor (ys = floorLocalY) lands at — the seat pins it
+	// here regardless of content, so renderScaleY cancels. Stored for the "Splat floor"
+	// debug grid to compare against where the ground actually renders.
+	plot.splatFloorY = SPLAT_CROP.floorY + SPLAT_CROP.floorOffset + CULL.yOffset
+
+	// The true content AABB in the plot's local space, mirroring the seat transform
+	// above: x/z are centered (position cancels centerX/centerZ), y runs from the
+	// seated floor up through the flipped height range. A 90/270 yaw swaps the X/Z
+	// extents. Stored for the "Bounds" debug overlay so a misplaced splat is obvious.
+	const extentX = (bounds.boxX / 2) * renderScaleX
+	const extentZ = (bounds.boxZ / 2) * renderScaleZ
+	const halfX = rot % 2 ? extentZ : extentX
+	const halfZ = rot % 2 ? extentX : extentZ
+	const floorBaseY = SPLAT_CROP.floorY + SPLAT_CROP.floorOffset + CULL.yOffset
+	const yAtMin = floorBaseY + renderScaleY * (bounds.floorLocalY - bounds.minY)
+	const yAtMax = floorBaseY + renderScaleY * (bounds.floorLocalY - bounds.maxY)
+	plot.splatBox = new THREE.Box3(
+		new THREE.Vector3(-halfX, Math.min(yAtMin, yAtMax), -halfZ),
+		new THREE.Vector3(halfX, Math.max(yAtMin, yAtMax), halfZ),
+	)
+
 	if (SPLAT_CROP.debug) {
+		// Report both floor estimates on the final survivors so the two modes can be
+		// compared on a real generation (and against the "Floor" grid toggle).
+		const fbox = { minX: bounds.minX, maxX: bounds.maxX, minZ: bounds.minZ, maxZ: bounds.maxZ }
+		const keptY = []
+		for (let i = 0; i < total; i++) if (keep[i]) keptY.push(ys[i])
+		keptY.sort((a, b) => a - b)
+		const floorPercentileY = percentile(keptY, SPLAT_CROP.floorPercentile)
+		const floorMinY = surfaceFloorLocalY(keep, xs, ys, zs, fbox, "surface_min")
+		const floorMedianY = surfaceFloorLocalY(keep, xs, ys, zs, fbox, "surface")
+		// min vs median diverging across generations of different height = the height-
+		// dependent floor; the gap renders as renderScaleY*(median - min) of vertical shift.
 		console.log("[splat fit]", {
 			raw: total,
 			kept,
@@ -1166,15 +1573,32 @@ async function cropAndFitSplat(source, plot) {
 			scaleX: scaleX.toFixed(3),
 			scaleZ: scaleZ.toFixed(3),
 			unitScale: SPLAT_CROP.unitScale,
+			renderScaleY: renderScaleY.toFixed(3),
 			floorOffset: SPLAT_CROP.floorOffset,
-			floorLocalY: bounds.floorLocalY.toFixed(3),
+			floorMode: SPLAT_CROP.floorMode,
+			floorStrength: CULL.floorStrength,
+			surfaceSigma: SPLAT_CROP.surfaceSigma,
+			centerFloorY: centerFloorY.toFixed(3), // gaussian-center floor (pre surface offset)
+			floorRadius: floorRadius.toFixed(4), // median vertical gaussian radius near the floor
+			surfaceShift: (renderScaleY * (centerFloorY - seatFloorY)).toFixed(3), // world-Y the seat dropped to reach the surface
+			seatFloorY: seatFloorY.toFixed(3), // what we actually seat (== bounds.floorLocalY)
+			splatHeight: splatHeight.toFixed(3), // world height the splat is dropped by post-seat
+			floorMinY: floorMinY.toFixed(3),
+			floorMedianY: floorMedianY.toFixed(3),
+			floorPercentileY: floorPercentileY.toFixed(3),
 		})
 	}
 	return source
 }
 
 renderer.domElement.addEventListener("pointerdown", event => {
-	if (event.button !== 0 || generating) return
+	if (event.button !== 0) return
+	if (generating) {
+		// While generating, only camera movement is allowed — no placing or editing.
+		if (focusedPlot) startFocusOrbit(event)
+		else startOverviewPan(event)
+		return
+	}
 	if (focusedPlot) focusPointerDown(event)
 	else overviewPointerDown(event)
 })
@@ -1206,7 +1630,7 @@ renderer.domElement.addEventListener("wheel", event => {
 }, { passive: false })
 
 window.addEventListener("keyup", event => {
-	if (event.key === "Escape" && focusedPlot && !els.generateModal.open) exitFocus()
+	if (event.key === "Escape" && focusedPlot && !singlePlotMode && !els.generateModal.open) exitFocus()
 })
 
 window.addEventListener("resize", () => {
@@ -1223,6 +1647,21 @@ els.exitFocus.addEventListener("click", exitFocus)
 els.showColliders?.addEventListener("change", () => {
 	showColliders = els.showColliders.checked
 	applyColliderVisibility()
+})
+
+els.showSplatBox?.addEventListener("change", () => {
+	showSplatBox = els.showSplatBox.checked
+	applyBoundsVisibility()
+})
+
+els.showFloor?.addEventListener("change", () => {
+	showFloor = els.showFloor.checked
+	applyFloorVisibility()
+})
+
+els.showSplatFloor?.addEventListener("change", () => {
+	showSplatFloor = els.showSplatFloor.checked
+	applySplatFloorVisibility()
 })
 
 els.generate.addEventListener("click", () => {
@@ -1259,8 +1698,14 @@ function animate(time) {
 }
 
 setActiveTool("pointer")
-plots.syncPlus()
-updateOverviewCamera()
-syncGenerateButton()
-syncFocusUi()
+if (singlePlotMode) {
+	// Boot straight into a single, already-focused plot (focusPlot handles the
+	// plus-tile suppression, camera, and UI sync).
+	focusPlot(plots.add(0, 0))
+} else {
+	plots.syncPlus()
+	updateOverviewCamera()
+	syncGenerateButton()
+	syncFocusUi()
+}
 requestAnimationFrame(animate)
