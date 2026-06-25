@@ -11,6 +11,10 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	// linear space and the captured colours look noticeably darker than the client.
 	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
 	const hidden = hideOtherPlots(plot)
+	// Lattice mode: hide the ground tile so the guide (and the splat Tripo builds from it)
+	// has no floor — just the objects. Restored at the end with everything else.
+	const groundWasVisible = plot.ground.visible
+	if (options.noFloor) plot.ground.visible = false
 	const materialSwap = applyFlatMaterials(plot)
 
 	const spark = scene.userData.sparkRenderer
@@ -48,6 +52,7 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	for (const object of outlines) object.visible = true
 	for (const helper of helpers) if (helper) helper.visible = true
 	restoreMaterials(materialSwap)
+	plot.ground.visible = groundWasVisible
 	for (const [object, visible] of hidden) object.visible = visible
 	target.dispose()
 	restore(camera, renderer, original)
@@ -90,7 +95,7 @@ function addOrientMarkers(plot) {
 function addEdges(plot) {
 	const edges = []
 	for (const mesh of plot.meshesForCapture()) {
-		if (!mesh.geometry) continue
+		if (!mesh.geometry || !mesh.visible) continue
 		const edge = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), edgeMaterial)
 		edge.position.copy(mesh.position)
 		edge.quaternion.copy(mesh.quaternion)
@@ -105,7 +110,7 @@ function addEdges(plot) {
 function applyFlatMaterials(plot) {
 	const swaps = []
 	for (const mesh of plot.meshesForCapture()) {
-		if (!mesh.material) continue
+		if (!mesh.material || !mesh.visible) continue
 		const original = mesh.material
 		const source = Array.isArray(original) ? original[0] : original
 		const color = source?.color?.clone?.() ?? new THREE.Color(0x888888)

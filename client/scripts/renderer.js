@@ -993,7 +993,7 @@ async function generateSelected(prompt) {
 			plot.state = "generating"
 			setStatus(targets.length === 1 ? "Generating" : `Generating ${index + 1}/${targets.length}`)
 			if (wasGenerated) plot.setDraftVisible(true)
-			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean), { markers: CULL.orient && CULL.markers })
+			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean), { markers: CULL.orient && CULL.markers, noFloor: CULL.noFloor })
 			if (wasGenerated) plot.setDraftVisible(false)
 			const bytes = await generatePlot({
 				prompt,

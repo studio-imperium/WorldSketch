@@ -326,6 +326,11 @@ func imagePrompt(userPrompt, groundColor string) string {
 	if prompt == "" {
 		prompt = "a coherent stylized natural game environment"
 	}
+	// Lattice mode: the cube has no floor. Drop every ground/baseplate instruction and
+	// tell the model to render ONLY the objects as floating assets on transparency.
+	if envBool("WS_NO_FLOOR", false) {
+		return "Re-texture this isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Image 1 is the strict geometry guide with readable edges. Image 2, when provided, is a flat unlit material-ID map: surfaces sharing a flat input color must keep one material family and hue. Treat the blockout as a STRICT geometric reference: every object keeps its exact size, height, thickness, footprint, proportions, position, and silhouette — do not move, add, remove, resize, reshape, or reimagine anything. There is NO ground, NO floor, NO baseplate, NO base slab, NO platform, and NO pedestal: render only the objects themselves as floating assets. The area around, between, and UNDER the objects must be completely empty and transparent — no background, walls, sky, horizon, fog, scenery, shadows, or contact plates. Render as shadowless albedo/reference material: flat, even, fully ambient illumination, no cast or contact shadows, no ambient occlusion, no directional sunlight. Frame the objects tightly so they fill the canvas with no empty padding or transparent margin around their bounding box (the splat is scaled to the canvas, so padding breaks scale). No UI, text, frames, borders, or camera-angle changes. Scene prompt: " + prompt
+	}
 	groundInstruction := ""
 	if groundColor != "" {
 		groundInstruction = " The ground/baseplate input color is " + groundColor + "; preserve that ground hue and material category. If it is sandy, tan, yellow, beige, orange, or brown, the ground must become sand, dry soil, clay, stone, or desert terrain, never green grass. If it is green, use grass, moss, or foliage in that same green tone."
