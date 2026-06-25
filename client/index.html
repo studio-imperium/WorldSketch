@@ -41,53 +41,53 @@
 				</div>
 			</div>
 		</section>
-		<section class="generate-panel" aria-label="Generate">
+		<section class="settings-panel" aria-label="Settings">
 			<button class="btn btn-sm hidden" id="exit_focus_btn" type="button" aria-label="Exit plot focus" title="Exit plot focus">Esc</button>
-			<button class="generate-btn btn btn-square btn-primary" id="generate_btn" aria-label="Generate world" title="Generate">
-				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l1.3 3.2l3.2 1.3l-3.2 1.3l-1.3 3.2l-1.3 -3.2l-3.2 -1.3l3.2 -1.3z"></path><path d="M6.5 13l.8 2l2 .8l-2 .8l-.8 2l-.8 -2l-2 -.8l2 -.8z"></path></svg>
+			<button class="settings-btn btn btn-square" id="settings_btn" type="button" aria-label="Settings" title="Settings" aria-expanded="false" aria-controls="settings_drawer">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
 			</button>
-			<label class="retrain-upload btn btn-sm" title="Upload a .splat/.ply onto the selected plot and run the same cull/fit pipeline">
-				Upload splat
-				<input type="file" id="upload_splat_input" accept=".splat,.ply">
-			</label>
-			<label class="collider-toggle" title="Overlay the original primitive colliders on the generated splat to check how well it lines up">
-				<input type="checkbox" id="show_colliders_input" class="toggle toggle-sm">
-				<span class="text-sm">Colliders</span>
-			</label>
-			<label class="collider-toggle" title="Draw the splat's content bounding box to check how it sits relative to the plot edges">
-				<input type="checkbox" id="show_splat_box_input" class="toggle toggle-sm">
-				<span class="text-sm">Bounds</span>
-			</label>
-			<label class="collider-toggle" title="Draw a grid at the plot floor level (where the splat is seated) so the floor plane is visible at all times">
-				<input type="checkbox" id="show_floor_input" class="toggle toggle-sm">
-				<span class="text-sm">Floor</span>
-			</label>
-			<label class="collider-toggle" title="Draw a grid at the splat's DETECTED floor (what the floor-finding algorithm computed) to see where it landed vs the real ground">
-				<input type="checkbox" id="show_splat_floor_input" class="toggle toggle-sm">
-				<span class="text-sm">Splat floor</span>
-			</label>
-			<p class="status hidden text-sm text-base-content/70" id="status"></p>
-		</section>
-		<dialog class="modal" id="generate_modal">
-			<div class="modal-box generate-modal-box">
-				<form method="dialog">
-					<button class="btn btn-sm btn-circle btn-ghost absolute right-3 top-3 modal-close-btn" aria-label="Close">
-						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6l-12 12"></path><path d="M6 6l12 12"></path></svg>
-					</button>
-				</form>
-				<form id="generate_form">
-					<h2 class="text-lg font-bold" id="generate_title">Describe your scene</h2>
-					<textarea class="textarea textarea-bordered scene-prompt" id="scene_prompt" rows="5" placeholder="A mossy ruin in a quiet forest clearing, soft daylight, natural stone and grass"></textarea>
-					<div class="modal-action">
-						<button class="btn" type="button" id="cancel_generate_btn">Cancel</button>
-						<button class="generate-submit btn btn-primary" type="submit">Generate</button>
-					</div>
-				</form>
+			<div class="settings-drawer" id="settings_drawer">
+				<label class="retrain-upload btn btn-sm" title="Upload a .splat/.ply onto the selected plot and run the same cull/fit pipeline">
+					Upload splat
+					<input type="file" id="upload_splat_input" accept=".splat,.ply">
+				</label>
+				<label class="collider-toggle" title="Overlay the original primitive colliders on the generated splat to check how well it lines up">
+					<input type="checkbox" id="show_colliders_input" class="toggle toggle-sm">
+					<span class="text-sm">Colliders</span>
+				</label>
+				<label class="collider-toggle" title="Draw the splat's content bounding box to check how it sits relative to the plot edges">
+					<input type="checkbox" id="show_splat_box_input" class="toggle toggle-sm">
+					<span class="text-sm">Bounds</span>
+				</label>
+				<label class="collider-toggle" title="Draw a grid at the plot floor level (where the splat is seated) so the floor plane is visible at all times">
+					<input type="checkbox" id="show_floor_input" class="toggle toggle-sm">
+					<span class="text-sm">Floor</span>
+				</label>
+				<label class="collider-toggle" title="Draw a grid at the splat's DETECTED floor (what the floor-finding algorithm computed) to see where it landed vs the real ground">
+					<input type="checkbox" id="show_splat_floor_input" class="toggle toggle-sm">
+					<span class="text-sm">Splat floor</span>
+				</label>
 			</div>
-			<form method="dialog" class="modal-backdrop">
-				<button>close</button>
+		</section>
+		<section class="history-panel card bg-base-100 shadow-xl border border-base-300" aria-label="Generation history">
+			<div class="card-body p-2">
+				<div class="history-head">
+					<span class="history-title">History</span>
+					<button class="history-clear btn btn-ghost btn-xs" id="history_clear" type="button">Clear</button>
+				</div>
+				<p class="history-empty text-sm" id="history_empty">No generations yet</p>
+				<div class="history-list" id="history_list"></div>
+			</div>
+		</section>
+		<div class="chat-bar" id="chat_bar">
+			<p class="chat-status hidden" id="status"></p>
+			<form class="chat-row bg-base-100 shadow-xl border border-base-300" id="chat_form">
+				<textarea class="chat-input" id="chat_input" rows="1" placeholder="Describe your scene…  (↵ to generate)" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false"></textarea>
+				<button class="chat-send btn btn-square" id="chat_send" type="submit" aria-label="Generate" title="Generate">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l1.3 3.2l3.2 1.3l-3.2 1.3l-1.3 3.2l-1.3 -3.2l-3.2 -1.3l3.2 -1.3z"></path><path d="M6.5 13l.8 2l2 .8l-2 .8l-.8 2l-.8 -2l-2 -.8l2 -.8z"></path></svg>
+				</button>
 			</form>
-		</dialog>
+		</div>
 		<nav class="tool-dock join bg-base-100 shadow-xl border border-base-300" aria-label="Primitive tools">
 			<button class="tool-btn btn btn-ghost btn-square join-item active" data-tool="pointer" aria-label="Pointer" title="Pointer">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7.904 17.563a1.2 1.2 0 0 0 2.228 .308l2.09 -3.093l4.907 4.907a1.067 1.067 0 0 0 1.509 0l1.047 -1.047a1.067 1.067 0 0 0 0 -1.509l-4.907 -4.907l3.113 -2.09a1.2 1.2 0 0 0 -.309 -2.228l-13.582 -3.904l3.904 13.563"></path></svg>
