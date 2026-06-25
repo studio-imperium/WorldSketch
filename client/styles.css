@@ -228,6 +228,16 @@ button {
 	cursor: default;
 }
 
+.combine-hint {
+	max-width: 12rem;
+	line-height: 1.25;
+	color: #4a7a2e;
+	background: color-mix(in srgb, #b8ff38 16%, transparent);
+	border: 1px solid color-mix(in srgb, #b8ff38 55%, transparent);
+	border-radius: 0.45rem;
+	padding: 0.3rem 0.45rem;
+}
+
 .generate-panel > a.btn,
 .generate-panel > .retrain-upload {
 	width: 8.75rem;

@@ -67,6 +67,7 @@
 				<span class="text-sm">Splat floor</span>
 			</label>
 			<p class="status hidden text-sm text-base-content/70" id="status"></p>
+			<p class="combine-hint hidden text-sm" id="combine_hint"></p>
 		</section>
 		<dialog class="modal" id="generate_modal">
 			<div class="modal-box generate-modal-box">
@@ -113,6 +114,13 @@
 			</button>
 			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="cone" aria-label="Cone tool" title="Cone">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 17.998v-.5l-8.13 -14.99a1 1 0 0 0 -1.74 0l-8.13 14.989v.5c0 1.659 4.03 3.003 9 3.003s9 -1.344 9 -3.002"></path></svg>
+			</button>
+			<span class="dock-divider" aria-hidden="true"></span>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="selectplot" aria-label="Select plot" title="Select / switch plots — click a plot to work on it, ⌘/Ctrl-click several to combine">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h6v6h-6z"></path><path d="M14 4h6v6h-6z"></path><path d="M4 14h6v6h-6z"></path><path d="M14 14h6v6h-6z"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="addplot" aria-label="Add plot" title="Add a plot on a side — click the + on whichever side you want">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16v16h-16z"></path><path d="M12 9v6"></path><path d="M9 12h6"></path></svg>
 			</button>
 		</nav>
 	</div>

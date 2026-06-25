@@ -5,13 +5,25 @@ const captureSize = 1024
 const edgeMaterial = new THREE.LineBasicMaterial({ color: 0x151515, transparent: true, opacity: 0.58 })
 
 export async function capturePlotGuide(renderer, scene, camera, plot, helpers = [], options = {}) {
+	return captureGuide(renderer, scene, camera, { plots: [plot], center: plot.center, size: plot.size }, helpers, options)
+}
+
+// Capture a multi-plot region as ONE block-out: every member plot's ground + objects,
+// framed on their union, so a single generation can span the whole rectangle. The
+// region descriptor is { plots, center, size } where size is the max world extent used
+// for framing (== plot.size for a lone plot, so this reduces to capturePlotGuide).
+export async function captureRegionGuide(renderer, scene, camera, region, helpers = [], options = {}) {
+	return captureGuide(renderer, scene, camera, region, helpers, options)
+}
+
+async function captureGuide(renderer, scene, camera, region, helpers, options) {
 	const original = snapshot(camera, renderer)
 	// Tag the target as sRGB so Three.js applies the same linear→sRGB output encoding
 	// it does for the on-screen canvas. Without this the read-back pixels stay in
 	// linear space and the captured colours look noticeably darker than the client.
 	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
-	const hidden = hideOtherPlots(plot)
-	const materialSwap = applyFlatMaterials(plot)
+	const hidden = hideOtherPlots(region)
+	const materialSwap = applyFlatMaterials(region)
 
 	const spark = scene.userData.sparkRenderer
 	const sparkVisible = spark?.visible
@@ -26,15 +38,16 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	})
 
 	for (const helper of helpers) if (helper) helper.visible = false
-	poseIso(camera, plot)
+	poseIso(camera, region)
 	updateSky(scene, camera)
 
 	// Orientation fiducials: two adjacent-corner colour tags Tripo reconstructs so
 	// the splat's arbitrary yaw/handedness can be recovered (and then culled) on the
-	// client. See resolveOrientation in orient.js.
-	const markers = options.markers ? addOrientMarkers(plot) : []
+	// client. Single-plot captures only — multi-plot regions don't use them. See
+	// resolveOrientation in orient.js.
+	const markers = options.markers && region.plots.length === 1 ? addOrientMarkers(region.plots[0]) : []
 
-	const edges = addEdges(plot)
+	const edges = addEdges(region)
 	const guide = await captureTarget(renderer, scene, camera, target)
 	for (const object of edges) object.removeFromParent()
 	const materialMap = await captureTarget(renderer, scene, camera, target)
@@ -54,14 +67,19 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	return { guide, materialMap }
 }
 
-function hideOtherPlots(plot) {
+function regionMeshes(region) {
+	return region.plots.flatMap(plot => plot.meshesForCapture())
+}
+
+function hideOtherPlots(region) {
+	const keep = new Set(region.plots)
+	const manager = region.plots[0]?.manager
 	const hidden = []
-	for (const other of plot.manager.plots) {
-		const visible = other.group.visible
-		if (other !== plot) {
-			hidden.push([other.group, visible])
-			other.group.visible = false
-		}
+	if (!manager) return hidden
+	for (const other of manager.plots) {
+		if (keep.has(other)) continue
+		hidden.push([other.group, other.group.visible])
+		other.group.visible = false
 	}
 	return hidden
 }
@@ -87,24 +105,26 @@ function addOrientMarkers(plot) {
 	return meshes
 }
 
-function addEdges(plot) {
+function addEdges(region) {
 	const edges = []
-	for (const mesh of plot.meshesForCapture()) {
-		if (!mesh.geometry) continue
-		const edge = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), edgeMaterial)
-		edge.position.copy(mesh.position)
-		edge.quaternion.copy(mesh.quaternion)
-		edge.scale.copy(mesh.scale)
-		edge.renderOrder = 20
-		plot.group.add(edge)
-		edges.push(edge)
+	for (const plot of region.plots) {
+		for (const mesh of plot.meshesForCapture()) {
+			if (!mesh.geometry) continue
+			const edge = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), edgeMaterial)
+			edge.position.copy(mesh.position)
+			edge.quaternion.copy(mesh.quaternion)
+			edge.scale.copy(mesh.scale)
+			edge.renderOrder = 20
+			plot.group.add(edge)
+			edges.push(edge)
+		}
 	}
 	return edges
 }
 
-function applyFlatMaterials(plot) {
+function applyFlatMaterials(region) {
 	const swaps = []
-	for (const mesh of plot.meshesForCapture()) {
+	for (const mesh of regionMeshes(region)) {
 		if (!mesh.material) continue
 		const original = mesh.material
 		const source = Array.isArray(original) ? original[0] : original
@@ -127,21 +147,23 @@ function restoreMaterials(swaps) {
 	}
 }
 
-function poseIso(camera, plot) {
-	const center = plot.center
+function poseIso(camera, region) {
+	const center = region.center
 	// Capture pose = a hand-picked focus-orbit angle (read off the logCameraPose output):
-	// a spherical offset (radius, phi, theta) around the plot centre at y≈0.8, looking at
-	// that target. Matches updateFocusCamera's math so the capture reproduces exactly the
-	// view dialled in while orbiting (fov 50 included, so the framing matches too).
-	const radius = 14.69
+	// a spherical offset (radius, phi, theta) around the centre at y≈0.8, looking at that
+	// target. Matches updateFocusCamera's math so a single-plot capture reproduces exactly
+	// the view dialled in while orbiting. For a multi-plot region everything scales by
+	// size/plotSize so the whole union fills the same framing (size == 8 for a lone plot).
+	const scale = region.size / 8
+	const radius = 14.69 * scale
 	const phi = THREE.MathUtils.degToRad(46.7)
 	const theta = THREE.MathUtils.degToRad(13.3)
-	const target = new THREE.Vector3(center.x, center.y + 0.8, center.z)
+	const target = new THREE.Vector3(center.x, center.y + 0.8 * scale, center.z)
 	camera.up.set(0, 1, 0)
 	camera.fov = 50
 	camera.aspect = 1
 	camera.near = 0.03
-	camera.far = Math.max(48, plot.size * 8)
+	camera.far = Math.max(48, region.size * 8)
 	camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(radius, phi, theta)))
 	camera.lookAt(target)
 	camera.updateProjectionMatrix()
