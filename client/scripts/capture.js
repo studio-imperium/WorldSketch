@@ -130,11 +130,16 @@ function restoreMaterials(swaps) {
 function poseIso(camera, plot) {
 	const center = plot.center
 	const distance = plot.size * 1.35
+	// Horizontal camera azimuth around the plot. 45° is the symmetric isometric (a corner
+	// pointing at the camera); raising it swings the camera toward screen-left (NW) so more
+	// of the left face shows. Radius/height match the old (distance, distance) offset.
+	const azimuth = THREE.MathUtils.degToRad(60)
+	const radius = distance * Math.SQRT2
 	camera.fov = 42
 	camera.aspect = 1
 	camera.near = 0.03
 	camera.far = Math.max(48, plot.size * 8)
-	camera.position.set(center.x + distance, center.y + plot.size * 0.92, center.z + distance)
+	camera.position.set(center.x + radius * Math.cos(azimuth), center.y + plot.size * 0.92, center.z + radius * Math.sin(azimuth))
 	camera.lookAt(center.x, center.y + 0.55, center.z)
 	camera.updateProjectionMatrix()
 	camera.updateMatrixWorld(true)

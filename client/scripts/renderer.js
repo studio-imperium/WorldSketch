@@ -39,16 +39,16 @@ const accent = 0xb8ff38
 // are served at generate time by GET /api/config (WS_CULL_STRENGTH / FLOOR_PCT /
 // FIT). Everything else is a structural constant baked in below.
 const CULL = {
-	strength: 0.6, // 0 = keep everything, 1 = harshest cull. 0.6 reproduces the hand-tuned values.
+	strength: 0, // 0 = keep everything, 1 = harshest cull. 0.6 reproduces the hand-tuned values.
 	floorPct: 0.97, // ground-detection percentile; lower seats the floor higher into the cloud.
-	fit: 1.0, // render scale vs the plot footprint; 1 = true 1:1.
-	orient: true, // recover Tripo's arbitrary D4 pose and rotate the splat into plot-local space.
+	fit: 3, // render scale vs the plot footprint; 1 = true 1:1.
+	orient: false, // recover Tripo's arbitrary D4 pose and rotate the splat into plot-local space.
 	markers: false, // off-by-default fiducial fallback; default path aligns to the colliders.
-	rotate: 4, // final-stage yaw applied after the fit/seat: 1|2|3|4 -> 90*n degrees (4 = none).
-	yOffset: 0, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up).
-	floorMode: "surface", // floor detection: "surface" (robust median of column-tops, default) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile).
-	floorStrength: 0.6, // strength of an ANALYSIS-only cull used solely to measure the floor; strips backdrop/sub-ground so the estimate is clean WITHOUT culling the rendered splat. 0 = measure on the full visible cloud.
-	surfaceSigma: 2, // seat the splat's visible SURFACE (not gaussian centers) on the floor: drop the floor by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above).
+	rotate: 1, // final-stage yaw applied after the fit/seat: 1|2|3|4 -> 90*n degrees (4 = none).
+	yOffset: 0.45, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up).
+	floorMode: "none", // floor detection: "surface" (robust median of column-tops) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile); anything else (e.g. "none") = surface median.
+	floorStrength: 1, // strength of an ANALYSIS-only cull used solely to measure the floor; strips backdrop/sub-ground so the estimate is clean WITHOUT culling the rendered splat. 0 = measure on the full visible cloud.
+	surfaceSigma: 10, // seat the splat's visible SURFACE (not gaussian centers) on the floor: drop the floor by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above).
 	seatFloor: true, // pin the detected floor to the plot floor plane. false = bypass ALL floor logic and just vertically-center the content (debug/test).
 	debug: false, // log per-stage splat counts + extents to the console.
 }
@@ -73,8 +73,8 @@ const SPLAT_CROP = {
 	surfaceDensityFrac: 0.05, // surface floor-mode: a column must hold >= this fraction of the peak cell count to be trusted (ignores sparse stray columns)
 	surfaceFloorPercentile: 0.5, // surface (median) mode: percentile of the per-column tops to seat on; 0.5 = median bulk ground (robust), 1 = lowest exposed top (== surface_min)
 	// --- Derived from CULL by deriveCull(); see endpoints there ---
-	floorMode: "surface", // "surface" = lowest exposed column-top; "percentile" = legacy global quantile
-	surfaceSigma: 2, // sigma of vertical gaussian radius to offset the seat from centers to the visible surface
+	floorMode: "none", // "surface" = lowest exposed column-top; "percentile" = legacy global quantile
+	surfaceSigma: 10, // sigma of vertical gaussian radius to offset the seat from centers to the visible surface
 	opacityFloor: 0,
 	densityKeepFrac: 0,
 	radiusKeepPercentile: 1,

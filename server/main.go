@@ -97,17 +97,17 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 // into the per-stage params. Defaults here must match the CULL defaults there.
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := map[string]any{
-		"strength":      envFloat("WS_CULL_STRENGTH", 0.6),       // 0 = keep all, 1 = harshest cull
-		"floorPct":      envFloat("WS_CULL_FLOOR_PCT", 0.97),     // ground-detection percentile
-		"fit":           envFloat("WS_CULL_FIT", 1.0),            // render scale vs the plot footprint
-		"orient":        envBool("WS_ORIENT", true),              // recover Tripo's arbitrary D4 pose
-		"markers":       envBool("WS_ORIENT_MARKER", false),      // off-by-default fiducial fallback (symmetric scenes)
-		"rotate":        envFloat("WS_SPLAT_ROTATE", 4),          // final-stage yaw: 1|2|3|4 -> 90*n deg (4 = none)
-		"yOffset":       envFloat("WS_CULL_Y_OFFSET", 0),         // plot-local Y nudge applied after all transforms
-		"floorMode":     env("WS_FIND_FLOOR_MODE", "surface"),    // floor detection: "surface" (robust median of column-tops) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile)
-		"floorStrength": envFloat("WS_FLOOR_CULL_STRENGTH", 0.6), // strength of an analysis-only cull used JUST to measure the floor (strips backdrop/sub-ground); does NOT cull the rendered splat. 0 = measure on the full cloud
-		"surfaceSigma":  envFloat("WS_FLOOR_SURFACE_SIGMA", 2),   // seat the splat's visible SURFACE on the floor: offset the seat by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above)
-		"seatFloor":     envBool("WS_SEAT_FLOOR", true),          // pin the detected floor to the plot floor plane. false = bypass ALL floor logic, just vertically-center the content (debug/test)
+		"strength":      envFloat("WS_CULL_STRENGTH", 0),        // 0 = keep all, 1 = harshest cull
+		"floorPct":      envFloat("WS_CULL_FLOOR_PCT", 0.97),    // ground-detection percentile
+		"fit":           envFloat("WS_CULL_FIT", 3),             // render scale vs the plot footprint
+		"orient":        envBool("WS_ORIENT", false),            // recover Tripo's arbitrary D4 pose
+		"markers":       envBool("WS_ORIENT_MARKER", false),     // off-by-default fiducial fallback (symmetric scenes)
+		"rotate":        envFloat("WS_SPLAT_ROTATE", 1),         // final-stage yaw: 1|2|3|4 -> 90*n deg (4 = none)
+		"yOffset":       envFloat("WS_CULL_Y_OFFSET", 0.45),     // plot-local Y nudge applied after all transforms
+		"floorMode":     env("WS_FIND_FLOOR_MODE", "none"),      // floor detection: "surface" (robust median of column-tops) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile); anything else (e.g. "none") = surface median
+		"floorStrength": envFloat("WS_FLOOR_CULL_STRENGTH", 1),  // strength of an analysis-only cull used JUST to measure the floor (strips backdrop/sub-ground); does NOT cull the rendered splat. 0 = measure on the full cloud
+		"surfaceSigma":  envFloat("WS_FLOOR_SURFACE_SIGMA", 10), // seat the splat's visible SURFACE on the floor: offset the seat by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above)
+		"seatFloor":     envBool("WS_SEAT_FLOOR", true),         // pin the detected floor to the plot floor plane. false = bypass ALL floor logic, just vertically-center the content (debug/test)
 		"debug":         envBool("WS_CULL_DEBUG", false),
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -128,7 +128,7 @@ func openAIEdit(image, materialImage []byte, userPrompt, groundColor string) ([]
 	// Strictness knobs (gpt-image-1): high input fidelity keeps the blockout's
 	// proportions and color tones; transparent background stops it from painting
 	// the hallucinated backdrop wall. Set the env var empty to omit a field.
-	optField(writer, "quality", env("WS_IMAGE_QUALITY", "high"))
+	optField(writer, "quality", env("WS_IMAGE_QUALITY", "low"))
 	optField(writer, "input_fidelity", env("WS_IMAGE_FIDELITY", "high"))
 	optField(writer, "background", env("WS_IMAGE_BACKGROUND", "transparent"))
 	optField(writer, "output_format", env("WS_IMAGE_FORMAT", "png"))
@@ -262,10 +262,10 @@ func tripoGenerate(image []byte) ([]byte, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	mustField(writer, "seed", "42") // fixed seed so generations are reproducible
-	mustField(writer, "steps", env("WS_TRIPO_STEPS", "30"))
+	mustField(writer, "steps", env("WS_TRIPO_STEPS", "24"))
 	mustField(writer, "preprocess", "true")
-	mustField(writer, "guidance_scale", env("WS_TRIPO_GUIDANCE", "3.5"))
-	mustField(writer, "num_gaussians", env("WS_TRIPO_GAUSSIANS", "700000"))
+	mustField(writer, "guidance_scale", env("WS_TRIPO_GUIDANCE", "7"))
+	mustField(writer, "num_gaussians", env("WS_TRIPO_GAUSSIANS", "32768"))
 	mustField(writer, "output_format", env("WS_TRIPO_FORMAT", "splat"))
 
 	part, err := createPNGFormFile(writer, "image", "plot.png")
@@ -329,7 +329,7 @@ func imagePrompt(userPrompt, groundColor string) string {
 	if groundColor != "" {
 		groundInstruction = " The ground/baseplate input color is " + groundColor + "; preserve that ground hue and material category. If it is sandy, tan, yellow, beige, orange, or brown, the ground must become sand, dry soil, clay, stone, or desert terrain, never green grass. If it is green, use grass, moss, or foliage in that same green tone."
 	}
-	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Image 1 is the strict geometry guide with readable edges. Image 2, when provided, is a flat unlit material-ID map: use it to preserve material identity. Surfaces with the same flat input color in Image 2 must remain the same material family and same general hue/tone in the output, across the whole plot." + groundInstruction + " Treat the blockout as a STRICT geometric reference: every object must keep its exact size, height, thickness, footprint, and relative scale — match the blockout shape-for-shape. Do NOT enlarge, thicken, inflate, or change any object's proportions or aspect ratio. The ground base is a FLAT THIN slab: keep it thin and flat, never turn it into a tall block, plinth, or pedestal. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's position, silhouette, and the overall color tones; do not move, add, remove, resize, or reimagine objects. Material and color discipline is critical: every surface that has the same input color must remain the same material family and same general hue/tone in the output. If multiple ground/baseplate surfaces share the same green input color, make them one consistent grass material with only subtle texture variation, not different grass species, brightness levels, or color palettes. Replace flat primitive materials with believable detailed natural materials while matching the original hues. Render it as shadowless albedo/reference material: no cast shadows, no contact shadows, no ambient-occlusion blobs, no dark underside shadow plates, no directional sunlight, and no dramatic lighting. Use flat, even, fully ambient illumination so every surface is uniformly lit and the ground stays an even flat tone. The square base must FILL the canvas: its corners reach the image edges with NO empty padding, NO transparent margin, NO border between the base and the image edge — frame the scene tightly so the output base occupies the same screen footprint as the input base (this is critical: the splat is scaled to the canvas, so any added padding shrinks the world relative to the block-out and breaks scale alignment with the primitive colliders). The ground material and color must be UNIFORM all the way to the four edges of the square base — no color shift, no fade, no darker rim, no grass tufts only in the middle, no detail bunching, no vignette; the edge looks identical to the center so adjacent plots can tile seamlessly. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
+	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Image 1 is the strict geometry guide with readable edges. Image 2, when provided, is a flat unlit material-ID map: use it to preserve material identity. Surfaces with the same flat input color in Image 2 must remain the same material family and same general hue/tone in the output, across the whole plot." + groundInstruction + " Treat the blockout as a STRICT geometric reference: every object must keep its exact size, height, thickness, footprint, and relative scale. Do NOT enlarge, thicken, inflate, or change any object's proportions or aspect ratio. The ground base is a FLAT THIN slab: keep it thin and flat, never turn it into a tall block, plinth, or pedestal. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's position, silhouette, and the overall color tones; do not move, add, remove, resize, or reimagine objects. Material and color discipline is critical: every surface that has the same input color must remain the same material family and same general hue/tone in the output. If multiple ground/baseplate surfaces share the same green input color, make them one consistent grass material with only subtle texture variation, not different grass species, brightness levels, or color palettes. Replace flat primitive materials with believable detailed natural materials while matching the original hues. Render it as shadowless albedo/reference material: no cast shadows, no contact shadows, no ambient-occlusion blobs, no dark underside shadow plates, no directional sunlight, and no dramatic lighting. Use flat, even, fully ambient illumination so every surface is uniformly lit and the ground stays an even flat tone. The square base must FILL the canvas: its corners reach the image edges with NO empty padding, NO transparent margin, NO border between the base and the image edge — frame the scene tightly so the output base occupies the same screen footprint as the input base (this is critical: the splat is scaled to the canvas, so any added padding shrinks the world relative to the block-out and breaks scale alignment with the primitive colliders). The ground material and color must be UNIFORM all the way to the four edges of the square base — no color shift, no fade, no darker rim, no grass tufts only in the middle, no detail bunching, no vignette; the edge looks identical to the center so adjacent plots can tile seamlessly. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
 }
 
 func readOptionalFormFile(r *http.Request, name string, maxBytes int64) ([]byte, error) {
