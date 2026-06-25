@@ -154,6 +154,7 @@ const els = {
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
 	colorSwatches: [...document.querySelectorAll("[data-color]")],
 	generate: document.getElementById("generate_btn"),
+	generateAll: document.getElementById("generate_all_btn"),
 	uploadSplat: document.getElementById("upload_splat_input"),
 	exitFocus: document.getElementById("exit_focus_btn"),
 	generateModal: document.getElementById("generate_modal"),
@@ -674,6 +675,10 @@ function syncGenerateButton() {
 	const targets = generationTargets()
 	els.generate.disabled = generating || targets.length === 0
 	els.generate.classList.toggle("is-disabled", els.generate.disabled)
+	if (els.generateAll) {
+		els.generateAll.disabled = generating || generateAllTargets().length === 0
+		els.generateAll.classList.toggle("is-disabled", els.generateAll.disabled)
+	}
 }
 
 function syncFocusUi() {
@@ -1008,8 +1013,12 @@ function focusPointerDown(event) {
 	startFocusOrbit(event)
 }
 
-async function generateSelected(prompt) {
-	const targets = generationTargets()
+// Cells eligible for "Generate all": have shapes and aren't already built.
+function generateAllTargets() {
+	return plots.plots.filter(plot => plot.primitives.length && plot.state !== "generated")
+}
+
+async function generateSelected(prompt, targets = generationTargets()) {
 	if (!targets.length) return
 
 	generating = true
@@ -1784,11 +1793,29 @@ els.showSplatFloor?.addEventListener("change", () => {
 	applySplatFloorVisibility()
 })
 
-els.generate.addEventListener("click", () => {
-	if (els.generate.disabled) return
-	els.scenePrompt.value = focusedPlot?.prompt || plots.selected()[0]?.prompt || ""
+// The cells the prompt modal will build on submit — set by whichever button opened it.
+let pendingTargets = []
+
+function openGenerateModal(targets, defaultPrompt) {
+	pendingTargets = targets
+	els.scenePrompt.value = defaultPrompt || ""
 	els.generateModal.showModal()
 	els.scenePrompt.focus()
+}
+
+els.generate.addEventListener("click", () => {
+	if (els.generate.disabled) return
+	openGenerateModal(generationTargets(), focusedPlot?.prompt || plots.selected()[0]?.prompt || "")
+})
+
+els.generateAll?.addEventListener("click", () => {
+	if (generating) return
+	const targets = generateAllTargets()
+	if (!targets.length) {
+		setStatus("No cells with shapes left to build")
+		return
+	}
+	openGenerateModal(targets, targets.find(p => p.prompt)?.prompt || "")
 })
 
 els.uploadSplat?.addEventListener("change", event => {
@@ -1803,7 +1830,7 @@ els.generateForm.addEventListener("submit", event => {
 	event.preventDefault()
 	const prompt = els.scenePrompt.value.trim()
 	els.generateModal.close()
-	generateSelected(prompt)
+	generateSelected(prompt, pendingTargets.length ? pendingTargets : generationTargets())
 })
 
 function animate(time) {
