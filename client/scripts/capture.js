@@ -54,6 +54,36 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	return { guide, materialMap }
 }
 
+// "Snip & edit" capture: an isometric photo of the plot AS IT CURRENTLY RENDERS
+// (the generated splat stays visible), framed exactly like capturePlotGuide so the
+// edited + rebuilt splat re-seats on the same plot. Unlike the guide, this keeps the
+// spark renderer on and skips the block-out edges / flat materials / markers.
+export async function capturePlotPhoto(renderer, scene, camera, plot, helpers = []) {
+	const original = snapshot(camera, renderer)
+	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
+	const hidden = hideOtherPlots(plot)
+
+	const outlines = []
+	scene.traverse(object => {
+		if ((object.userData.isSelectionOutline || object.userData.isDebugHelper) && object.visible) {
+			outlines.push(object)
+			object.visible = false
+		}
+	})
+	for (const helper of helpers) if (helper) helper.visible = false
+
+	poseIso(camera, plot)
+	updateSky(scene, camera)
+	const photo = await captureTarget(renderer, scene, camera, target)
+
+	for (const object of outlines) object.visible = true
+	for (const helper of helpers) if (helper) helper.visible = true
+	for (const [object, visible] of hidden) object.visible = visible
+	target.dispose()
+	restore(camera, renderer, original)
+	return { photo }
+}
+
 function hideOtherPlots(plot) {
 	const hidden = []
 	for (const other of plot.manager.plots) {

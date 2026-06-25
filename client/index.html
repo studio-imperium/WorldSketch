@@ -83,6 +83,9 @@
 			<p class="chat-status hidden" id="status"></p>
 			<form class="chat-row bg-base-100 shadow-xl border border-base-300" id="chat_form">
 				<textarea class="chat-input" id="chat_input" rows="1" placeholder="Describe your scene…  (↵ to generate)" spellcheck="false" autocomplete="off" autocorrect="off" autocapitalize="off" data-gramm="false" data-gramm_editor="false" data-enable-grammarly="false" data-lt-active="false"></textarea>
+				<button class="chat-edit btn btn-square" id="chat_edit" type="button" aria-label="Snip and edit the current world" title="Snip &amp; edit the current world from the text (e.g. 'make it greener', 'add flowers')">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 21l15 -15l-3 -3l-15 15l3 3"></path><path d="M15 6l3 3"></path><path d="M9 3a2 2 0 0 0 2 2a2 2 0 0 0 -2 2a2 2 0 0 0 -2 -2a2 2 0 0 0 2 -2"></path><path d="M19 13a2 2 0 0 0 2 2a2 2 0 0 0 -2 2a2 2 0 0 0 -2 -2a2 2 0 0 0 2 -2"></path></svg>
+				</button>
 				<button class="chat-send btn btn-square" id="chat_send" type="submit" aria-label="Generate" title="Generate">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l1.3 3.2l3.2 1.3l-3.2 1.3l-1.3 3.2l-1.3 -3.2l-3.2 -1.3l3.2 -1.3z"></path><path d="M6.5 13l.8 2l2 .8l-2 .8l-.8 2l-.8 -2l-2 -.8l2 -.8z"></path></svg>
 				</button>

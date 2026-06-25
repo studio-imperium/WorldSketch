@@ -46,6 +46,10 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
 	groundColor := strings.TrimSpace(r.FormValue("ground_color"))
+	// mode "edit" = snip & edit: the input image is a render of an EXISTING plot and
+	// the prompt is an edit instruction ("make it greener"). Anything else = the
+	// default block-out re-texture flow.
+	mode := strings.TrimSpace(r.FormValue("mode"))
 	file, _, err := r.FormFile("image")
 	if err != nil {
 		http.Error(w, "missing image", http.StatusBadRequest)
@@ -67,7 +71,7 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 
 	edited := image
 	if !envBool("WS_SKIP_OPENAI", false) {
-		edited, err = openAIEdit(image, materialImage, prompt, groundColor)
+		edited, err = openAIEdit(image, materialImage, prompt, groundColor, mode)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -114,17 +118,22 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewEncoder(w).Encode(cfg)
 }
 
-func openAIEdit(image, materialImage []byte, userPrompt, groundColor string) ([]byte, error) {
+func openAIEdit(image, materialImage []byte, userPrompt, groundColor, mode string) ([]byte, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	if key == "" {
 		return nil, errors.New("OPENAI_API_KEY is not set")
+	}
+
+	promptText := imagePrompt(userPrompt, groundColor)
+	if mode == "edit" {
+		promptText = editPrompt(userPrompt, groundColor)
 	}
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	mustField(writer, "model", env("WS_IMAGE_MODEL", "gpt-image-1"))
 	mustField(writer, "size", env("WS_IMAGE_SIZE", "1024x1024"))
-	mustField(writer, "prompt", imagePrompt(userPrompt, groundColor))
+	mustField(writer, "prompt", promptText)
 	// Strictness knobs (gpt-image-1): high input fidelity keeps the blockout's
 	// proportions and color tones; transparent background stops it from painting
 	// the hallucinated backdrop wall. Set the env var empty to omit a field.
@@ -330,6 +339,23 @@ func imagePrompt(userPrompt, groundColor string) string {
 		groundInstruction = " The ground/baseplate input color is " + groundColor + "; preserve that ground hue and material category. If it is sandy, tan, yellow, beige, orange, or brown, the ground must become sand, dry soil, clay, stone, or desert terrain, never green grass. If it is green, use grass, moss, or foliage in that same green tone."
 	}
 	return "Re-texture this square isometric Three.js blockout into a single high-fidelity source image for Gaussian splatting, changing materials ONLY. Image 1 is the strict geometry guide with readable edges. Image 2, when provided, is a flat unlit material-ID map: use it to preserve material identity. Surfaces with the same flat input color in Image 2 must remain the same material family and same general hue/tone in the output, across the whole plot." + groundInstruction + " Treat the blockout as a STRICT geometric reference: every object must keep its exact size, height, thickness, footprint, and relative scale. Do NOT enlarge, thicken, inflate, or change any object's proportions or aspect ratio. The ground base is a FLAT THIN slab: keep it thin and flat, never turn it into a tall block, plinth, or pedestal. Keep the ground base a perfect square with straight edges and square corners — never round, skew, taper, rotate, or distort it. Preserve every object's position, silhouette, and the overall color tones; do not move, add, remove, resize, or reimagine objects. Material and color discipline is critical: every surface that has the same input color must remain the same material family and same general hue/tone in the output. If multiple ground/baseplate surfaces share the same green input color, make them one consistent grass material with only subtle texture variation, not different grass species, brightness levels, or color palettes. Replace flat primitive materials with believable detailed natural materials while matching the original hues. Render it as shadowless albedo/reference material: no cast shadows, no contact shadows, no ambient-occlusion blobs, no dark underside shadow plates, no directional sunlight, and no dramatic lighting. Use flat, even, fully ambient illumination so every surface is uniformly lit and the ground stays an even flat tone. The square base must FILL the canvas: its corners reach the image edges with NO empty padding, NO transparent margin, NO border between the base and the image edge — frame the scene tightly so the output base occupies the same screen footprint as the input base (this is critical: the splat is scaled to the canvas, so any added padding shrinks the world relative to the block-out and breaks scale alignment with the primitive colliders). The ground material and color must be UNIFORM all the way to the four edges of the square base — no color shift, no fade, no darker rim, no grass tufts only in the middle, no detail bunching, no vignette; the edge looks identical to the center so adjacent plots can tile seamlessly. The area outside the square base must be completely empty and transparent: no background, no walls, no sky, no horizon, no scenery, no fog, no extra ground or floor. No UI, text, frames, borders, backdrop, or camera-angle changes. Scene prompt: " + prompt
+}
+
+// editPrompt drives the "snip & edit" flow. The input image is an isometric render
+// of an EXISTING generated plot (not a block-out), and userPrompt is an edit
+// instruction like "make it greener" or "add flowers". Apply ONLY that change and
+// preserve composition, scale, and the square iso framing so the rebuilt splat
+// re-seats on the same plot exactly like a normal generation.
+func editPrompt(userPrompt, groundColor string) string {
+	prompt := strings.TrimSpace(userPrompt)
+	if prompt == "" {
+		prompt = "subtly refine the scene while keeping it coherent"
+	}
+	groundInstruction := ""
+	if groundColor != "" {
+		groundInstruction = " Keep the ground hue close to " + groundColor + " unless the edit explicitly changes it."
+	}
+	return "This is a square isometric render of a stylized natural game-environment tile. Apply the following edit, changing ONLY what it asks and leaving everything else identical: keep the exact same camera angle, composition, layout, object positions, silhouettes, proportions, and overall scale. Do not move, resize, restyle, or remove anything the edit does not mention; add or change only what the edit requests." + groundInstruction + " The ground stays a flat, thin, perfectly square slab that FILLS the canvas edge-to-edge with no padding, border, or margin, and its material/colour stays uniform all the way to the four edges so neighbouring tiles tile seamlessly. Render it as shadowless, flat, evenly-lit albedo: no cast shadows, no contact shadows, no ambient occlusion, no directional sunlight, no dramatic lighting. The area outside the square tile must be completely empty and transparent: no background, walls, sky, horizon, or scenery. No UI, text, frames, or borders. Edit instruction: " + prompt
 }
 
 func readOptionalFormFile(r *http.Request, name string, maxBytes int64) ([]byte, error) {

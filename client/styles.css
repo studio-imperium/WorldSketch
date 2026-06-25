@@ -565,6 +565,37 @@ input[type="color"] {
 	color: #9aa1a9;
 }
 
+/* Snip & edit button — neutral so it reads as secondary next to the green Send. */
+.chat-edit {
+	flex: 0 0 auto;
+	width: 2.5rem;
+	height: 2.5rem;
+	min-height: 2.5rem;
+	background: #fff !important;
+	border: 1px solid rgba(15, 23, 42, 0.12) !important;
+	color: #2f3337 !important;
+	box-shadow: none !important;
+}
+
+.chat-edit:hover {
+	background: #f1f3f5 !important;
+}
+
+.chat-edit:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.chat-edit svg {
+	width: 1.2rem;
+	height: 1.2rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.9;
+}
+
 .chat-send {
 	flex: 0 0 auto;
 	width: 2.5rem;
