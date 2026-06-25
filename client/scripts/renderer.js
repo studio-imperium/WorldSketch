@@ -130,10 +130,11 @@ let activeColor = "#232323"
 let selectedPrimitive = null
 let placementPreview = null
 let focusedPlot = null
-// Temporary single-plot mode: boot straight into one focused plot, hide the
-// expansion ("+") tiles and the exit-focus affordance. Flip to false to restore
-// the multi-plot overview workflow.
-const singlePlotMode = true
+// Multi-plot overview workflow: boot into the overview so the expansion ("+") tiles
+// are available to add plots, click a plot to edit it, and ⌘/Ctrl-click several to
+// select them for a connected (style-matched) generation. Flip to true to lock the
+// app into a single focused plot.
+const singlePlotMode = false
 let drag = null
 let nextPrimitiveId = 1
 let generating = false
