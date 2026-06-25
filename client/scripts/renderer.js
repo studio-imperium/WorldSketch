@@ -840,18 +840,14 @@ function startOverviewPan(event) {
 function updateOverviewPan(event) {
 	const rect = renderer.domElement.getBoundingClientRect()
 	const visibleHeight = 2 * drag.distance * Math.tan(THREE.MathUtils.degToRad(camera.fov) * 0.5)
-	const unitsPerPixelY = visibleHeight / rect.height
-	const unitsPerPixelX = (visibleHeight * camera.aspect) / rect.width
-	overview.target.set(
-		drag.target.x - (event.clientX - drag.x) * unitsPerPixelX,
-		0,
-		drag.target.z - (event.clientY - drag.y) * unitsPerPixelY,
-	)
+	const dxPix = ((event.clientX - drag.x) * visibleHeight * camera.aspect) / rect.width
+	const dyPix = ((event.clientY - drag.y) * visibleHeight) / rect.height
+	// Pan in the camera's screen plane (its right/up axes) so it stays correct after
+	// orbiting — not along fixed world X/Z. Drag down/up moves vertically through the lattice.
+	overview.target.copy(drag.target)
+	overview.target.addScaledVector(scratch.setFromMatrixColumn(camera.matrixWorld, 0), -dxPix)
+	overview.target.addScaledVector(scratch.setFromMatrixColumn(camera.matrixWorld, 1), dyPix)
 	updateOverviewCamera()
-	logCameraPose("pan", {
-		target: [+overview.target.x.toFixed(2), +overview.target.z.toFixed(2)],
-		distance: +overview.distance.toFixed(2),
-	})
 }
 
 function startOverviewOrbit(event) {
