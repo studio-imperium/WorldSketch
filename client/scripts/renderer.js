@@ -46,7 +46,7 @@ const CULL = {
 	markers: false, // off-by-default fiducial fallback; default path aligns to the colliders.
 	rotate: 1, // final-stage yaw applied after the fit/seat: 1|2|3|4 -> 90*n degrees (4 = none).
 	yOffset: 0.45, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up).
-	floorMode: "none", // floor detection: "surface" (robust median of column-tops) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile); anything else (e.g. "none") = surface median.
+	floorMode: "percentile", // floor detection (default): "percentile" (global quantile) | "surface" (robust median of column-tops) | "surface_min" (lowest exposed top).
 	floorStrength: 1, // strength of an ANALYSIS-only cull used solely to measure the floor; strips backdrop/sub-ground so the estimate is clean WITHOUT culling the rendered splat. 0 = measure on the full visible cloud.
 	surfaceSigma: 10, // seat the splat's visible SURFACE (not gaussian centers) on the floor: drop the floor by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above).
 	seatFloor: true, // pin the detected floor to the plot floor plane. false = bypass ALL floor logic and just vertically-center the content (debug/test).
@@ -73,7 +73,7 @@ const SPLAT_CROP = {
 	surfaceDensityFrac: 0.05, // surface floor-mode: a column must hold >= this fraction of the peak cell count to be trusted (ignores sparse stray columns)
 	surfaceFloorPercentile: 0.5, // surface (median) mode: percentile of the per-column tops to seat on; 0.5 = median bulk ground (robust), 1 = lowest exposed top (== surface_min)
 	// --- Derived from CULL by deriveCull(); see endpoints there ---
-	floorMode: "none", // "surface" = lowest exposed column-top; "percentile" = legacy global quantile
+	floorMode: "percentile", // overwritten by deriveCull from CULL.floorMode; "percentile" = global quantile, "surface" = column-tops
 	surfaceSigma: 10, // sigma of vertical gaussian radius to offset the seat from centers to the visible surface
 	opacityFloor: 0,
 	densityKeepFrac: 0,
@@ -797,6 +797,17 @@ function updateFocusCamera() {
 	camera.updateProjectionMatrix()
 }
 
+// Debug: log the camera pose (and orbit params) on user-driven orbit/pan so a good
+// angle can be read off and reused — handy for tuning the capture camera.
+function logCameraPose(tag, extra = {}) {
+	const deg = r => +((r * 180) / Math.PI).toFixed(1)
+	console.log(`[camera ${tag}]`, {
+		pos: [+camera.position.x.toFixed(2), +camera.position.y.toFixed(2), +camera.position.z.toFixed(2)],
+		rotDeg: [deg(camera.rotation.x), deg(camera.rotation.y), deg(camera.rotation.z)],
+		...extra,
+	})
+}
+
 function startOverviewPan(event) {
 	drag = {
 		mode: "overview-pan",
@@ -820,6 +831,10 @@ function updateOverviewPan(event) {
 		drag.target.z - (event.clientY - drag.y) * unitsPerPixelY,
 	)
 	updateOverviewCamera()
+	logCameraPose("pan", {
+		target: [+overview.target.x.toFixed(2), +overview.target.z.toFixed(2)],
+		distance: +overview.distance.toFixed(2),
+	})
 }
 
 function startFocusOrbit(event) {
@@ -840,6 +855,11 @@ function updateFocusOrbit(event) {
 	focusOrbit.theta -= dx * 0.006
 	focusOrbit.phi -= dy * 0.006
 	updateFocusCamera()
+	logCameraPose("orbit", {
+		radius: +focusOrbit.radius.toFixed(2),
+		thetaDeg: +((focusOrbit.theta * 180) / Math.PI).toFixed(1),
+		phiDeg: +((focusOrbit.phi * 180) / Math.PI).toFixed(1),
+	})
 }
 
 function startPrimitiveDrag(event, mesh) {

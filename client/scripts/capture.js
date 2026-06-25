@@ -129,18 +129,21 @@ function restoreMaterials(swaps) {
 
 function poseIso(camera, plot) {
 	const center = plot.center
-	const distance = plot.size * 1.35
-	// Horizontal camera azimuth around the plot. 45° is the symmetric isometric (a corner
-	// pointing at the camera); raising it swings the camera toward screen-left (NW) so more
-	// of the left face shows. Radius/height match the old (distance, distance) offset.
-	const azimuth = THREE.MathUtils.degToRad(60)
-	const radius = distance * Math.SQRT2
-	camera.fov = 42
+	// Capture pose = a hand-picked focus-orbit angle (read off the logCameraPose output):
+	// a spherical offset (radius, phi, theta) around the plot centre at y≈0.8, looking at
+	// that target. Matches updateFocusCamera's math so the capture reproduces exactly the
+	// view dialled in while orbiting (fov 50 included, so the framing matches too).
+	const radius = 14.69
+	const phi = THREE.MathUtils.degToRad(46.7)
+	const theta = THREE.MathUtils.degToRad(13.3)
+	const target = new THREE.Vector3(center.x, center.y + 0.8, center.z)
+	camera.up.set(0, 1, 0)
+	camera.fov = 50
 	camera.aspect = 1
 	camera.near = 0.03
 	camera.far = Math.max(48, plot.size * 8)
-	camera.position.set(center.x + radius * Math.cos(azimuth), center.y + plot.size * 0.92, center.z + radius * Math.sin(azimuth))
-	camera.lookAt(center.x, center.y + 0.55, center.z)
+	camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(radius, phi, theta)))
+	camera.lookAt(target)
 	camera.updateProjectionMatrix()
 	camera.updateMatrixWorld(true)
 }
@@ -179,6 +182,7 @@ function snapshot(camera, renderer) {
 	return {
 		position: camera.position.clone(),
 		quaternion: camera.quaternion.clone(),
+		up: camera.up.clone(),
 		aspect: camera.aspect,
 		near: camera.near,
 		far: camera.far,
@@ -190,6 +194,7 @@ function snapshot(camera, renderer) {
 function restore(camera, renderer, state) {
 	camera.position.copy(state.position)
 	camera.quaternion.copy(state.quaternion)
+	camera.up.copy(state.up)
 	camera.aspect = state.aspect
 	camera.near = state.near
 	camera.far = state.far

@@ -97,17 +97,17 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 // into the per-stage params. Defaults here must match the CULL defaults there.
 func handleConfig(w http.ResponseWriter, r *http.Request) {
 	cfg := map[string]any{
-		"strength":      envFloat("WS_CULL_STRENGTH", 0),        // 0 = keep all, 1 = harshest cull
-		"floorPct":      envFloat("WS_CULL_FLOOR_PCT", 0.97),    // ground-detection percentile
-		"fit":           envFloat("WS_CULL_FIT", 3),             // render scale vs the plot footprint
-		"orient":        envBool("WS_ORIENT", false),            // recover Tripo's arbitrary D4 pose
-		"markers":       envBool("WS_ORIENT_MARKER", false),     // off-by-default fiducial fallback (symmetric scenes)
-		"rotate":        envFloat("WS_SPLAT_ROTATE", 1),         // final-stage yaw: 1|2|3|4 -> 90*n deg (4 = none)
-		"yOffset":       envFloat("WS_CULL_Y_OFFSET", 0.45),     // plot-local Y nudge applied after all transforms
-		"floorMode":     env("WS_FIND_FLOOR_MODE", "none"),      // floor detection: "surface" (robust median of column-tops) | "surface_min" (lowest exposed top) | "percentile" (legacy global quantile); anything else (e.g. "none") = surface median
-		"floorStrength": envFloat("WS_FLOOR_CULL_STRENGTH", 1),  // strength of an analysis-only cull used JUST to measure the floor (strips backdrop/sub-ground); does NOT cull the rendered splat. 0 = measure on the full cloud
-		"surfaceSigma":  envFloat("WS_FLOOR_SURFACE_SIGMA", 10), // seat the splat's visible SURFACE on the floor: offset the seat by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above)
-		"seatFloor":     envBool("WS_SEAT_FLOOR", true),         // pin the detected floor to the plot floor plane. false = bypass ALL floor logic, just vertically-center the content (debug/test)
+		"strength":      envFloat("WS_CULL_STRENGTH", 0),         // 0 = keep all, 1 = harshest cull
+		"floorPct":      envFloat("WS_CULL_FLOOR_PCT", 0.97),     // ground-detection percentile
+		"fit":           envFloat("WS_CULL_FIT", 3),              // render scale vs the plot footprint
+		"orient":        envBool("WS_ORIENT", false),             // recover Tripo's arbitrary D4 pose
+		"markers":       envBool("WS_ORIENT_MARKER", false),      // off-by-default fiducial fallback (symmetric scenes)
+		"rotate":        envFloat("WS_SPLAT_ROTATE", 1),          // final-stage yaw: 1|2|3|4 -> 90*n deg (4 = none)
+		"yOffset":       envFloat("WS_CULL_Y_OFFSET", 0.45),      // plot-local Y nudge applied after all transforms
+		"floorMode":     env("WS_FIND_FLOOR_MODE", "percentile"), // floor detection (default): "percentile" (global quantile) | "surface" (robust median of column-tops) | "surface_min" (lowest exposed top)
+		"floorStrength": envFloat("WS_FLOOR_CULL_STRENGTH", 1),   // strength of an analysis-only cull used JUST to measure the floor (strips backdrop/sub-ground); does NOT cull the rendered splat. 0 = measure on the full cloud
+		"surfaceSigma":  envFloat("WS_FLOOR_SURFACE_SIGMA", 10),  // seat the splat's visible SURFACE on the floor: offset the seat by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above)
+		"seatFloor":     envBool("WS_SEAT_FLOOR", true),          // pin the detected floor to the plot floor plane. false = bypass ALL floor logic, just vertically-center the content (debug/test)
 		"debug":         envBool("WS_CULL_DEBUG", false),
 	}
 	w.Header().Set("Content-Type", "application/json")
