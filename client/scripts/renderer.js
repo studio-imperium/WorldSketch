@@ -1226,6 +1226,26 @@ function splatBounds(keep, xs, ys, zs, floorOverride = null) {
 	}
 }
 
+// Plot-local axis-aligned bounding box of a plot's objects (the primitives, NOT the
+// ground tile). Each primitive's unit geometry bbox is transformed by its matrix
+// (position/rotation/scale) and unioned — the true box the shapes occupy in the cube.
+// Used in no-floor mode to anchor the splat to where the shapes actually are.
+function primitivesLocalAABB(plot) {
+	const box = new THREE.Box3()
+	const tmp = new THREE.Box3()
+	let any = false
+	for (const prim of plot.primitives) {
+		if (!prim.geometry) continue
+		prim.updateMatrix()
+		if (!prim.geometry.boundingBox) prim.geometry.computeBoundingBox()
+		tmp.copy(prim.geometry.boundingBox).applyMatrix4(prim.matrix)
+		box.union(tmp)
+		any = true
+	}
+	if (!any) return null
+	return { center: box.getCenter(new THREE.Vector3()), size: box.getSize(new THREE.Vector3()) }
+}
+
 // Cull a freshly-loaded Tripo splat (backdrop, fringe, out-of-tile content) IN
 // PLACE and seat it squarely in the plot, returning the same mesh (or null if
 // nothing survives — caller disposes on null). Culling in place keeps measurement
@@ -1522,10 +1542,39 @@ async function cropAndFitSplat(source, plot) {
 	packed.numSplats = kept
 	packed.needsUpdate = true
 
+	// No-floor (lattice) placement: Tripo returns the content centered + unit-normalized,
+	// so map its bounding box onto the PRIMITIVES' real plot-local box — same size and
+	// within-cube position as the shapes. Uniform scale (avg of the three axis ratios so
+	// Tripo's aspect isn't distorted), then translate so the box centers coincide. Y is
+	// flipped (negative scale) because the stored model is upside-down. Needs WS_ORIENT so
+	// the splat's axes line up with the primitives first. Falls back to filling the cube
+	// when the plot has no primitives.
+	if (CULL.noFloor) {
+		const prim = primitivesLocalAABB(plot) || {
+			center: new THREE.Vector3(0, plot.size / 2, 0),
+			size: new THREE.Vector3(plot.size, plot.size, plot.size),
+		}
+		const splatCenterY = (bounds.minY + bounds.maxY) / 2
+		const splatSpanY = Math.max(1e-3, bounds.maxY - bounds.minY)
+		const s = (prim.size.x / bounds.boxX + prim.size.y / splatSpanY + prim.size.z / bounds.boxZ) / 3
+		source.scale.set(s, -s, s)
+		source.position.set(
+			prim.center.x - s * bounds.centerX,
+			prim.center.y + s * splatCenterY,
+			prim.center.z - s * bounds.centerZ,
+		)
+		plot.splatFloorY = null
+		plot.splatBox = new THREE.Box3(
+			prim.center.clone().sub(prim.size.clone().multiplyScalar(0.5)),
+			prim.center.clone().add(prim.size.clone().multiplyScalar(0.5)),
+		)
+		return source
+	}
+
 	// seatFloor on: pin the detected floor (bounds.floorLocalY) to the plot floor plane.
 	// off (debug): bypass all floor logic and seat the content's vertical CENTER instead,
 	// so we can see where the raw splat naturally sits relative to the floor grid.
-	const seatY = (CULL.seatFloor && !CULL.noFloor) ? bounds.floorLocalY : (bounds.minY + bounds.maxY) / 2
+	const seatY = CULL.seatFloor ? bounds.floorLocalY : (bounds.minY + bounds.maxY) / 2
 	source.scale.set(renderScaleX, -renderScaleY, renderScaleZ)
 	source.position.set(
 		-bounds.centerX * renderScaleX,
@@ -1547,12 +1596,11 @@ async function cropAndFitSplat(source, plot) {
 	// The seat lands the splat exactly one content-height too high, so drop the whole
 	// splat by its own world-space height to sit the floor on the plane.
 	const splatHeight = (bounds.maxY - bounds.minY) * renderScaleY
-	if (CULL.seatFloor && !CULL.noFloor) source.position.y -= splatHeight/3
+	if (CULL.seatFloor) source.position.y -= splatHeight/3
 
 	// Final vertical nudge (WS_CULL_Y_OFFSET), applied after the seat + yaw so it's a
-	// pure plot-local Y shift independent of every other transform. Skipped with no floor —
-	// the content is already centered, so a floor nudge would just push it off-center.
-	if (!CULL.noFloor) source.position.y += CULL.yOffset
+	// pure plot-local Y shift independent of every other transform.
+	source.position.y += CULL.yOffset
 
 	// Plot-local Y the detected floor (ys = floorLocalY) lands at — the seat pins it
 	// here regardless of content, so renderScaleY cancels. Stored for the "Splat floor"
