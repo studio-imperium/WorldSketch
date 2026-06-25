@@ -48,7 +48,7 @@ const CULL = {
 	orient: false, // recover Tripo's arbitrary D4 pose and rotate the splat into plot-local space.
 	markers: false, // off-by-default fiducial fallback; default path aligns to the colliders.
 	rotate: 1, // final-stage yaw applied after the fit/seat: 1|2|3|4 -> 90*n degrees (4 = none).
-	yOffset: 0.45, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up).
+	yOffset: 0, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up). 0 = detected floor seats flush on the plot grid (where the colliders sit).
 	floorMode: "percentile", // floor detection (default): "percentile" (global quantile) | "surface" (robust median of column-tops) | "surface_min" (lowest exposed top).
 	floorStrength: 1, // strength of an ANALYSIS-only cull used solely to measure the floor; strips backdrop/sub-ground so the estimate is clean WITHOUT culling the rendered splat. 0 = measure on the full visible cloud.
 	surfaceSigma: 10, // seat the splat's visible SURFACE (not gaussian centers) on the floor: drop the floor by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above).
@@ -1712,10 +1712,12 @@ async function cropAndFitSplat(source, plot) {
 		source.position.applyQuaternion(yaw)
 	}
 
-	// The seat lands the splat exactly one content-height too high, so drop the whole
-	// splat by its own world-space height to sit the floor on the plane.
+	// The base seat already maps the surface-aware detected floor to the plot floor plane,
+	// independent of scene height. The old `-= splatHeight/3` drop scaled with total content
+	// height, so tall block-outs sank while flat scenes barely moved — that was the "seated
+	// at the wrong height" bug. Removed; the floor detection does the seating. Kept only for
+	// the debug readout below.
 	const splatHeight = (bounds.maxY - bounds.minY) * renderScaleY
-	if (CULL.seatFloor) source.position.y -= splatHeight/3
 
 	// Final vertical nudge (WS_CULL_Y_OFFSET), applied after the seat + yaw so it's a
 	// pure plot-local Y shift independent of every other transform.

@@ -103,7 +103,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"orient":        envBool("WS_ORIENT", false),             // recover Tripo's arbitrary D4 pose
 		"markers":       envBool("WS_ORIENT_MARKER", false),      // off-by-default fiducial fallback (symmetric scenes)
 		"rotate":        envFloat("WS_SPLAT_ROTATE", 1),          // final-stage yaw: 1|2|3|4 -> 90*n deg (4 = none)
-		"yOffset":       envFloat("WS_CULL_Y_OFFSET", 0.45),      // plot-local Y nudge applied after all transforms
+		"yOffset":       envFloat("WS_CULL_Y_OFFSET", 0),         // plot-local Y nudge applied after all transforms; 0 = seat flush on the plot grid
 		"floorMode":     env("WS_FIND_FLOOR_MODE", "percentile"), // floor detection (default): "percentile" (global quantile) | "surface" (robust median of column-tops) | "surface_min" (lowest exposed top)
 		"floorStrength": envFloat("WS_FLOOR_CULL_STRENGTH", 1),   // strength of an analysis-only cull used JUST to measure the floor (strips backdrop/sub-ground); does NOT cull the rendered splat. 0 = measure on the full cloud
 		"surfaceSigma":  envFloat("WS_FLOOR_SURFACE_SIGMA", 10),  // seat the splat's visible SURFACE on the floor: offset the seat by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above)
