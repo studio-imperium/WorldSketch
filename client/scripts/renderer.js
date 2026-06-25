@@ -128,10 +128,9 @@ let activeColor = "#232323"
 let selectedPrimitive = null
 let placementPreview = null
 let focusedPlot = null
-// Temporary single-plot mode: boot straight into one focused plot, hide the
-// expansion ("+") tiles and the exit-focus affordance. Flip to false to restore
-// the multi-plot overview workflow.
-const singlePlotMode = true
+// Multi-cell lattice mode: boot into overview with the "+" add-cell tiles and the
+// exit-focus affordance. Set true to lock into a single focused plot (legacy).
+const singlePlotMode = false
 let drag = null
 let nextPrimitiveId = 1
 let generating = false
@@ -281,6 +280,15 @@ class Plot {
 		this.ground.userData.plot = this
 		this.ground.userData.isGround = true
 		this.group.add(this.ground)
+		// Faint 8x8x8 cube outline so the lattice cell is legible (base on the ground tile,
+		// extends one cell-height up). Marked a debug helper so capture.js hides it.
+		this.cubeOutline = new THREE.LineSegments(
+			new THREE.EdgesGeometry(new THREE.BoxGeometry(plotSize, plotSize, plotSize)),
+			new THREE.LineBasicMaterial({ color: 0x9bb0c9, transparent: true, opacity: 0.35, depthWrite: false }),
+		)
+		this.cubeOutline.position.set(0, plotSize / 2, 0)
+		this.cubeOutline.userData.isDebugHelper = true
+		this.group.add(this.cubeOutline)
 		scene.add(this.group)
 	}
 
