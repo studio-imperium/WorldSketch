@@ -1560,20 +1560,24 @@ async function cropAndFitSplat(source, plot) {
 		// box. Guarantees same size + position even when Tripo's single-view reconstruction
 		// gets the proportions wrong (it tends to come back squat); the cost is the splat is
 		// stretched to fit, which is the right trade when matching the block-out is the goal.
-		const sx = prim.size.x / bounds.boxX
-		const sy = prim.size.y / splatSpanY
-		const sz = prim.size.z / bounds.boxZ
+		// Spark renders a SplatMesh at 1/unitScale of its Object3D scale (the floor path
+		// relies on the same WS_CULL_FIT factor: renderScale = scaleX * unitScale). So scale
+		// the box-fit by unitScale to land at the primitives' true size on screen.
+		const fit = SPLAT_CROP.unitScale
+		const sx = (prim.size.x / bounds.boxX) * fit
+		const sy = (prim.size.y / splatSpanY) * fit
+		const sz = (prim.size.z / bounds.boxZ) * fit
+		source.scale.set(sx, -sy, sz)
+		source.position.set(
+			(prim.center.x - bounds.centerX * sx),
+			(prim.center.y + splatCenterY * sy),
+			(prim.center.z - bounds.centerZ * sz),
+		)
 		if (CULL.debug) console.log("[no-floor placement]", {
 			primSize: [+prim.size.x.toFixed(3), +prim.size.y.toFixed(3), +prim.size.z.toFixed(3)],
 			splatSpan: [+bounds.boxX.toFixed(3), +splatSpanY.toFixed(3), +bounds.boxZ.toFixed(3)],
-			scale: [+sx.toFixed(3), +sy.toFixed(3), +sz.toFixed(3)],
+			fit, scale: [+sx.toFixed(2), +sy.toFixed(2), +sz.toFixed(2)],
 		})
-		source.scale.set(sx, -sy, sz)
-		source.position.set(
-			prim.center.x - sx * bounds.centerX,
-			prim.center.y + sy * splatCenterY,
-			prim.center.z - sz * bounds.centerZ,
-		)
 		plot.splatFloorY = null
 		plot.splatBox = new THREE.Box3(
 			prim.center.clone().sub(prim.size.clone().multiplyScalar(0.5)),
