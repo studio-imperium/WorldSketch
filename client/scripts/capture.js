@@ -21,9 +21,12 @@ export async function capturePlotGuide(renderer, scene, camera, plot, helpers = 
 	const sparkVisible = spark?.visible
 	if (spark) spark.visible = false
 
+	// Hide selection outlines, debug helpers (cube wireframes), AND the "+" add-cell
+	// tiles — the latter are separate scene objects, so without this they leak into the
+	// guide and the model generates around them.
 	const outlines = []
 	scene.traverse(object => {
-		if ((object.userData.isSelectionOutline || object.userData.isDebugHelper) && object.visible) {
+		if ((object.userData.isSelectionOutline || object.userData.isDebugHelper || object.userData.isPlus) && object.visible) {
 			outlines.push(object)
 			object.visible = false
 		}
@@ -133,21 +136,32 @@ function restoreMaterials(swaps) {
 }
 
 function poseIso(camera, plot) {
-	const center = plot.center
-	// Capture pose = a hand-picked focus-orbit angle (read off the logCameraPose output):
-	// a spherical offset (radius, phi, theta) around the plot centre at y≈0.8, looking at
-	// that target. Matches updateFocusCamera's math so the capture reproduces exactly the
-	// view dialled in while orbiting (fov 50 included, so the framing matches too).
-	const radius = 14.69
+	// Frame the cell's actual CONTENT (its primitives), not a fixed wide shot — so the
+	// blockout fills the canvas regardless of how big/small or where it sits in the cube.
+	// This gives the model a consistent, large subject and avoids off-frame/blank guides.
+	plot.group.updateMatrixWorld(true)
+	const box = new THREE.Box3()
+	for (const mesh of plot.primitives) if (mesh.visible) box.expandByObject(mesh)
+	const target = new THREE.Vector3()
+	let fitRadius
+	if (box.isEmpty()) {
+		target.set(plot.center.x, plot.center.y + plot.size / 2, plot.center.z)
+		fitRadius = plot.size * 0.6
+	} else {
+		box.getCenter(target)
+		fitRadius = Math.max(0.5, box.getBoundingSphere(new THREE.Sphere()).radius)
+	}
+	const fov = 50
+	// Distance that fits the content's bounding sphere in the FOV, with margin.
+	const dist = (fitRadius / Math.sin(THREE.MathUtils.degToRad(fov) / 2)) * 1.3
 	const phi = THREE.MathUtils.degToRad(46.7)
 	const theta = THREE.MathUtils.degToRad(13.3)
-	const target = new THREE.Vector3(center.x, center.y + 0.8, center.z)
 	camera.up.set(0, 1, 0)
-	camera.fov = 50
+	camera.fov = fov
 	camera.aspect = 1
 	camera.near = 0.03
-	camera.far = Math.max(48, plot.size * 8)
-	camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(radius, phi, theta)))
+	camera.far = dist + fitRadius * 4 + 10
+	camera.position.copy(target).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(dist, phi, theta)))
 	camera.lookAt(target)
 	camera.updateProjectionMatrix()
 	camera.updateMatrixWorld(true)
