@@ -108,6 +108,7 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"floorStrength": envFloat("WS_FLOOR_CULL_STRENGTH", 1),   // strength of an analysis-only cull used JUST to measure the floor (strips backdrop/sub-ground); does NOT cull the rendered splat. 0 = measure on the full cloud
 		"surfaceSigma":  envFloat("WS_FLOOR_SURFACE_SIGMA", 10),  // seat the splat's visible SURFACE on the floor: offset the seat by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above)
 		"seatFloor":     envBool("WS_SEAT_FLOOR", true),          // pin the detected floor to the plot floor plane. false = bypass ALL floor logic, just vertically-center the content (debug/test)
+		"noFloor":       envBool("WS_NO_FLOOR", false),           // lattice mode: no floor at all. Skip every floor cull/seat and just center the culled content in the cell
 		"debug":         envBool("WS_CULL_DEBUG", false),
 	}
 	w.Header().Set("Content-Type", "application/json")

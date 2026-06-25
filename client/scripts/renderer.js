@@ -50,6 +50,7 @@ const CULL = {
 	floorStrength: 1, // strength of an ANALYSIS-only cull used solely to measure the floor; strips backdrop/sub-ground so the estimate is clean WITHOUT culling the rendered splat. 0 = measure on the full visible cloud.
 	surfaceSigma: 10, // seat the splat's visible SURFACE (not gaussian centers) on the floor: drop the floor by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above).
 	seatFloor: true, // pin the detected floor to the plot floor plane. false = bypass ALL floor logic and just vertically-center the content (debug/test).
+	noFloor: false, // lattice mode: there IS no floor. Skip every floor cull/seat and just center the culled content in the cell (for per-cube 3D generation).
 	debug: false, // log per-stage splat counts + extents to the console.
 }
 
@@ -1278,7 +1279,7 @@ async function cropAndFitSplat(source, plot) {
 	const rawSpan = Math.max(1e-3, rawMaxX - rawMinX, rawMaxZ - rawMinZ)
 	const bottomY = percentile(ys.slice().sort(), SPLAT_CROP.bottomCullPercentile)
 	const bottomLimitY = bottomY + SPLAT_CROP.bottomCullSlack * rawSpan
-	for (let i = 0; i < total; i++) if (ys[i] > bottomLimitY) keep[i] = 0
+	if (!CULL.noFloor) for (let i = 0; i < total; i++) if (ys[i] > bottomLimitY) keep[i] = 0
 
 	// 1. Protected core: the inner radiusKeepPercentile of splats (by distance from
 	//    the content center) are kept unconditionally. Opacity + density culling
@@ -1396,9 +1397,11 @@ async function cropAndFitSplat(source, plot) {
 	const groundY = percentile(keptY, SPLAT_CROP.groundPercentile)
 	const ceilY = groundY - SPLAT_CROP.heightCapFactor * span // world-up = lower stored-Y
 	const underY = groundY + SPLAT_CROP.belowGroundFactor * span
-	for (let i = 0; i < total; i++) {
-		if (!keep[i]) continue
-		if (ys[i] < ceilY || ys[i] > underY) keep[i] = 0
+	if (!CULL.noFloor) {
+		for (let i = 0; i < total; i++) {
+			if (!keep[i]) continue
+			if (ys[i] < ceilY || ys[i] > underY) keep[i] = 0
+		}
 	}
 
 	// 4b. Orientation: Tripo lands the cloud at an arbitrary D4 pose (one of 4 yaws x
@@ -1458,7 +1461,7 @@ async function cropAndFitSplat(source, plot) {
 	//    upward, so anything taller than perimeterFloorBand is a real object and is
 	//    left intact even where it overhangs the tile edge; only the ground sheet /
 	//    backdrop skirt at the perimeter gets cropped.
-	if (SPLAT_CROP.tile) {
+	if (SPLAT_CROP.tile && !CULL.noFloor) {
 		const half = fill / 2
 		let hMax = SPLAT_CROP.edgeThickness
 		for (let i = 0; i < total; i++) if (keep[i]) hMax = Math.max(hMax, roughY(i))
@@ -1522,7 +1525,7 @@ async function cropAndFitSplat(source, plot) {
 	// seatFloor on: pin the detected floor (bounds.floorLocalY) to the plot floor plane.
 	// off (debug): bypass all floor logic and seat the content's vertical CENTER instead,
 	// so we can see where the raw splat naturally sits relative to the floor grid.
-	const seatY = CULL.seatFloor ? bounds.floorLocalY : (bounds.minY + bounds.maxY) / 2
+	const seatY = (CULL.seatFloor && !CULL.noFloor) ? bounds.floorLocalY : (bounds.minY + bounds.maxY) / 2
 	source.scale.set(renderScaleX, -renderScaleY, renderScaleZ)
 	source.position.set(
 		-bounds.centerX * renderScaleX,
@@ -1544,11 +1547,12 @@ async function cropAndFitSplat(source, plot) {
 	// The seat lands the splat exactly one content-height too high, so drop the whole
 	// splat by its own world-space height to sit the floor on the plane.
 	const splatHeight = (bounds.maxY - bounds.minY) * renderScaleY
-	if (CULL.seatFloor) source.position.y -= splatHeight/3
+	if (CULL.seatFloor && !CULL.noFloor) source.position.y -= splatHeight/3
 
 	// Final vertical nudge (WS_CULL_Y_OFFSET), applied after the seat + yaw so it's a
-	// pure plot-local Y shift independent of every other transform.
-	source.position.y += CULL.yOffset
+	// pure plot-local Y shift independent of every other transform. Skipped with no floor —
+	// the content is already centered, so a floor nudge would just push it off-center.
+	if (!CULL.noFloor) source.position.y += CULL.yOffset
 
 	// Plot-local Y the detected floor (ys = floorLocalY) lands at — the seat pins it
 	// here regardless of content, so renderScaleY cancels. Stored for the "Splat floor"
