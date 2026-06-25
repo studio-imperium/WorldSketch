@@ -5,11 +5,14 @@ import { capturePlotGuide, captureRegionGuide } from "/scripts/capture.js"
 import { resolveOrientation, orientArrays, orientCenter, orientQuaternion, isIdentity } from "/scripts/orient.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, createSquareFrameOutline, disposeObject } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
+import { addGeneration, clearGenerations, deleteGeneration, getGenerationBytes, latestForPlot, listGenerations } from "/scripts/history.js"
 
 const root = document.getElementById("canvas")
 const scene = new THREE.Scene()
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 200)
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+// preserveDrawingBuffer keeps the last rendered frame readable so captureThumb can
+// snapshot a generation for the history gallery via canvas.toDataURL().
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true })
 const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
@@ -148,14 +151,16 @@ const els = {
 	combineHint: document.getElementById("combine_hint"),
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
 	colorSwatches: [...document.querySelectorAll("[data-color]")],
-	generate: document.getElementById("generate_btn"),
 	uploadSplat: document.getElementById("upload_splat_input"),
 	exitFocus: document.getElementById("exit_focus_btn"),
-	generateModal: document.getElementById("generate_modal"),
-	generateForm: document.getElementById("generate_form"),
-	generateTitle: document.getElementById("generate_title"),
-	cancelGenerate: document.getElementById("cancel_generate_btn"),
-	scenePrompt: document.getElementById("scene_prompt"),
+	settingsBtn: document.getElementById("settings_btn"),
+	settingsDrawer: document.getElementById("settings_drawer"),
+	chatForm: document.getElementById("chat_form"),
+	chatInput: document.getElementById("chat_input"),
+	chatSend: document.getElementById("chat_send"),
+	historyList: document.getElementById("history_list"),
+	historyEmpty: document.getElementById("history_empty"),
+	historyClear: document.getElementById("history_clear"),
 	showColliders: document.getElementById("show_colliders_input"),
 	showSplatBox: document.getElementById("show_splat_box_input"),
 	showFloor: document.getElementById("show_floor_input"),
@@ -674,6 +679,9 @@ function focusPlot(plot) {
 	syncPlacementPreview()
 	syncGenerateButton()
 	syncFocusUi()
+	// Seed the composer with this plot's last prompt (if any) so re-generating is a
+	// quick tweak; only when empty so we don't clobber something half-typed.
+	if (els.chatInput && !els.chatInput.value) els.chatInput.value = plot.prompt || ""
 	updateFocusCamera()
 }
 
@@ -700,8 +708,8 @@ function generationTargets() {
 
 function syncGenerateButton() {
 	const targets = generationTargets()
-	els.generate.disabled = generating || targets.length === 0
-	els.generate.classList.toggle("is-disabled", els.generate.disabled)
+	if (els.chatSend) els.chatSend.disabled = generating || targets.length === 0
+	if (els.chatInput) els.chatInput.disabled = generating
 	syncCombineHint()
 }
 
@@ -1220,7 +1228,9 @@ async function generatePerPlot(targets, prompt, groundColor, anchorGenId) {
 				groundColor,
 				referenceId: anchorGenId,
 			})
+			const rawCopy = bytes.slice()
 			await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.raw.splat` })
+			await saveGeneration(plot, prompt, rawCopy)
 			if (genId) {
 				plot.genId = genId
 				if (!anchorGenId) anchorGenId = genId // first render becomes the anchor the rest match
@@ -1318,8 +1328,10 @@ async function uploadSplatToPlot(file) {
 
 	try {
 		const bytes = new Uint8Array(await file.arrayBuffer())
+		const rawCopy = bytes.slice()
 		plot.state = "generating"
 		await applySplatBytes(bytes, plot, { fileName: file.name })
+		await saveGeneration(plot, file.name, rawCopy)
 		setStatus("")
 	} catch (error) {
 		setStatus(error.message)
@@ -1327,6 +1339,160 @@ async function uploadSplatToPlot(file) {
 		generating = false
 		syncGenerateButton()
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Generation history + state persistence
+// ---------------------------------------------------------------------------
+
+// Snapshot the current 3D viewport to a small JPEG data URL for the gallery. Relies
+// on preserveDrawingBuffer (set on the renderer); we force one render first so the
+// just-seated splat is in the buffer. Returns "" if the capture fails.
+function captureThumb(maxWidth = 320) {
+	try {
+		renderer.render(scene, camera)
+		const src = renderer.domElement
+		const scale = Math.min(1, maxWidth / src.width)
+		const w = Math.max(1, Math.round(src.width * scale))
+		const h = Math.max(1, Math.round(src.height * scale))
+		const canvas = document.createElement("canvas")
+		canvas.width = w
+		canvas.height = h
+		canvas.getContext("2d").drawImage(src, 0, 0, w, h)
+		return canvas.toDataURL("image/jpeg", 0.7)
+	} catch {
+		return ""
+	}
+}
+
+// Persist one generation (raw bytes already copied by the caller) + refresh the gallery.
+async function saveGeneration(plot, prompt, bytes) {
+	try {
+		const thumb = captureThumb()
+		await addGeneration({ plotId: plot.id, prompt: prompt || "", thumb, bytes })
+		await renderHistory()
+	} catch (error) {
+		console.warn("Failed to save generation to history", error)
+	}
+}
+
+function plotForId(plotId) {
+	return plots.plots.find(plot => plot.id === plotId) || null
+}
+
+// Re-seat a saved generation by re-running the same cull/fit pipeline on its raw
+// bytes. Targets the matching plot if it still exists, else the active plot.
+async function restoreGeneration(id, { seedPrompt = true } = {}) {
+	if (generating) return
+	const entry = (await listGenerations()).find(item => item.id === id)
+	const bytes = await getGenerationBytes(id)
+	if (!bytes) {
+		setStatus("Couldn't load that generation")
+		return
+	}
+	const plot = plotForId(entry?.plotId) || generationTargets()[0] || focusedPlot
+	if (!plot) {
+		setStatus("Select or focus a plot first")
+		return
+	}
+
+	generating = true
+	syncGenerateButton()
+	setStatus("Restoring")
+	await loadCullConfig()
+
+	try {
+		plot.state = "generating"
+		await applySplatBytes(bytes, plot, { prompt: entry?.prompt, fileName: `${plot.id}.history.splat` })
+		if (seedPrompt && els.chatInput && entry?.prompt) {
+			els.chatInput.value = entry.prompt
+			autoGrowChat()
+		}
+		setStatus("")
+	} catch (error) {
+		setStatus(error.message)
+	} finally {
+		generating = false
+		syncGenerateButton()
+	}
+}
+
+function escapeHtml(value) {
+	return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]))
+}
+
+function relTime(ts) {
+	const minutes = Math.floor((Date.now() - ts) / 60000)
+	if (minutes < 1) return "just now"
+	if (minutes < 60) return `${minutes}m ago`
+	const hours = Math.floor(minutes / 60)
+	if (hours < 24) return `${hours}h ago`
+	const days = Math.floor(hours / 24)
+	if (days < 7) return `${days}d ago`
+	return new Date(ts).toLocaleDateString()
+}
+
+// Rebuild the gallery list from IndexedDB (newest-first).
+async function renderHistory() {
+	if (!els.historyList) return
+	const entries = await listGenerations()
+	if (els.historyEmpty) els.historyEmpty.classList.toggle("hidden", entries.length > 0)
+	els.historyList.innerHTML = ""
+	for (const entry of entries) {
+		const item = document.createElement("button")
+		item.className = "history-item"
+		item.type = "button"
+		item.title = entry.prompt || "Untitled generation"
+		item.innerHTML = `
+			<span class="history-thumb">${entry.thumb ? `<img src="${entry.thumb}" alt="">` : ""}</span>
+			<span class="history-meta">
+				<span class="history-prompt">${escapeHtml(entry.prompt) || "Untitled"}</span>
+				<span class="history-time">${relTime(entry.ts)}</span>
+			</span>
+			<span class="history-del" role="button" aria-label="Delete" title="Delete">×</span>
+		`
+		item.addEventListener("click", event => {
+			if (event.target.closest(".history-del")) return
+			restoreGeneration(entry.id)
+		})
+		item.querySelector(".history-del").addEventListener("click", async event => {
+			event.stopPropagation()
+			await deleteGeneration(entry.id)
+			renderHistory()
+		})
+		els.historyList.appendChild(item)
+	}
+}
+
+// On boot: paint the gallery, then re-seat the most recent world per existing plot
+// so a reload brings the scene back (the "saving state" half of the feature).
+async function initHistory() {
+	await renderHistory()
+	for (const plot of plots.plots) {
+		const entry = await latestForPlot(plot.id)
+		if (entry) await restoreGeneration(entry.id, { seedPrompt: true })
+	}
+}
+
+function autoGrowChat() {
+	const input = els.chatInput
+	if (!input) return
+	input.style.height = "auto"
+	input.style.height = `${Math.min(input.scrollHeight, 120)}px`
+}
+
+function submitChat() {
+	if (generating || !els.chatInput) return
+	const prompt = els.chatInput.value.trim()
+	if (!prompt) {
+		els.chatInput.focus()
+		return
+	}
+	if (!generationTargets().length) {
+		setStatus("Select or focus a plot first")
+		return
+	}
+	generateSelected(prompt)
 }
 
 function percentile(sorted, q) {
@@ -1950,8 +2116,15 @@ renderer.domElement.addEventListener("wheel", event => {
 }, { passive: false })
 
 window.addEventListener("keyup", event => {
+	if (event.key !== "Escape") return
+	if (els.settingsDrawer?.classList.contains("open")) {
+		setSettingsOpen(false)
+		return
+	}
+	// Don't steal Escape while typing a prompt in the chat composer.
+	if (document.activeElement === els.chatInput) return
 	// Escape clears any combine multi-select back to just the active plot.
-	if (event.key === "Escape" && focusedPlot && !els.generateModal.open) {
+	if (focusedPlot) {
 		plots.clearSelection()
 		focusedPlot.setSelected(true)
 		syncGenerateButton()
@@ -1989,28 +2162,54 @@ els.showSplatFloor?.addEventListener("change", () => {
 	applySplatFloorVisibility()
 })
 
-els.generate.addEventListener("click", () => {
-	if (els.generate.disabled) return
-	const n = plots.selected().length
-	els.generateTitle.textContent = n >= 2 ? `Describe the scene for ${n} matched plots` : "Describe your scene"
-	els.scenePrompt.value = focusedPlot?.prompt || plots.selected()[0]?.prompt || ""
-	els.generateModal.showModal()
-	els.scenePrompt.focus()
-})
-
 els.uploadSplat?.addEventListener("change", event => {
 	const file = event.target.files?.[0]
 	event.target.value = "" // allow re-selecting the same file
 	uploadSplatToPlot(file)
 })
 
-els.cancelGenerate.addEventListener("click", () => els.generateModal.close())
+// Settings gear: the debug controls live in a drawer that drops out only when the
+// gear is clicked. Clicking the gear toggles it; clicking anywhere else closes it.
+function setSettingsOpen(open) {
+	if (!els.settingsDrawer) return
+	els.settingsDrawer.classList.toggle("open", open)
+	els.settingsBtn?.classList.toggle("active", open)
+	els.settingsBtn?.setAttribute("aria-expanded", String(open))
+}
 
-els.generateForm.addEventListener("submit", event => {
+els.settingsBtn?.addEventListener("click", event => {
+	event.stopPropagation()
+	setSettingsOpen(!els.settingsDrawer.classList.contains("open"))
+})
+
+document.addEventListener("pointerdown", event => {
+	if (!els.settingsDrawer?.classList.contains("open")) return
+	if (event.target.closest(".settings-panel")) return
+	setSettingsOpen(false)
+})
+
+// Inline chat composer: submit (or Enter without Shift) generates into the active
+// plot; Shift+Enter inserts a newline. The text is kept after sending so a prompt
+// can be tweaked and re-run.
+els.chatForm?.addEventListener("submit", event => {
 	event.preventDefault()
-	const prompt = els.scenePrompt.value.trim()
-	els.generateModal.close()
-	generateSelected(prompt)
+	submitChat()
+})
+
+els.chatInput?.addEventListener("keydown", event => {
+	if (event.key === "Enter" && !event.shiftKey) {
+		event.preventDefault()
+		submitChat()
+	}
+})
+
+els.chatInput?.addEventListener("input", autoGrowChat)
+
+els.historyClear?.addEventListener("click", async () => {
+	if (!(await listGenerations()).length) return
+	if (!confirm("Clear all saved generations?")) return
+	await clearGenerations()
+	renderHistory()
 })
 
 function animate(time) {
@@ -2029,3 +2228,5 @@ setActiveTool("pointer")
 // Expand, which opens focus up into the multi-plot overview.
 focusPlot(plots.add(0, 0))
 requestAnimationFrame(animate)
+// Paint the gallery and re-seat the last saved world(s) once the loop is live.
+initHistory()
