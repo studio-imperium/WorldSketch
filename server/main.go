@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
@@ -66,17 +67,25 @@ func handleGeneratePlot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	edited := image
-	if !envBool("WS_SKIP_OPENAI", false) {
-		edited, err = openAIEdit(image, materialImage, prompt, groundColor)
+	if envBool("WS_SKIP_OPENAI", false) {
+		// Image edit skipped entirely, so the raw screenshot is what's fed to Tripo.
+		// The edit step normally records the (input, prompt -> output) pair; do it here
+		// too so the original screenshot is always saved, not just the splat.
+		saveGeneration(image, materialImage, edited, prompt)
+	} else {
+		// Re-texture the block-out. WS_IMAGE_PROVIDER picks the backend: "openai"
+		// (gpt-image-1, default) or "gemini" (2.5 Flash Image) for an A/B on the same
+		// block-out + seed. Both run the identical imagePrompt and saveGeneration.
+		switch strings.ToLower(env("WS_IMAGE_PROVIDER", "openai")) {
+		case "gemini":
+			edited, err = geminiEdit(image, materialImage, prompt, groundColor)
+		default:
+			edited, err = openAIEdit(image, materialImage, prompt, groundColor)
+		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-	} else {
-		// OpenAI is skipped, so the raw screenshot is what's fed to Tripo.
-		// openAIEdit normally records the (input, prompt -> output) pair; do it
-		// here too so the original screenshot is always saved, not just the splat.
-		saveGeneration(image, materialImage, edited, prompt)
 	}
 
 	splat, err := tripoGenerate(edited)
@@ -202,6 +211,116 @@ func openAIEdit(image, materialImage []byte, userPrompt, groundColor string) ([]
 
 	saveGeneration(image, materialImage, out, userPrompt)
 	return out, nil
+}
+
+// geminiEdit re-textures the block-out with Gemini 2.5 Flash Image (the gpt-image-1
+// alternative). Same imagePrompt + image inputs as openAIEdit so the two are an
+// apples-to-apples A/B; the key is sourced via geminiAPIKey (env or the Viggle .env).
+func geminiEdit(image, materialImage []byte, userPrompt, groundColor string) ([]byte, error) {
+	key := geminiAPIKey()
+	if key == "" {
+		return nil, errors.New("GEMINI_API_KEY is not set (and not found in the Viggle backend .env)")
+	}
+	model := env("WS_GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
+
+	// Parts: the prompt, then the geometry guide, then the optional material-ID map —
+	// same order/role the imagePrompt text refers to as "Image 1" / "Image 2".
+	parts := []map[string]any{
+		{"text": imagePrompt(userPrompt, groundColor)},
+		{"inlineData": map[string]string{"mimeType": "image/png", "data": base64.StdEncoding.EncodeToString(image)}},
+	}
+	if len(materialImage) > 0 {
+		parts = append(parts, map[string]any{"inlineData": map[string]string{"mimeType": "image/png", "data": base64.StdEncoding.EncodeToString(materialImage)}})
+	}
+	payload, err := json.Marshal(map[string]any{
+		"contents":         []map[string]any{{"role": "user", "parts": parts}},
+		"generationConfig": map[string]any{"responseModalities": []string{"TEXT", "IMAGE"}},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	url := "https://generativelanguage.googleapis.com/v1beta/models/" + model + ":generateContent"
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(payload))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-goog-api-key", key)
+
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("gemini image edit failed: %s", string(data))
+	}
+
+	var parsed struct {
+		Candidates []struct {
+			Content struct {
+				Parts []struct {
+					InlineData struct {
+						Data string `json:"data"`
+					} `json:"inlineData"`
+				} `json:"parts"`
+			} `json:"content"`
+		} `json:"candidates"`
+	}
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, err
+	}
+	for _, c := range parsed.Candidates {
+		for _, p := range c.Content.Parts {
+			if p.InlineData.Data == "" {
+				continue
+			}
+			out, err := base64.StdEncoding.DecodeString(p.InlineData.Data)
+			if err != nil {
+				return nil, err
+			}
+			saveGeneration(image, materialImage, out, userPrompt)
+			return out, nil
+		}
+	}
+	return nil, errors.New("gemini image edit returned no image")
+}
+
+// geminiAPIKey resolves the Gemini key: the GEMINI_API_KEY env wins, else it is read
+// from the Viggle backend .env (the user keeps it there). Override the path with
+// WS_GEMINI_ENV_FILE; the default sits beside the WorldSketch checkout.
+func geminiAPIKey() string {
+	if k := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); k != "" {
+		return k
+	}
+	path := env("WS_GEMINI_ENV_FILE", filepath.Join(rootDir(), "..", "Viggle", "Backend", ".env"))
+	return readEnvKey(path, "GEMINI_API_KEY")
+}
+
+// readEnvKey returns the value of key from a KEY=VALUE .env file (ignoring comments,
+// an optional "export " prefix, and surrounding quotes), or "" if absent/unreadable.
+func readEnvKey(path, key string) string {
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	prefix := key + "="
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := strings.TrimPrefix(strings.TrimSpace(scanner.Text()), "export ")
+		if strings.HasPrefix(line, "#") || !strings.HasPrefix(line, prefix) {
+			continue
+		}
+		return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, prefix)), `"'`)
+	}
+	return ""
 }
 
 // saveGeneration writes the block-out guide, the GPT-image output, and the

@@ -1,0 +1,8 @@
+# score.py / splat_io.py (runs anywhere, no GPU):
+numpy>=1.24
+scipy>=1.10          # optional but ~100x faster nearest-neighbour; score.py falls back to numpy
+
+# infer.py (GPU box only — install alongside the TripoSplat repo's own requirements):
+#   torch, safetensors, pillow, tqdm, ...  -> follow TripoSplat's install instructions
+#   then: export TRIPOSPLAT_REPO=/path/to/TripoSplat
+#         export TRIPOSPLAT_CKPTS=/path/to/TripoSplat/ckpts

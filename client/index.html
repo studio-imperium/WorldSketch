@@ -23,6 +23,7 @@
 <body>
 	<div id="canvas"></div>
 	<div class="ui">
+		<div class="palette-stack">
 		<section class="color-palette card bg-base-100 shadow-xl border border-base-300" id="color_palette" aria-label="Color palette">
 			<div class="card-body p-2">
 				<div class="swatch-grid">
@@ -41,6 +42,17 @@
 				</div>
 			</div>
 		</section>
+		<section class="brush-palette card bg-base-100 shadow-xl border border-base-300" id="brush_palette" aria-label="Brush size">
+			<div class="card-body p-2">
+				<div class="brush-grid">
+					<button class="brush-swatch btn btn-ghost btn-square" data-scale="0.5" aria-label="Tiny" title="Tiny"><span style="width: 0.7rem; height: 0.7rem"></span></button>
+					<button class="brush-swatch btn btn-ghost btn-square" data-scale="0.75" aria-label="Small" title="Small"><span style="width: 0.95rem; height: 0.95rem"></span></button>
+					<button class="brush-swatch btn btn-ghost btn-square active" data-scale="1" aria-label="Medium" title="Medium"><span style="width: 1.3rem; height: 1.3rem"></span></button>
+					<button class="brush-swatch btn btn-ghost btn-square" data-scale="1.75" aria-label="Large" title="Large"><span style="width: 1.7rem; height: 1.7rem"></span></button>
+				</div>
+			</div>
+		</section>
+		</div>
 		<section class="generate-panel" aria-label="Generate">
 			<button class="btn btn-sm hidden" id="exit_focus_btn" type="button" aria-label="Exit plot focus" title="Exit plot focus">Esc</button>
 			<button class="generate-btn btn btn-square btn-primary" id="generate_btn" aria-label="Generate world" title="Generate">

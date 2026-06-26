@@ -124,6 +124,7 @@ async function loadCullConfig() {
 
 let activeTool = "pointer"
 let activeColor = "#232323"
+let activeBrushScale = 1
 let selectedPrimitive = null
 let placementPreview = null
 let focusedPlot = null
@@ -151,6 +152,7 @@ const els = {
 	status: document.getElementById("status"),
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
 	colorSwatches: [...document.querySelectorAll("[data-color]")],
+	brushSwatches: [...document.querySelectorAll("[data-scale]")],
 	generate: document.getElementById("generate_btn"),
 	uploadSplat: document.getElementById("upload_splat_input"),
 	exitFocus: document.getElementById("exit_focus_btn"),
@@ -291,7 +293,7 @@ class Plot {
 	}
 
 	addPrimitive(type, hit) {
-		const mesh = createPrimitive(type, `prim_${String(nextPrimitiveId++).padStart(3, "0")}`, { color: activeColor })
+		const mesh = createPrimitive(type, `prim_${String(nextPrimitiveId++).padStart(3, "0")}`, { color: activeColor, scaleFactor: activeBrushScale })
 		placeMeshOnSurface(mesh, hit)
 		this.group.worldToLocal(mesh.position)
 		mesh.userData.plot = this
@@ -591,7 +593,7 @@ function syncPlacementPreview() {
 	}
 	if (placementPreview?.userData.type === activeTool) return
 	if (placementPreview) disposeObject(placementPreview)
-	placementPreview = createPrimitive(activeTool, "preview", { color: activeColor })
+	placementPreview = createPrimitive(activeTool, "preview", { color: activeColor, scaleFactor: activeBrushScale })
 	placementPreview.userData.type = activeTool
 	placementPreview.material.transparent = true
 	placementPreview.material.opacity = 0.45
@@ -613,6 +615,17 @@ function applyColor(color) {
 	if (placementPreview) placementPreview.material.color.set(color)
 	for (const swatch of els.colorSwatches) {
 		swatch.classList.toggle("active", swatch.dataset.color.toLowerCase() === color.toLowerCase())
+	}
+}
+
+function applyBrushScale(scale) {
+	activeBrushScale = scale
+	// Rebuild the ghost preview at the new size so the brush choice is visible
+	// before you place anything.
+	if (placementPreview) placementPreview.userData.type = null
+	syncPlacementPreview()
+	for (const swatch of els.brushSwatches) {
+		swatch.classList.toggle("active", Number(swatch.dataset.scale) === scale)
 	}
 }
 
@@ -1661,6 +1674,7 @@ window.addEventListener("resize", () => {
 
 for (const button of els.toolButtons) button.addEventListener("click", () => setActiveTool(button.dataset.tool))
 for (const swatch of els.colorSwatches) swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
+for (const swatch of els.brushSwatches) swatch.addEventListener("click", () => applyBrushScale(Number(swatch.dataset.scale)))
 
 els.exitFocus.addEventListener("click", exitFocus)
 

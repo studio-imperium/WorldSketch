@@ -17,7 +17,10 @@ export function createPrimitive(type, id, seed = {}) {
 	mesh.userData = { id, type, locked: Boolean(seed.locked) }
 	mesh.position.fromArray(seed.position ?? [0, 0.5, 0])
 	mesh.rotation.fromArray(seed.rotation ?? [0, 0, 0])
-	mesh.scale.fromArray(seed.scale ?? defaultScale(type))
+	// `scaleFactor` uniformly scales the type's default scale, so it preserves
+	// per-type aspect ratios (e.g. the cylinder's 1:2:1). An explicit `seed.scale`
+	// still wins outright — it's used when reloading saved primitives.
+	mesh.scale.fromArray(seed.scale ?? defaultScale(type).map((v) => v * (seed.scaleFactor ?? 1)))
 	return mesh
 }
 
