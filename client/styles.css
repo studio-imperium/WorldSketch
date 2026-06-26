@@ -190,7 +190,9 @@ button {
 	border-radius: 0.85rem;
 }
 
-.generate-panel {
+/* Settings cluster (top-left): a gear button + a drawer of debug controls that
+   drops out only when the gear is clicked, so the editor stays uncluttered. */
+.settings-panel {
 	position: absolute;
 	left: 1rem;
 	top: 1rem;
@@ -202,35 +204,76 @@ button {
 	gap: 0.55rem;
 }
 
-.generate-btn {
-	justify-content: center;
-	width: 3.25rem;
-	height: 3.25rem;
-	min-height: 3.25rem;
+.settings-btn {
+	width: 2.75rem;
+	height: 2.75rem;
+	min-height: 2.75rem;
+	padding: 0;
+	background: #fff !important;
+	border: 1px solid rgba(15, 23, 42, 0.08) !important;
+	color: #2f3337 !important;
+	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
+}
+
+.settings-btn:hover {
+	background: #f1f3f5 !important;
+}
+
+.settings-btn.active {
 	background: #b8ff38 !important;
 	border-color: #b8ff38 !important;
 	color: #1f2328 !important;
-	font-weight: 800;
-	text-transform: uppercase;
-	box-shadow: none !important;
 }
 
-.generate-btn:hover {
-	background: #a8ee2d !important;
-	border-color: #a8ee2d !important;
+.settings-btn svg {
+	width: 1.45rem;
+	height: 1.45rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.9;
 }
 
-.generate-btn:disabled {
-	opacity: 0.55;
-	background: #d6d9de !important;
-	border-color: #d6d9de !important;
-	color: #7a828d !important;
-	cursor: default;
+.settings-drawer {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 0.5rem;
+	width: 12rem;
+	box-sizing: border-box;
+	padding: 0.7rem;
+	background: #fff;
+	border: 1px solid rgba(15, 23, 42, 0.08);
+	border-radius: 0.85rem;
+	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
+	transform-origin: top left;
+	transform: translateY(-0.45rem) scale(0.96);
+	opacity: 0;
+	visibility: hidden;
+	pointer-events: none;
+	transition: opacity 0.16s ease, transform 0.2s cubic-bezier(0.2, 0.8, 0.2, 1), visibility 0.2s;
 }
 
-.generate-panel > a.btn,
-.generate-panel > .retrain-upload {
-	width: 8.75rem;
+.combine-hint {
+	max-width: 12rem;
+	line-height: 1.25;
+	color: #4a7a2e;
+	background: color-mix(in srgb, #b8ff38 16%, transparent);
+	border: 1px solid color-mix(in srgb, #b8ff38 55%, transparent);
+	border-radius: 0.45rem;
+	padding: 0.3rem 0.45rem;
+}
+
+.settings-drawer.open {
+	transform: translateY(0) scale(1);
+	opacity: 1;
+	visibility: visible;
+	pointer-events: auto;
+}
+
+.settings-drawer .retrain-upload {
+	width: 100%;
 	justify-content: center;
 	text-align: center;
 	white-space: normal;
@@ -246,26 +289,6 @@ button {
 	gap: 0.4rem;
 	cursor: pointer;
 	padding: 0.15rem 0.1rem;
-}
-
-.generate-btn svg {
-	width: 1.45rem;
-	height: 1.45rem;
-	fill: none;
-	stroke: currentColor;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-	stroke-width: 1.9;
-}
-
-.modal-close-btn svg {
-	width: 1rem;
-	height: 1rem;
-	fill: none;
-	stroke: currentColor;
-	stroke-linecap: round;
-	stroke-linejoin: round;
-	stroke-width: 2.2;
 }
 
 .world-tile {
@@ -313,26 +336,6 @@ button {
 
 .world-spinner {
 	color: #1f2328;
-}
-
-.generate-modal-box {
-	max-width: 28rem;
-	background: #fff;
-	border: 1px solid rgba(15, 23, 42, 0.08);
-	border-radius: 0.85rem;
-	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
-}
-
-.scene-prompt {
-	width: 100%;
-	margin-top: 1rem;
-	resize: vertical;
-}
-
-.generate-submit {
-	background: #b8ff38 !important;
-	border-color: #b8ff38 !important;
-	color: #1f2328 !important;
 }
 
 .swatch-grid {
@@ -508,6 +511,254 @@ input[type="color"] {
 	height: 1.8rem;
 	margin: 0 0.25rem;
 	background: #d8dee4;
+}
+
+/* Inline chat composer — sits centered just above the tool-dock. Replaces the old
+   "open a modal" generate button: type a scene description and press Enter to
+   generate into the focused plot. */
+.chat-bar {
+	position: absolute;
+	left: 50%;
+	bottom: 5.1rem;
+	transform: translateX(-50%);
+	width: min(40rem, calc(100vw - 2rem));
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.45rem;
+}
+
+.chat-status {
+	margin: 0;
+	max-width: 100%;
+	padding: 0.25rem 0.7rem;
+	border-radius: 999px;
+	background: rgba(15, 23, 42, 0.78);
+	color: #fff;
+	font-size: 0.72rem;
+	font-weight: 600;
+	line-height: 1.3;
+	white-space: nowrap;
+	overflow: hidden;
+	text-overflow: ellipsis;
+}
+
+.chat-row {
+	display: flex;
+	flex-direction: row;
+	align-items: flex-end;
+	gap: 0.4rem;
+	width: 100%;
+	box-sizing: border-box;
+	padding: 0.4rem 0.4rem 0.4rem 0.7rem;
+	border-radius: 1.15rem;
+	background: #fff;
+}
+
+.chat-input {
+	flex: 1;
+	min-width: 0;
+	height: 2.5rem;
+	max-height: 7.5rem;
+	border: 0;
+	outline: 0;
+	resize: none;
+	background: transparent;
+	color: #1f2328;
+	font: inherit;
+	font-size: 0.95rem;
+	line-height: 1.4;
+	padding: 0.5rem 0.25rem;
+}
+
+.chat-input::placeholder {
+	color: #9aa1a9;
+}
+
+/* Snip & edit button — neutral so it reads as secondary next to the green Send. */
+.chat-edit {
+	flex: 0 0 auto;
+	width: 2.5rem;
+	height: 2.5rem;
+	min-height: 2.5rem;
+	background: #fff !important;
+	border: 1px solid rgba(15, 23, 42, 0.12) !important;
+	color: #2f3337 !important;
+	box-shadow: none !important;
+}
+
+.chat-edit:hover {
+	background: #f1f3f5 !important;
+}
+
+.chat-edit:disabled {
+	opacity: 0.4;
+	cursor: default;
+}
+
+.chat-edit svg {
+	width: 1.2rem;
+	height: 1.2rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.9;
+}
+
+.chat-send {
+	flex: 0 0 auto;
+	width: 2.5rem;
+	height: 2.5rem;
+	min-height: 2.5rem;
+	background: #b8ff38 !important;
+	border-color: #b8ff38 !important;
+	color: #1f2328 !important;
+	box-shadow: none !important;
+}
+
+.chat-send:hover {
+	background: #a8ee2d !important;
+	border-color: #a8ee2d !important;
+}
+
+.chat-send:disabled {
+	opacity: 0.5;
+	background: #d6d9de !important;
+	border-color: #d6d9de !important;
+	color: #7a828d !important;
+	cursor: default;
+}
+
+.chat-send svg {
+	width: 1.3rem;
+	height: 1.3rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-width: 1.9;
+}
+
+/* Generation history gallery — bottom-left card, clear of the centered chat/dock.
+   Lists saved generations newest-first; click one to re-seat that world. */
+.history-panel {
+	position: absolute;
+	left: 1rem;
+	bottom: 1rem;
+	width: 15rem;
+	max-height: 62vh;
+	box-sizing: border-box;
+	border-radius: 0.85rem;
+}
+
+.history-panel .card-body {
+	display: flex;
+	flex-direction: column;
+	gap: 0.45rem;
+	overflow: hidden;
+}
+
+.history-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.4rem;
+}
+
+.history-title {
+	font-weight: 700;
+	font-size: 0.85rem;
+	color: #1f2328;
+}
+
+.history-empty {
+	margin: 0;
+	color: #69717d;
+}
+
+.history-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.3rem;
+	overflow-y: auto;
+	max-height: 50vh;
+	padding-right: 0.15rem;
+}
+
+.history-item {
+	display: flex;
+	align-items: center;
+	gap: 0.55rem;
+	width: 100%;
+	padding: 0.35rem;
+	border: 0;
+	border-radius: 0.6rem;
+	background: #f4f5f6;
+	text-align: left;
+	cursor: pointer;
+}
+
+.history-item:hover {
+	background: #eaecef;
+}
+
+.history-thumb {
+	flex: 0 0 auto;
+	width: 2.85rem;
+	height: 2.85rem;
+	border-radius: 0.45rem;
+	overflow: hidden;
+	background: #dfe3e8;
+	display: grid;
+	place-items: center;
+}
+
+.history-thumb img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+}
+
+.history-meta {
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	gap: 0.12rem;
+}
+
+.history-prompt {
+	font-size: 0.74rem;
+	color: #1f2328;
+	line-height: 1.25;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+}
+
+.history-time {
+	font-size: 0.62rem;
+	color: #9aa1a9;
+}
+
+.history-del {
+	flex: 0 0 auto;
+	width: 1.25rem;
+	height: 1.25rem;
+	display: grid;
+	place-items: center;
+	border-radius: 0.35rem;
+	color: #9aa1a9;
+	font-size: 1.05rem;
+	line-height: 1;
+}
+
+.history-del:hover {
+	background: #dfe3e8;
+	color: #d92d20;
 }
 
 /* Plots panel — sits in the left control column, below the generate stack.
@@ -728,10 +979,12 @@ input[type="color"] {
 		overflow-x: auto;
 	}
 
-	.plots-panel {
+	.plots-panel,
+	.history-panel {
 		left: 0.75rem;
 		bottom: 0.75rem;
-		width: min(15rem, calc(100vw - 1.5rem));
+		width: min(13rem, calc(100vw - 1.5rem));
+		max-height: 40vh;
 	}
 
 	.plots-list {
@@ -755,6 +1008,12 @@ input[type="color"] {
 
 	.tool-dock {
 		bottom: 0.75rem;
+	}
+
+	/* The chat bar + full-width dock own the bottom of small screens, so hide the
+	   history gallery there to avoid overlap (it stays available on wider screens). */
+	.history-panel {
+		display: none;
 	}
 
 	/* Tool-dock spans full width at the bottom on phones — lift the plots panel

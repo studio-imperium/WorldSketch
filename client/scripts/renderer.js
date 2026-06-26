@@ -1,15 +1,18 @@
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { generatePlot } from "/scripts/api.js"
-import { capturePlotGuide } from "/scripts/capture.js"
+import { capturePlotGuide, captureRegionGuide, capturePlotPhoto } from "/scripts/capture.js"
 import { resolveOrientation, orientArrays, orientCenter, orientQuaternion, isIdentity } from "/scripts/orient.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, createSquareFrameOutline, disposeObject } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
+import { addGeneration, clearGenerations, deleteGeneration, getGenerationBytes, latestForPlot, listGenerations } from "/scripts/history.js"
 
 const root = document.getElementById("canvas")
 const scene = new THREE.Scene()
 const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.01, 200)
-const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
+// preserveDrawingBuffer keeps the last rendered frame readable so captureThumb can
+// snapshot a generation for the history gallery via canvas.toDataURL().
+const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, preserveDrawingBuffer: true })
 const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
 const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0)
@@ -45,7 +48,7 @@ const CULL = {
 	orient: false, // recover Tripo's arbitrary D4 pose and rotate the splat into plot-local space.
 	markers: false, // off-by-default fiducial fallback; default path aligns to the colliders.
 	rotate: 1, // final-stage yaw applied after the fit/seat: 1|2|3|4 -> 90*n degrees (4 = none).
-	yOffset: 0.45, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up).
+	yOffset: 0, // plot-local Y nudge applied to the seated splat AFTER all transforms (+ = up). 0 = detected floor seats flush on the plot grid (where the colliders sit).
 	floorMode: "percentile", // floor detection (default): "percentile" (global quantile) | "surface" (robust median of column-tops) | "surface_min" (lowest exposed top).
 	floorStrength: 1, // strength of an ANALYSIS-only cull used solely to measure the floor; strips backdrop/sub-ground so the estimate is clean WITHOUT culling the rendered splat. 0 = measure on the full visible cloud.
 	surfaceSigma: 10, // seat the splat's visible SURFACE (not gaussian centers) on the floor: drop the floor by this many sigma of the floor gaussians' vertical radius. 0 = seat centers (ground hovers above).
@@ -127,10 +130,6 @@ let activeColor = "#232323"
 let selectedPrimitive = null
 let placementPreview = null
 let focusedPlot = null
-// Temporary single-plot mode: boot straight into one focused plot, hide the
-// expansion ("+") tiles and the exit-focus affordance. Flip to false to restore
-// the multi-plot overview workflow.
-const singlePlotMode = true
 let drag = null
 let nextPrimitiveId = 1
 let generating = false
@@ -149,15 +148,20 @@ const focusOrbit = {
 
 const els = {
 	status: document.getElementById("status"),
+	combineHint: document.getElementById("combine_hint"),
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
 	colorSwatches: [...document.querySelectorAll("[data-color]")],
-	generate: document.getElementById("generate_btn"),
 	uploadSplat: document.getElementById("upload_splat_input"),
 	exitFocus: document.getElementById("exit_focus_btn"),
-	generateModal: document.getElementById("generate_modal"),
-	generateForm: document.getElementById("generate_form"),
-	cancelGenerate: document.getElementById("cancel_generate_btn"),
-	scenePrompt: document.getElementById("scene_prompt"),
+	settingsBtn: document.getElementById("settings_btn"),
+	settingsDrawer: document.getElementById("settings_drawer"),
+	chatForm: document.getElementById("chat_form"),
+	chatInput: document.getElementById("chat_input"),
+	chatSend: document.getElementById("chat_send"),
+	chatEdit: document.getElementById("chat_edit"),
+	historyList: document.getElementById("history_list"),
+	historyEmpty: document.getElementById("history_empty"),
+	historyClear: document.getElementById("history_clear"),
 	showColliders: document.getElementById("show_colliders_input"),
 	showSplatBox: document.getElementById("show_splat_box_input"),
 	showFloor: document.getElementById("show_floor_input"),
@@ -264,6 +268,9 @@ class Plot {
 		this.prompt = ""
 		this.primitives = []
 		this.gaussian = null
+		this.genId = null // server gen-id of this plot's latest render; passed as a style anchor so neighbours match
+		this.region = null // on a region OWNER: the descriptor {plots, owner, cols, rows, sizeX, sizeZ, offsetX, offsetZ}
+		this.coveredBy = null // on a region MEMBER: the owner plot whose single splat covers this tile
 		this.selectionOutline = null
 		this.floorHelper = null
 		this.splatFloorHelper = null
@@ -334,20 +341,54 @@ class Plot {
 		this.setSplatFloorVisible(showSplatFloor)
 	}
 
+	// Like setGenerated, but the mesh is ONE splat spanning a rectangular region of
+	// plots. Hide every member tile's draft, mark them covered by this owner, and let
+	// the owner carry the gaussian + debug overlays for the whole region.
+	setGeneratedRegion(mesh, region) {
+		if (this.gaussian) disposeObject(this.gaussian)
+		this.gaussian = mesh
+		this.region = region
+		this.group.add(mesh)
+		for (const member of region.plots) {
+			member.ground.visible = false
+			for (const primitive of member.primitives) primitive.visible = false
+			if (member !== this) {
+				member.coveredBy = this
+				member.state = "covered"
+				member.setSelected(false)
+				if (member.gaussian) {
+					disposeObject(member.gaussian)
+					member.gaussian = null
+				}
+			}
+		}
+		this.state = "generated"
+		this.setCollidersVisible(showColliders)
+		this.setBoundsVisible(showSplatBox)
+		this.setSplatFloorVisible(showSplatFloor)
+	}
+
 	setDraftVisible(visible) {
-		this.ground.visible = visible
-		for (const primitive of this.primitives) {
-			primitive.visible = visible
-			setColliderStyle(primitive, false) // back to solid for editing/capture
+		// On a region owner this drives every member tile so a rebuild re-exposes the
+		// whole block-out, not just the owner's.
+		for (const plot of this.region ? this.region.plots : [this]) {
+			plot.ground.visible = visible
+			for (const primitive of plot.primitives) {
+				primitive.visible = visible
+				setColliderStyle(primitive, false) // back to solid for editing/capture
+			}
 		}
 	}
 
-	// Overlay the original primitives as wireframe colliders on the generated splat.
+	// Overlay the original primitives as wireframe colliders on the generated splat. For
+	// a region owner this covers every member tile's primitives, not just its own.
 	setCollidersVisible(show) {
 		if (this.state !== "generated") return
-		for (const primitive of this.primitives) {
-			primitive.visible = show
-			setColliderStyle(primitive, show)
+		for (const plot of this.region ? this.region.plots : [this]) {
+			for (const primitive of plot.primitives) {
+				primitive.visible = show
+				setColliderStyle(primitive, show)
+			}
 		}
 	}
 
@@ -472,9 +513,14 @@ class PlotManager {
 	syncPlus() {
 		for (const plus of this.plus) disposeObject(plus)
 		this.plus = []
-		if (focusedPlot) return
-		for (const cell of this.availableCells()) {
-			const plus = createPlus(cell.gx, cell.gz)
+		// Plus markers are the Add-plot tool's affordance: one on each empty side of the
+		// active plot. They only appear while that tool is selected.
+		if (activeTool !== "addplot" || !focusedPlot) return
+		for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+			const gx = focusedPlot.gx + dx
+			const gz = focusedPlot.gz + dz
+			if (this.has(gx, gz)) continue
+			const plus = createPlus(gx, gz)
 			this.plus.push(plus)
 			scene.add(plus)
 		}
@@ -543,12 +589,14 @@ function setActiveTool(tool) {
 	activeTool = tool
 	if (changed) selectPrimitive(null)
 	for (const button of els.toolButtons) button.classList.toggle("active", button.dataset.tool === tool)
-	renderer.domElement.classList.toggle("is-pointer", tool === "pointer")
+	renderer.domElement.classList.toggle("is-pointer", tool === "pointer" || tool === "selectplot")
 	renderer.domElement.classList.toggle("is-eraser", tool === "eraser")
-	renderer.domElement.classList.toggle("is-placing", shapeTools.has(tool))
+	renderer.domElement.classList.toggle("is-placing", shapeTools.has(tool) || tool === "addplot")
 	renderer.domElement.classList.toggle("is-scaling", tool === "scale")
 	renderer.domElement.classList.toggle("is-rotating", tool === "rotate")
 	syncPlacementPreview()
+	plots.syncPlus() // show/hide the Add-plot side markers for the new tool
+	syncCombineHint() // the hint is tool-dependent (shown for Select-plot)
 }
 
 function setObjectFaded(object, faded) {
@@ -580,7 +628,9 @@ function setObjectFaded(object, faded) {
 }
 
 function syncPlotFocusFade() {
-	for (const plot of plots.plots) plot.setFaded(Boolean(focusedPlot && plot !== focusedPlot))
+	// Multi-plot worlds stay fully visible so you can see and click every tile; the active
+	// plot is distinguished by its selection outline, not by dimming its neighbours.
+	for (const plot of plots.plots) plot.setFaded(false)
 }
 
 function syncPlacementPreview() {
@@ -619,9 +669,8 @@ function applyColor(color) {
 function focusPlot(plot) {
 	focusedPlot = plot
 	plots.clearSelection()
+	plot.setSelected(true) // the active plot is always part of the working/build selection
 	selectPrimitive(null)
-	// No plot-level frame outline anymore — the baseplate uses the regular primitive
-	// selection outline, shown only while it's actually selected.
 	syncPlotFocusFade()
 	focusOrbit.target.set(plot.center.x, 0.8, plot.center.z)
 	focusOrbit.radius = 10
@@ -631,6 +680,9 @@ function focusPlot(plot) {
 	syncPlacementPreview()
 	syncGenerateButton()
 	syncFocusUi()
+	// Seed the composer with this plot's last prompt (if any) so re-generating is a
+	// quick tweak; only when empty so we don't clobber something half-typed.
+	if (els.chatInput && !els.chatInput.value) els.chatInput.value = plot.prompt || ""
 	updateFocusCamera()
 }
 
@@ -648,19 +700,95 @@ function exitFocus() {
 }
 
 function generationTargets() {
-	if (focusedPlot) return [focusedPlot]
-	return plots.selected()
+	// The working set = whatever's selected (the active plot is always selected, plus any
+	// ⌘-clicked for combining). Falls back to the active plot.
+	const selected = plots.selected()
+	if (selected.length) return selected
+	return focusedPlot ? [focusedPlot] : []
 }
 
 function syncGenerateButton() {
 	const targets = generationTargets()
-	els.generate.disabled = generating || targets.length === 0
-	els.generate.classList.toggle("is-disabled", els.generate.disabled)
+	if (els.chatSend) els.chatSend.disabled = generating || targets.length === 0
+	// Snip & edit only makes sense once a plot has a render to edit.
+	if (els.chatEdit) els.chatEdit.disabled = generating || targets[0]?.state !== "generated"
+	if (els.chatInput) els.chatInput.disabled = generating
+	syncCombineHint()
+}
+
+// Discoverability for matched multi-plot generation. Shown while the Select-plot tool is
+// on: tells the user that selecting several plots builds each one and matches them so the
+// seams blend.
+function syncCombineHint() {
+	if (!els.combineHint) return
+	let text = ""
+	if (!generating) {
+		const selected = plots.selected()
+		if (selected.length >= 2) {
+			text = rectRegion(selected)
+				? `${selected.length} plots selected — generated as ONE connected world so the terrain runs continuously across the seams. Hit Generate.`
+				: `${selected.length} plots selected — each generated on its own and matched so the seams blend. Hit Generate.`
+		} else if (plots.map.size > 1 && activeTool === "selectplot") {
+			text = "⌘/Ctrl-click plots to select several, then Generate — they'll be matched to tile seamlessly."
+		}
+	}
+	els.combineHint.textContent = text
+	els.combineHint.classList.toggle("hidden", !text)
+}
+
+// Select-plot tool: make a plot the active edit target and the sole selection. Keeps the
+// current orbit angle/zoom (just re-centres) so switching plots doesn't jump the camera.
+function setActivePlot(plot) {
+	focusedPlot = plot
+	plots.clearSelection()
+	plot.setSelected(true)
+	selectPrimitive(null)
+	focusOrbit.target.set(plot.center.x, 0.8, plot.center.z)
+	plots.syncPlus()
+	syncPlacementPreview()
+	syncGenerateButton()
+	updateFocusCamera()
+}
+
+// Select-plot tool, ⌘/Ctrl-click: toggle a plot in/out of the combine selection.
+function toggleCombineSelect(plot) {
+	plot.setSelected(!plot.selected)
+	syncGenerateButton()
+}
+
+// Add-plot tool: drop a fresh plot on the chosen empty side, inheriting the active plot's
+// ground colour + prompt so a later generation tiles continuously. The active plot is
+// unchanged so you can keep adding sides; the camera widens to reveal the new tile.
+function addPlotAtCell(gx, gz) {
+	const plot = plots.add(gx, gz)
+	if (focusedPlot) {
+		plot.ground.material.color.copy(focusedPlot.ground.material.color)
+		plot.prompt = focusedPlot.prompt
+	}
+	plots.syncPlus()
+	frameClusterFocus()
+	syncGenerateButton()
+}
+
+// Widen + re-centre the focus orbit so every plot is in frame (used after adding tiles).
+function frameClusterFocus() {
+	const list = plots.plots
+	if (!list.length) return
+	let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+	for (const plot of list) {
+		minX = Math.min(minX, plot.center.x - plotSize / 2)
+		maxX = Math.max(maxX, plot.center.x + plotSize / 2)
+		minZ = Math.min(minZ, plot.center.z - plotSize / 2)
+		maxZ = Math.max(maxZ, plot.center.z + plotSize / 2)
+	}
+	focusOrbit.target.set((minX + maxX) / 2, 0.8, (minZ + maxZ) / 2)
+	focusOrbit.radius = Math.max(focusOrbit.radius, Math.max(maxX - minX, maxZ - minZ) * 0.9)
+	updateFocusCamera()
 }
 
 function syncFocusUi() {
-	// In single-plot mode there's nothing to exit back to, so keep the button hidden.
-	els.exitFocus.classList.toggle("hidden", singlePlotMode || !focusedPlot)
+	// The dock-tool model stays in one continuous view, so there's no overview to exit to.
+	els.exitFocus.classList.add("hidden")
 }
 
 function setStatus(message) {
@@ -786,7 +914,7 @@ function updateOverviewCamera() {
 
 function updateFocusCamera() {
 	focusOrbit.phi = Math.max(0.12, Math.min(Math.PI * 0.48, focusOrbit.phi))
-	focusOrbit.radius = Math.max(4, Math.min(22, focusOrbit.radius))
+	focusOrbit.radius = Math.max(4, Math.min(60, focusOrbit.radius)) // allow zooming out to frame a multi-plot cluster
 	const spherical = new THREE.Spherical(focusOrbit.radius, focusOrbit.phi, focusOrbit.theta)
 	camera.up.set(0, 1, 0)
 	camera.position.copy(focusOrbit.target).add(scratch.setFromSpherical(spherical))
@@ -941,6 +1069,25 @@ function overviewPointerDown(event) {
 }
 
 function focusPointerDown(event) {
+	// Add-plot tool: click the + on the side you want to extend.
+	if (activeTool === "addplot") {
+		const plus = plusHit(event)
+		if (plus) addPlotAtCell(plus.gx, plus.gz)
+		else startFocusOrbit(event)
+		return
+	}
+	// Select-plot tool: click a plot to work on it; ⌘/Ctrl-click to pick several to combine.
+	if (activeTool === "selectplot") {
+		const plot = plotGroundHit(event)
+		if (plot) {
+			if (event.ctrlKey || event.metaKey) toggleCombineSelect(plot)
+			else setActivePlot(plot)
+		} else {
+			startFocusOrbit(event)
+		}
+		return
+	}
+
 	if (activeTool !== "pointer" && activeTool !== "scale" && activeTool !== "rotate" && activeTool !== "eraser" && !shapeTools.has(activeTool)) return
 
 	if (shapeTools.has(activeTool)) {
@@ -976,6 +1123,12 @@ function focusPointerDown(event) {
 	startFocusOrbit(event)
 }
 
+// The world's locked theme, set on the first successful generation: every later plot is
+// style-matched to this render + ground colour so the world stays visually consistent.
+// Reset to null to start a fresh theme (e.g. when the world is cleared).
+let worldThemeGenId = null
+let worldThemeGroundColor = null
+
 async function generateSelected(prompt) {
 	const targets = generationTargets()
 	if (!targets.length) return
@@ -985,46 +1138,181 @@ async function generateSelected(prompt) {
 	setStatus("Generating")
 	await loadCullConfig()
 
+	// World theme lock: once any plot is generated, every later generation reuses that first
+	// plot's ground colour AND is style-matched to its render, so the whole world keeps one
+	// consistent look instead of each generation rolling a new random theme.
+	const groundColor = worldThemeGroundColor || `#${(focusedPlot || targets[0]).ground.material.color.getHexString()}`
+	const anchorGenId = worldThemeGenId || targets.map(plot => plot.genId).find(Boolean) || null
+
 	try {
-		for (let index = 0; index < targets.length; index++) {
-			const plot = targets[index]
-			const wasGenerated = plot.state === "generated"
-			plot.state = "generating"
-			setStatus(targets.length === 1 ? "Generating" : `Generating ${index + 1}/${targets.length}`)
-			if (wasGenerated) plot.setDraftVisible(true)
-			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean), { markers: CULL.orient && CULL.markers })
-			if (wasGenerated) plot.setDraftVisible(false)
-			const bytes = await generatePlot({
-				prompt,
-				image: guide.guide,
-				materialImage: guide.materialMap,
-				groundColor: `#${plot.ground.material.color.getHexString()}`,
-			})
-			await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.raw.splat` })
-		}
-		setStatus("")
-	} catch (error) {
-		setStatus(error.message)
+		// A contiguous rectangle of 2+ selected tiles is generated as ONE splat spanning them,
+		// so the terrain is continuous across the seams. Anything else — a lone plot, or a
+		// gapped / L-shaped selection — falls back to one independent, style-matched call per
+		// tile, which blends the look but can't stitch the geometry across a boundary.
+		const region = rectRegion(targets)
+		if (region) await generateRegion(region, prompt, groundColor, anchorGenId)
+		else await generatePerPlot(targets, prompt, groundColor, anchorGenId)
 	} finally {
 		generating = false
 		syncGenerateButton()
 	}
 }
 
+// One Tripo call covering a whole rectangular region: capture every member tile's block-out
+// framed on their union, reconstruct it as a single splat, and seat that splat across all the
+// tiles (the owner = min-corner plot carries the gaussian) so the terrain runs continuously
+// over the seams. This is the only path that truly connects neighbours — independent per-tile
+// calls can't share geometry across a boundary, however well their styles are matched.
+async function generateRegion(region, prompt, groundColor, anchorGenId) {
+	if (!region.plots.some(plot => plot.primitives.length)) {
+		setStatus("Region is empty — add shapes to it first")
+		return
+	}
+	setStatus(`Generating ${region.cols}×${region.rows} region`)
+	for (const plot of region.plots) {
+		plot.state = "generating"
+		plot.setDraftVisible(true) // expose every tile's block-out for the union capture
+	}
+	try {
+		const guide = await captureRegionGuide(renderer, scene, camera, region, [placementPreview].filter(Boolean), { markers: false })
+		const { bytes, genId } = await generatePlot({
+			prompt,
+			image: guide.guide,
+			materialImage: guide.materialMap,
+			groundColor,
+			referenceId: anchorGenId,
+		})
+		await applySplatBytes(bytes, region.owner, { prompt, fileName: `region_${region.owner.id}.raw.splat`, region })
+		if (genId) {
+			region.owner.genId = genId
+			if (!worldThemeGenId) {
+				worldThemeGenId = genId // lock the world's theme to this first render
+				worldThemeGroundColor = groundColor
+			}
+		}
+		setStatus("")
+	} catch (error) {
+		// Roll the whole region back to an editable block-out so a failure never leaves it blank.
+		for (const plot of region.plots) {
+			plot.state = "draft"
+			plot.setDraftVisible(true)
+		}
+		setStatus(`Region failed — ${error.message}`)
+	}
+}
+
+// One independent, style-matched Tripo call per selected tile — used for a lone plot or any
+// non-rectangular selection. Each generation is conditioned on a style "anchor" (the first
+// render, or an already-generated plot in the batch) so the server matches its palette /
+// materials / lighting and the seams at least blend visually, even though the geometry is
+// reconstructed per tile.
+async function generatePerPlot(targets, prompt, groundColor, anchorGenId) {
+	const failures = []
+	for (let index = 0; index < targets.length; index++) {
+		const plot = targets[index]
+		// An empty tile (bare ground, no shapes) has nothing to reconstruct — the flat
+		// ground gets culled to nothing. Skip it with a clear message instead of burning
+		// an API call and silently rendering nothing.
+		if (!plot.primitives.length) {
+			failures.push(`${plot.id} is empty — add shapes to it first`)
+			continue
+		}
+		setStatus(targets.length === 1 ? "Generating" : `Generating ${index + 1}/${targets.length}`)
+		try {
+			const wasGenerated = plot.state === "generated"
+			plot.state = "generating"
+			if (wasGenerated) plot.setDraftVisible(true)
+			const guide = await capturePlotGuide(renderer, scene, camera, plot, [placementPreview].filter(Boolean), { markers: CULL.orient && CULL.markers })
+			if (wasGenerated) plot.setDraftVisible(false)
+			const { bytes, genId } = await generatePlot({
+				prompt,
+				image: guide.guide,
+				materialImage: guide.materialMap,
+				groundColor,
+				referenceId: anchorGenId,
+			})
+			const rawCopy = bytes.slice()
+			await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.raw.splat` })
+			await saveGeneration(plot, prompt, rawCopy)
+			if (genId) {
+				plot.genId = genId
+				if (!anchorGenId) anchorGenId = genId // first render becomes the anchor the rest match
+				if (!worldThemeGenId) {
+					worldThemeGenId = genId // lock the world's theme to this first render
+					worldThemeGroundColor = groundColor
+				}
+			}
+		} catch (error) {
+			// One plot failing (e.g. a flat tile with no recoverable bounds) shouldn't
+			// abort the rest of a multi-plot build — note it and roll this plot back to
+			// a visible state, then carry on.
+			failures.push(`${plot.id}: ${error.message}`)
+			if (plot.gaussian) {
+				plot.state = "generated"
+				plot.setDraftVisible(false)
+			} else {
+				plot.state = "draft"
+				plot.setDraftVisible(true)
+			}
+		}
+	}
+	setStatus(failures.length ? `Done — ${failures.length} of ${targets.length} failed (${failures.join("; ")})` : "")
+}
+
+// If the selected plots form a filled rectangle of 2+ tiles, describe it as ONE region so it
+// can be generated as a single continuous splat. Returns null for a lone plot or any gapped /
+// non-rectangular selection (those fall back to per-tile generation). offsetX/Z seat the one
+// splat on the OWNER (min-corner) plot's group, shifted to the union centre; size is the
+// square extent the iso capture frames the whole union with.
+function rectRegion(targets) {
+	if (targets.length < 2) return null
+	let minGx = Infinity, maxGx = -Infinity, minGz = Infinity, maxGz = -Infinity
+	for (const plot of targets) {
+		minGx = Math.min(minGx, plot.gx)
+		maxGx = Math.max(maxGx, plot.gx)
+		minGz = Math.min(minGz, plot.gz)
+		maxGz = Math.max(maxGz, plot.gz)
+	}
+	const cols = maxGx - minGx + 1
+	const rows = maxGz - minGz + 1
+	// targets are distinct cells inside the bounding box; matching the box's cell count means
+	// every cell is filled (no gaps), i.e. a solid rectangle.
+	if (cols * rows !== targets.length) return null
+	const owner = targets.find(plot => plot.gx === minGx && plot.gz === minGz)
+	if (!owner) return null
+	return {
+		plots: targets,
+		owner,
+		cols,
+		rows,
+		sizeX: cols * plotSize,
+		sizeZ: rows * plotSize,
+		offsetX: ((cols - 1) / 2) * plotStep,
+		offsetZ: ((rows - 1) / 2) * plotStep,
+		center: new THREE.Vector3(((minGx + maxGx) / 2) * plotStep, 0, ((minGz + maxGz) / 2) * plotStep),
+		size: Math.max(cols, rows) * plotSize,
+	}
+}
+
 // Run the cull/fit pipeline on raw splat bytes (from generation OR an upload) and
 // seat the result on the plot. Single source of truth so uploads behave exactly
 // like generated splats — handy for tuning the WS_CULL_* env knobs on a fixed file.
-async function applySplatBytes(bytes, plot, { prompt, fileName } = {}) {
+async function applySplatBytes(bytes, plot, { prompt, fileName, region } = {}) {
 	const raw = new SplatMesh({ fileBytes: bytes, fileName: fileName || `${plot.id}.raw.splat` })
 	await raw.initialized
-	// cropAndFitSplat culls + seats the SAME mesh in place and returns it (or null).
-	const splat = await cropAndFitSplat(raw, plot)
+	// cropAndFitSplat culls + seats the SAME mesh in place and returns it (or null). For a
+	// region the splat is fit to the union rectangle (sizeX×sizeZ) and shifted to the union
+	// centre (offsetX/Z) so the one mesh spans every member tile from the owner plot's group.
+	const splat = await cropAndFitSplat(raw, plot, region
+		? { sizeX: region.sizeX, sizeZ: region.sizeZ, offsetX: region.offsetX, offsetZ: region.offsetZ }
+		: {})
 	if (!splat) {
 		disposeObject(raw)
 		throw new Error("Splat loaded, but had no visible bounds after cropping.")
 	}
 	if (prompt !== undefined) plot.prompt = prompt
-	plot.setGenerated(splat)
+	if (region) plot.setGeneratedRegion(splat, region)
+	else plot.setGenerated(splat)
 }
 
 // Load a local .splat/.ply onto the focused/selected plot through the same pipeline.
@@ -1043,8 +1331,209 @@ async function uploadSplatToPlot(file) {
 
 	try {
 		const bytes = new Uint8Array(await file.arrayBuffer())
+		const rawCopy = bytes.slice()
 		plot.state = "generating"
 		await applySplatBytes(bytes, plot, { fileName: file.name })
+		await saveGeneration(plot, file.name, rawCopy)
+		setStatus("")
+	} catch (error) {
+		setStatus(error.message)
+	} finally {
+		generating = false
+		syncGenerateButton()
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Generation history + state persistence
+// ---------------------------------------------------------------------------
+
+// Snapshot the current 3D viewport to a small JPEG data URL for the gallery. Relies
+// on preserveDrawingBuffer (set on the renderer); we force one render first so the
+// just-seated splat is in the buffer. Returns "" if the capture fails.
+function captureThumb(maxWidth = 320) {
+	try {
+		renderer.render(scene, camera)
+		const src = renderer.domElement
+		const scale = Math.min(1, maxWidth / src.width)
+		const w = Math.max(1, Math.round(src.width * scale))
+		const h = Math.max(1, Math.round(src.height * scale))
+		const canvas = document.createElement("canvas")
+		canvas.width = w
+		canvas.height = h
+		canvas.getContext("2d").drawImage(src, 0, 0, w, h)
+		return canvas.toDataURL("image/jpeg", 0.7)
+	} catch {
+		return ""
+	}
+}
+
+// Persist one generation (raw bytes already copied by the caller) + refresh the gallery.
+async function saveGeneration(plot, prompt, bytes) {
+	try {
+		const thumb = captureThumb()
+		await addGeneration({ plotId: plot.id, prompt: prompt || "", thumb, bytes })
+		await renderHistory()
+	} catch (error) {
+		console.warn("Failed to save generation to history", error)
+	}
+}
+
+function plotForId(plotId) {
+	return plots.plots.find(plot => plot.id === plotId) || null
+}
+
+// Re-seat a saved generation by re-running the same cull/fit pipeline on its raw
+// bytes. Targets the matching plot if it still exists, else the active plot.
+async function restoreGeneration(id, { seedPrompt = true } = {}) {
+	if (generating) return
+	const entry = (await listGenerations()).find(item => item.id === id)
+	const bytes = await getGenerationBytes(id)
+	if (!bytes) {
+		setStatus("Couldn't load that generation")
+		return
+	}
+	const plot = plotForId(entry?.plotId) || generationTargets()[0] || focusedPlot
+	if (!plot) {
+		setStatus("Select or focus a plot first")
+		return
+	}
+
+	generating = true
+	syncGenerateButton()
+	setStatus("Restoring")
+	await loadCullConfig()
+
+	try {
+		plot.state = "generating"
+		await applySplatBytes(bytes, plot, { prompt: entry?.prompt, fileName: `${plot.id}.history.splat` })
+		if (seedPrompt && els.chatInput && entry?.prompt) {
+			els.chatInput.value = entry.prompt
+			autoGrowChat()
+		}
+		setStatus("")
+	} catch (error) {
+		setStatus(error.message)
+	} finally {
+		generating = false
+		syncGenerateButton()
+	}
+}
+
+function escapeHtml(value) {
+	return String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]))
+}
+
+function relTime(ts) {
+	const minutes = Math.floor((Date.now() - ts) / 60000)
+	if (minutes < 1) return "just now"
+	if (minutes < 60) return `${minutes}m ago`
+	const hours = Math.floor(minutes / 60)
+	if (hours < 24) return `${hours}h ago`
+	const days = Math.floor(hours / 24)
+	if (days < 7) return `${days}d ago`
+	return new Date(ts).toLocaleDateString()
+}
+
+// Rebuild the gallery list from IndexedDB (newest-first).
+async function renderHistory() {
+	if (!els.historyList) return
+	const entries = await listGenerations()
+	if (els.historyEmpty) els.historyEmpty.classList.toggle("hidden", entries.length > 0)
+	els.historyList.innerHTML = ""
+	for (const entry of entries) {
+		const item = document.createElement("button")
+		item.className = "history-item"
+		item.type = "button"
+		item.title = entry.prompt || "Untitled generation"
+		item.innerHTML = `
+			<span class="history-thumb">${entry.thumb ? `<img src="${entry.thumb}" alt="">` : ""}</span>
+			<span class="history-meta">
+				<span class="history-prompt">${escapeHtml(entry.prompt) || "Untitled"}</span>
+				<span class="history-time">${relTime(entry.ts)}</span>
+			</span>
+			<span class="history-del" role="button" aria-label="Delete" title="Delete">×</span>
+		`
+		item.addEventListener("click", event => {
+			if (event.target.closest(".history-del")) return
+			restoreGeneration(entry.id)
+		})
+		item.querySelector(".history-del").addEventListener("click", async event => {
+			event.stopPropagation()
+			await deleteGeneration(entry.id)
+			renderHistory()
+		})
+		els.historyList.appendChild(item)
+	}
+}
+
+// On boot: paint the gallery, then re-seat the most recent world per existing plot
+// so a reload brings the scene back (the "saving state" half of the feature).
+async function initHistory() {
+	await renderHistory()
+	for (const plot of plots.plots) {
+		const entry = await latestForPlot(plot.id)
+		if (entry) await restoreGeneration(entry.id, { seedPrompt: true })
+	}
+}
+
+function autoGrowChat() {
+	const input = els.chatInput
+	if (!input) return
+	input.style.height = "auto"
+	input.style.height = `${Math.min(input.scrollHeight, 120)}px`
+}
+
+function submitChat() {
+	if (generating || !els.chatInput) return
+	const prompt = els.chatInput.value.trim()
+	if (!prompt) {
+		els.chatInput.focus()
+		return
+	}
+	if (!generationTargets().length) {
+		setStatus("Select or focus a plot first")
+		return
+	}
+	generateSelected(prompt)
+}
+
+// Snip & edit: take an isometric photo of the current plot's render and ask the
+// image model to apply the chat text as an edit ("make it greener", "add flowers"),
+// then rebuild the splat through the same pipeline and re-seat it on the plot.
+async function editFocusedPlot(rawPrompt) {
+	if (generating || !els.chatInput) return
+	const prompt = (rawPrompt ?? "").trim()
+	const plot = generationTargets()[0]
+	if (!plot) {
+		setStatus("Select or focus a plot first")
+		return
+	}
+	if (plot.state !== "generated") {
+		setStatus("Generate a world first, then edit it")
+		return
+	}
+	if (!prompt) {
+		els.chatInput.focus()
+		return
+	}
+
+	generating = true
+	syncGenerateButton()
+	setStatus("Editing")
+	await loadCullConfig()
+
+	try {
+		const { photo } = await capturePlotPhoto(renderer, scene, camera, plot, [placementPreview].filter(Boolean))
+		const bytes = await generatePlot({
+			prompt,
+			image: photo,
+			groundColor: `#${plot.ground.material.color.getHexString()}`,
+			mode: "edit",
+		})
+		const rawCopy = bytes.slice()
+		await applySplatBytes(bytes, plot, { prompt, fileName: `${plot.id}.edit.splat` })
+		await saveGeneration(plot, prompt, rawCopy)
 		setStatus("")
 	} catch (error) {
 		setStatus(error.message)
@@ -1231,7 +1720,7 @@ function splatBounds(keep, xs, ys, zs, floorOverride = null) {
 // and rendering in one coordinate space. The stored model is upside-down, so
 // world-up = decreasing stored-Y; the negative Y scale flips it upright and the
 // high-Y percentile is the ground plane.
-async function cropAndFitSplat(source, plot) {
+async function cropAndFitSplat(source, plot, opts = {}) {
 	const packed = source.packedSplats
 	const total = packed?.numSplats ?? 0
 	if (!total) return null
@@ -1435,17 +1924,30 @@ async function cropAndFitSplat(source, plot) {
 	//    so it is only used to decide what belongs in the square tile.
 	let bounds = splatBounds(keep, xs, ys, zs, seatFloorY)
 	if (!bounds) return null
-	const fill = plot.size * SPLAT_CROP.inset * SPLAT_CROP.postScale
+	// Footprint to fill. For a lone plot this is the square plot.size; for a combined
+	// region it's the union rectangle (opts.sizeX × opts.sizeZ). The final-stage yaw
+	// (CULL.rotate) swaps the splat's X/Z under a 90/270° turn, so pre-yaw the content-X
+	// axis must be sized to whatever world axis it lands on AFTER the yaw — hence the
+	// parity swap. For a square (sizeX == sizeZ) every branch below is identical to before.
+	const rotN = (((Math.round(CULL.rotate) % 4) + 4) % 4)
+	const oddRot = rotN % 2 === 1
+	const baseFillX = (opts.sizeX ?? plot.size) * SPLAT_CROP.inset * SPLAT_CROP.postScale
+	const baseFillZ = (opts.sizeZ ?? plot.size) * SPLAT_CROP.inset * SPLAT_CROP.postScale
+	const fillX = oddRot ? baseFillZ : baseFillX
+	const fillZ = oddRot ? baseFillX : baseFillZ
 
 	let scaleX
 	let scaleZ
 	if (SPLAT_CROP.tile) {
-		const s = (fill * SPLAT_CROP.overfit) / Math.min(bounds.boxX, bounds.boxZ)
+		// Uniform scale that overflows the tighter axis, then crop to the rectangle. For a
+		// square (fillX == fillZ) max(fillX/boxX, fillZ/boxZ) == fill/min(box) — exactly the
+		// previous rule, so single-plot fitting is unchanged.
+		const s = SPLAT_CROP.overfit * Math.max(fillX / bounds.boxX, fillZ / bounds.boxZ)
 		scaleX = s
 		scaleZ = s
 	} else {
-		scaleX = fill / bounds.boxX
-		scaleZ = fill / bounds.boxZ
+		scaleX = fillX / bounds.boxX
+		scaleZ = fillZ / bounds.boxZ
 	}
 	const scaleY = (scaleX + scaleZ) / 2
 
@@ -1459,18 +1961,20 @@ async function cropAndFitSplat(source, plot) {
 	//    left intact even where it overhangs the tile edge; only the ground sheet /
 	//    backdrop skirt at the perimeter gets cropped.
 	if (SPLAT_CROP.tile) {
-		const half = fill / 2
+		const halfX = fillX / 2
+		const halfZ = fillZ / 2
 		let hMax = SPLAT_CROP.edgeThickness
 		for (let i = 0; i < total; i++) if (keep[i]) hMax = Math.max(hMax, roughY(i))
 		const floorBand = SPLAT_CROP.perimeterFloorBand * hMax
 		const nearFloor = i => roughY(i) <= floorBand
 		for (let i = 0; i < total; i++) {
-			if (keep[i] && nearFloor(i) && (Math.abs(roughX(i)) > half || Math.abs(roughZ(i)) > half)) keep[i] = 0
+			if (keep[i] && nearFloor(i) && (Math.abs(roughX(i)) > halfX || Math.abs(roughZ(i)) > halfZ)) keep[i] = 0
 		}
 		const T = SPLAT_CROP.edgeThickness
 		for (let i = 0; i < total; i++) {
 			if (!keep[i] || !nearFloor(i)) continue
-			const edgeDist = half - Math.max(Math.abs(roughX(i)), Math.abs(roughZ(i)))
+			// distance to the nearest rectangle edge; for a square this is half - max(|x|,|z|).
+			const edgeDist = Math.min(halfX - Math.abs(roughX(i)), halfZ - Math.abs(roughZ(i)))
 			const cap = T + (hMax - T) * smoothstep(0, SPLAT_CROP.edgeMargin, edgeDist)
 			if (roughY(i) > cap) keep[i] = 0
 		}
@@ -1480,8 +1984,8 @@ async function cropAndFitSplat(source, plot) {
 	//    visible survivors, not the discarded skirt/backdrop, determine the scale.
 	bounds = splatBounds(keep, xs, ys, zs, seatFloorY)
 	if (!bounds) return null
-	scaleX = fill / bounds.boxX
-	scaleZ = fill / bounds.boxZ
+	scaleX = fillX / bounds.boxX
+	scaleZ = fillZ / bounds.boxZ
 	const finalScaleY = (scaleX + scaleZ) / 2
 	const finalY = i => finalScaleY * (bounds.floorLocalY - ys[i])
 
@@ -1495,8 +1999,8 @@ async function cropAndFitSplat(source, plot) {
 		bounds = splatBounds(keep, xs, ys, zs, seatFloorY)
 		if (!bounds) return null
 	}
-	scaleX = fill / bounds.boxX
-	scaleZ = fill / bounds.boxZ
+	scaleX = fillX / bounds.boxX
+	scaleZ = fillZ / bounds.boxZ
 	const scaleYFinal = (scaleX + scaleZ) / 2
 	const renderScaleX = scaleX * SPLAT_CROP.unitScale
 	const renderScaleY = scaleYFinal * SPLAT_CROP.unitScale
@@ -1541,14 +2045,24 @@ async function cropAndFitSplat(source, plot) {
 		source.position.applyQuaternion(yaw)
 	}
 
-	// The seat lands the splat exactly one content-height too high, so drop the whole
-	// splat by its own world-space height to sit the floor on the plane.
-	const splatHeight = (bounds.maxY - bounds.minY) * renderScaleY
-	if (CULL.seatFloor) source.position.y -= splatHeight/3
+	// The base seat above already maps the robust detected floor (seatFloorY, surface-aware)
+	// to the plot floor plane, independent of the scene's height. The old `-= splatHeight/3`
+	// drop scaled with total content height, so tall block-outs (cylinders, walls) sank well
+	// below the plot while flat scenes barely moved — that's the "generated below the plot"
+	// bug. Removed; the floor detection does the seating.
+	const splatHeight = (bounds.maxY - bounds.minY) * renderScaleY // kept for the debug readout below
 
-	// Final vertical nudge (WS_CULL_Y_OFFSET), applied after the seat + yaw so it's a
-	// pure plot-local Y shift independent of every other transform.
+	// Final vertical nudge (WS_CULL_Y_OFFSET), a pure plot-local Y shift for fine calibration.
 	source.position.y += CULL.yOffset
+
+	// Region placement: a lone plot seats at its own group origin (offset 0); a combined
+	// region seats on its OWNER plot's group but shifted (in plot-local X/Z) to the union
+	// centre so the one splat spans every member tile. Applied last, after the yaw, so it
+	// stays a pure world-XZ placement.
+	const offsetX = opts.offsetX ?? 0
+	const offsetZ = opts.offsetZ ?? 0
+	source.position.x += offsetX
+	source.position.z += offsetZ
 
 	// Plot-local Y the detected floor (ys = floorLocalY) lands at — the seat pins it
 	// here regardless of content, so renderScaleY cancels. Stored for the "Splat floor"
@@ -1567,8 +2081,8 @@ async function cropAndFitSplat(source, plot) {
 	const yAtMin = floorBaseY + renderScaleY * (bounds.floorLocalY - bounds.minY)
 	const yAtMax = floorBaseY + renderScaleY * (bounds.floorLocalY - bounds.maxY)
 	plot.splatBox = new THREE.Box3(
-		new THREE.Vector3(-halfX, Math.min(yAtMin, yAtMax), -halfZ),
-		new THREE.Vector3(halfX, Math.max(yAtMin, yAtMax), halfZ),
+		new THREE.Vector3(offsetX - halfX, Math.min(yAtMin, yAtMax), offsetZ - halfZ),
+		new THREE.Vector3(offsetX + halfX, Math.max(yAtMin, yAtMax), offsetZ + halfZ),
 	)
 
 	if (SPLAT_CROP.debug) {
@@ -1650,7 +2164,19 @@ renderer.domElement.addEventListener("wheel", event => {
 }, { passive: false })
 
 window.addEventListener("keyup", event => {
-	if (event.key === "Escape" && focusedPlot && !singlePlotMode && !els.generateModal.open) exitFocus()
+	if (event.key !== "Escape") return
+	if (els.settingsDrawer?.classList.contains("open")) {
+		setSettingsOpen(false)
+		return
+	}
+	// Don't steal Escape while typing a prompt in the chat composer.
+	if (document.activeElement === els.chatInput) return
+	// Escape clears any combine multi-select back to just the active plot.
+	if (focusedPlot) {
+		plots.clearSelection()
+		focusedPlot.setSelected(true)
+		syncGenerateButton()
+	}
 })
 
 window.addEventListener("resize", () => {
@@ -1684,26 +2210,57 @@ els.showSplatFloor?.addEventListener("change", () => {
 	applySplatFloorVisibility()
 })
 
-els.generate.addEventListener("click", () => {
-	if (els.generate.disabled) return
-	els.scenePrompt.value = focusedPlot?.prompt || plots.selected()[0]?.prompt || ""
-	els.generateModal.showModal()
-	els.scenePrompt.focus()
-})
-
 els.uploadSplat?.addEventListener("change", event => {
 	const file = event.target.files?.[0]
 	event.target.value = "" // allow re-selecting the same file
 	uploadSplatToPlot(file)
 })
 
-els.cancelGenerate.addEventListener("click", () => els.generateModal.close())
+// Settings gear: the debug controls live in a drawer that drops out only when the
+// gear is clicked. Clicking the gear toggles it; clicking anywhere else closes it.
+function setSettingsOpen(open) {
+	if (!els.settingsDrawer) return
+	els.settingsDrawer.classList.toggle("open", open)
+	els.settingsBtn?.classList.toggle("active", open)
+	els.settingsBtn?.setAttribute("aria-expanded", String(open))
+}
 
-els.generateForm.addEventListener("submit", event => {
+els.settingsBtn?.addEventListener("click", event => {
+	event.stopPropagation()
+	setSettingsOpen(!els.settingsDrawer.classList.contains("open"))
+})
+
+document.addEventListener("pointerdown", event => {
+	if (!els.settingsDrawer?.classList.contains("open")) return
+	if (event.target.closest(".settings-panel")) return
+	setSettingsOpen(false)
+})
+
+// Inline chat composer: submit (or Enter without Shift) generates into the active
+// plot; Shift+Enter inserts a newline. The text is kept after sending so a prompt
+// can be tweaked and re-run.
+els.chatForm?.addEventListener("submit", event => {
 	event.preventDefault()
-	const prompt = els.scenePrompt.value.trim()
-	els.generateModal.close()
-	generateSelected(prompt)
+	submitChat()
+})
+
+els.chatInput?.addEventListener("keydown", event => {
+	if (event.key === "Enter" && !event.shiftKey) {
+		event.preventDefault()
+		submitChat()
+	}
+})
+
+els.chatInput?.addEventListener("input", autoGrowChat)
+
+// Snip & edit the current world from the chat text (e.g. "make it greener").
+els.chatEdit?.addEventListener("click", () => editFocusedPlot(els.chatInput?.value))
+
+els.historyClear?.addEventListener("click", async () => {
+	if (!(await listGenerations()).length) return
+	if (!confirm("Clear all saved generations?")) return
+	await clearGenerations()
+	renderHistory()
 })
 
 function animate(time) {
@@ -1718,14 +2275,9 @@ function animate(time) {
 }
 
 setActiveTool("pointer")
-if (singlePlotMode) {
-	// Boot straight into a single, already-focused plot (focusPlot handles the
-	// plus-tile suppression, camera, and UI sync).
-	focusPlot(plots.add(0, 0))
-} else {
-	plots.syncPlus()
-	updateOverviewCamera()
-	syncGenerateButton()
-	syncFocusUi()
-}
+// Boot focused on a single plot — the lone-plot view IS the whole world until you
+// Expand, which opens focus up into the multi-plot overview.
+focusPlot(plots.add(0, 0))
 requestAnimationFrame(animate)
+// Paint the gallery and re-seat the last saved world(s) once the loop is live.
+initHistory()
