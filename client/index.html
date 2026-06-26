@@ -54,29 +54,20 @@
 		</section>
 		</div>
 		<section class="generate-panel" aria-label="Generate">
-			<button class="btn btn-sm hidden" id="exit_focus_btn" type="button" aria-label="Exit plot focus" title="Exit plot focus">Esc</button>
 			<button class="generate-btn btn btn-square btn-primary" id="generate_btn" aria-label="Generate world" title="Generate">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 4l1.3 3.2l3.2 1.3l-3.2 1.3l-1.3 3.2l-1.3 -3.2l-3.2 -1.3l3.2 -1.3z"></path><path d="M6.5 13l.8 2l2 .8l-2 .8l-.8 2l-.8 -2l-2 -.8l2 -.8z"></path></svg>
 			</button>
-			<label class="retrain-upload btn btn-sm" title="Upload a .splat/.ply onto the selected plot and run the same cull/fit pipeline">
-				Upload splat
-				<input type="file" id="upload_splat_input" accept=".splat,.ply">
-			</label>
-			<label class="collider-toggle" title="Overlay the original primitive colliders on the generated splat to check how well it lines up">
+			<div class="gen-progress hidden" id="progress" aria-live="polite">
+				<div class="gen-progress-track"><span class="gen-progress-fill" id="progress_fill"></span></div>
+				<span class="gen-progress-label" id="progress_label"></span>
+			</div>
+			<label class="collider-toggle" title="Overlay the original primitive colliders on the generated splats to check how well each lines up">
 				<input type="checkbox" id="show_colliders_input" class="toggle toggle-sm">
 				<span class="text-sm">Colliders</span>
 			</label>
-			<label class="collider-toggle" title="Draw the splat's content bounding box to check how it sits relative to the plot edges">
+			<label class="collider-toggle" title="Draw each generated splat's content bounding box to check how it sits relative to its colliders">
 				<input type="checkbox" id="show_splat_box_input" class="toggle toggle-sm">
 				<span class="text-sm">Bounds</span>
-			</label>
-			<label class="collider-toggle" title="Draw a grid at the plot floor level (where the splat is seated) so the floor plane is visible at all times">
-				<input type="checkbox" id="show_floor_input" class="toggle toggle-sm">
-				<span class="text-sm">Floor</span>
-			</label>
-			<label class="collider-toggle" title="Draw a grid at the splat's DETECTED floor (what the floor-finding algorithm computed) to see where it landed vs the real ground">
-				<input type="checkbox" id="show_splat_floor_input" class="toggle toggle-sm">
-				<span class="text-sm">Splat floor</span>
 			</label>
 			<p class="status hidden text-sm text-base-content/70" id="status"></p>
 		</section>
@@ -112,6 +103,9 @@
 			</button>
 			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="eraser" aria-label="Eraser" title="Eraser">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3"></path><path d="M18 13.3l-6.3 -6.3"></path></svg>
+			</button>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="paint" aria-label="Terrain paint" title="Paint terrain on the floor (rivers, paths, rock) in the active colour">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21v-4a4 4 0 1 1 4 4h-4"></path><path d="M21 3a16 16 0 0 0 -12.8 10.2"></path><path d="M21 3a16 16 0 0 1 -10.2 12.8"></path><path d="M10.6 9a9 9 0 0 1 4.4 4.4"></path></svg>
 			</button>
 			<span class="dock-divider" aria-hidden="true"></span>
 			<button class="tool-btn btn btn-ghost btn-square join-item" data-tool="box" aria-label="Box tool" title="Box">

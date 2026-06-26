@@ -41,53 +41,6 @@ export function createSelectionOutline(mesh, color = 0xb8ff38) {
 	return outline
 }
 
-// A flat square frame (ring) laid in the XZ plane. depthTest:false + a high
-// renderOrder makes it draw on top of neighbouring plots; being a ring (hole in
-// the middle) it reads as an outline rather than filling the tile.
-export function createSquareFrameOutline(size, thickness, color = 0xffffff, opacity = 1) {
-	const outer = size / 2
-	const inner = Math.max(0.01, outer - thickness)
-	const shape = new THREE.Shape()
-	shape.moveTo(-outer, -outer)
-	shape.lineTo(outer, -outer)
-	shape.lineTo(outer, outer)
-	shape.lineTo(-outer, outer)
-	shape.closePath()
-	const hole = new THREE.Path()
-	hole.moveTo(-inner, -inner)
-	hole.lineTo(inner, -inner)
-	hole.lineTo(inner, inner)
-	hole.lineTo(-inner, inner)
-	hole.closePath()
-	shape.holes.push(hole)
-	const geometry = new THREE.ShapeGeometry(shape)
-	geometry.rotateX(-Math.PI / 2)
-	const material = new THREE.MeshBasicMaterial({
-		color,
-		side: THREE.DoubleSide,
-		transparent: true,
-		opacity,
-		depthTest: false,
-		depthWrite: false,
-	})
-	const outline = new THREE.Mesh(geometry, material)
-	outline.name = "selection_outline"
-	outline.userData.isSelectionOutline = true
-	outline.renderOrder = 30
-	return outline
-}
-
-export function createEdgeOutline(mesh, color = 0xffffff) {
-	const geometry = new THREE.EdgesGeometry(mesh.geometry)
-	const material = new THREE.LineBasicMaterial({ color, depthTest: true, depthWrite: false })
-	const outline = new THREE.LineSegments(geometry, material)
-	outline.name = "selection_outline"
-	outline.userData.isSelectionOutline = true
-	outline.renderOrder = 2
-	mesh.add(outline)
-	return outline
-}
-
 export function clearSelectionOutline(mesh) {
 	const outline = mesh?.children.find(child => child.userData.isSelectionOutline)
 	if (outline) disposeObject(outline)
