@@ -23,6 +23,7 @@ __pycache__/
 *.test
 
 # Generated job output
+/outputs/
 /server/output/
 
 # Node

@@ -1,0 +1,10 @@
+{
+  "plot_size": 8,
+  "note": "Ground-truth block-out for one generation, plot-local coords. Mirrors the primitives in client/scripts/primitives.js. The Phase-2 data engine should emit one of these per generation alongside the image fed to TripoSplat. position = mesh center, rotation = euler XYZ radians, scale = per-axis (cylinder default [1,2,1]).",
+  "objects": [
+    {"id": "ground", "type": "box", "position": [0, 0.025, 0], "rotation": [0, 0, 0], "scale": [8, 0.05, 8], "color": "#587553", "ground": true},
+    {"id": "p1", "type": "box", "position": [-2.1, 0.5, -1.4], "rotation": [0, 0, 0], "scale": [1, 1, 1], "color": "#232323"},
+    {"id": "p2", "type": "cylinder", "position": [0.3, 1.0, 0.6], "rotation": [0, 0, 0], "scale": [1, 2, 1], "color": "#8b9bb0"},
+    {"id": "p3", "type": "sphere", "position": [2.0, 0.5, 1.8], "rotation": [0, 0, 0], "scale": [1, 1, 1], "color": "#a7775b"}
+  ]
+}
