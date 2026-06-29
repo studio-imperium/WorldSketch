@@ -16,6 +16,7 @@ __pycache__/
 *.pyc
 
 # Go build artifacts
+/server/server
 /server/gausy
 /server/worldsketch-server
 /server/tmp/
@@ -25,6 +26,7 @@ __pycache__/
 # Generated job output
 /outputs/
 /server/output/
+/server/outputs/
 
 # Node
 node_modules/
