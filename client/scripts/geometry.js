@@ -30,8 +30,8 @@ export function primitiveBox(mesh, target = new THREE.Box3()) {
 }
 
 // Group primitives into objects by touching-box connectivity (union-find). Each
-// object carries its source meshes, the union AABB of its colliders (the target the
-// splat is fitted into), and its total solid volume (drives the Tripo step budget).
+// object carries its source meshes and the union AABB of its colliders (the target
+// the splat is fitted into). Shape count (primitives.length) drives the step budget.
 export function computeObjects(primitives) {
 	const n = primitives.length
 	if (!n) return []
@@ -61,44 +61,8 @@ export function computeObjects(primitives) {
 
 	return [...groups.values()].map(idxs => {
 		const box = new THREE.Box3()
-		let volume = 0
-		for (const i of idxs) {
-			box.union(boxes[i])
-			volume += primitiveVolume(primitives[i])
-		}
-		return { primitives: idxs.map(i => primitives[i]), box, volume }
+		for (const i of idxs) box.union(boxes[i])
+		return { primitives: idxs.map(i => primitives[i]), box }
 	})
 }
 
-// Solid volume of a primitive from its type + per-axis scale. Mirrors the default
-// geometries in primitives.js (box 1³, sphere r0.5, cylinder r0.5/h1, cone r0.5/h1),
-// each scaled by the mesh's scale vector.
-export function primitiveVolume(mesh) {
-	const sx = Math.abs(mesh.scale.x)
-	const sy = Math.abs(mesh.scale.y)
-	const sz = Math.abs(mesh.scale.z)
-	switch (mesh.userData.type) {
-		case "sphere":
-			return (4 / 3) * Math.PI * (sx / 2) * (sy / 2) * (sz / 2)
-		case "cylinder":
-			return Math.PI * (sx / 2) * (sz / 2) * sy
-		case "cone":
-			return (1 / 3) * Math.PI * (sx / 2) * (sz / 2) * sy
-		default:
-			return sx * sy * sz
-	}
-}
-
-// Map an object's volume to a TripoSplat step budget. Cheap for tiny props (a field
-// of pebbles costs almost nothing), generous for big structures. Scaled on the
-// cube-root (linear size) so a handful of unit blocks doesn't blow the budget.
-const STEP_MIN = 5 // floor on diffusion steps even for the tiniest prop
-const STEP_MAX = 24
-const SIZE_MIN = 0.7 // ~a single small primitive
-const SIZE_MAX = 6 // ~a large multi-block structure
-
-export function stepsForVolume(volume) {
-	const size = Math.cbrt(Math.max(1e-3, volume))
-	const t = Math.min(1, Math.max(0, (size - SIZE_MIN) / (SIZE_MAX - SIZE_MIN)))
-	return Math.round(STEP_MIN + (STEP_MAX - STEP_MIN) * t)
-}

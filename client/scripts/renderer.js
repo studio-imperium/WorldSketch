@@ -1,9 +1,9 @@
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
-import { newOutput, generateSubject } from "/scripts/api.js"
-import { captureObject, captureFloor, MASTER_POSE } from "/scripts/capture.js"
+import { getConfig, newOutput, generateSubject, identifyObjects } from "/scripts/api.js"
+import { captureObject, captureFloor, captureWorldContext, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
 import { fitSplatToBox } from "/scripts/fit.js"
-import { computeObjects, stepsForVolume } from "/scripts/geometry.js"
+import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject } from "/scripts/primitives.js"
 import { createSky } from "/scripts/sky.js"
 
@@ -21,6 +21,11 @@ const placementNormal = new THREE.Vector3()
 const rollAxis = new THREE.Vector3()
 const rollQuat = new THREE.Quaternion()
 const normalMatrix = new THREE.Matrix3()
+const scaleAxisDir = new THREE.Vector3()
+const tmpScale = new THREE.Vector3()
+const tmpWorld = new THREE.Vector3()
+const tmpFace = new THREE.Vector3()
+const tmpDelta = new THREE.Vector3()
 const backgroundColor = new THREE.Color(0xfcfcfc)
 
 const shapeTools = new Set(["box", "sphere", "cylinder", "cone"])
@@ -34,6 +39,21 @@ const FLOOR_STEPS = 16 // the flat floor needs detail but not a huge step budget
 // world cheap; detail comes from the per-object capture, not raw gaussian volume.
 const MIN_GAUSSIANS = 32768
 const accent = 0xb8ff38
+
+// Drop gaussians below this opacity when seating a splat (kills wisps/haze). Set from the
+// server config (WS_OPACITY_FLOOR) at generate time; falls back to the fit.js default.
+let opacityFloor = 0.1
+
+// Splat-side palette lock: recolour the reconstructed gaussians onto the block-out palette,
+// matching the server's image lock. Enabled + parameterised from config at generate time.
+let paletteLockOn = false
+let paletteStrength = 0.75
+let paletteLightness = 0
+
+// Post-generation yaw (degrees) applied to seated splats, for dialing in a turned
+// reconstruction. From WS_OBJECT_YAW / WS_FLOOR_YAW at generate time.
+let objectYawDeg = 0
+let floorYawDeg = 0
 
 // Fixed yaw applied to every seated splat (0|1|2|3 = 0/90/180/270°). NOT an
 // orientation search — the capture angle is constant so any needed turn is constant
@@ -68,6 +88,10 @@ const els = {
 	colorSwatches: [...document.querySelectorAll("[data-color]")],
 	brushSwatches: [...document.querySelectorAll("[data-scale]")],
 	generate: document.getElementById("generate_btn"),
+	floorShot: document.getElementById("floor_shot_btn"),
+	uploadSplats: document.getElementById("upload_splats_input"),
+	downloadPrims: document.getElementById("download_prims_btn"),
+	uploadPrims: document.getElementById("upload_prims_input"),
 	generateModal: document.getElementById("generate_modal"),
 	generateForm: document.getElementById("generate_form"),
 	cancelGenerate: document.getElementById("cancel_generate_btn"),
@@ -140,10 +164,59 @@ function createPaintSurface(baseColor) {
 	return { canvas, ctx, texture }
 }
 
+// Lazily give a block its own paintable canvas-texture the first time it is drawn on,
+// so the paintbrush works on any primitive exactly like it does on the ground. The
+// canvas starts filled with the block's current colour so painting layers on top.
+function ensurePaintSurface(mesh) {
+	if (mesh.userData.isGround) return world.paint
+	if (mesh.userData.paint) return mesh.userData.paint
+	if (mesh.userData.type === "box") atlasBoxUVs(mesh.geometry)
+	mesh.userData.baseColor = mesh.material.color.getHexString() // remember it before white-out
+	const surface = createPaintSurface("#" + mesh.material.color.getHexString())
+	mesh.material.map = surface.texture
+	mesh.material.color.set(0xffffff) // let the painted texture show its true colours
+	mesh.material.needsUpdate = true
+	mesh.userData.paint = surface
+	return surface
+}
+
+// A box's six faces all share the same [0,1] UV square, so one canvas would mirror the
+// same mark onto every face. Repack the faces into a 3×2 atlas so each paints alone.
+function atlasBoxUVs(geometry) {
+	if (geometry.userData.atlased) return
+	const uv = geometry.attributes.uv
+	const cols = 3
+	const rows = 2
+	for (let face = 0; face < 6; face++) {
+		const col = face % cols
+		const row = Math.floor(face / cols)
+		for (let k = 0; k < 4; k++) {
+			const i = face * 4 + k
+			uv.setXY(i, (col + uv.getX(i)) / cols, (row + uv.getY(i)) / rows)
+		}
+	}
+	uv.needsUpdate = true
+	geometry.userData.atlased = true
+}
+
+// Clip the brush to the atlas cell the hit landed in, so a stroke near a face edge
+// doesn't bleed into the neighbouring face's cell.
+function clipToAtlasCell(ctx, canvas, uv) {
+	const cols = 3
+	const rows = 2
+	const col = Math.min(cols - 1, Math.max(0, Math.floor(uv.x * cols)))
+	const row = Math.min(rows - 1, Math.max(0, Math.floor(uv.y * rows)))
+	const w = canvas.width / cols
+	const h = canvas.height / rows
+	ctx.beginPath()
+	ctx.rect(col * w, (rows - 1 - row) * h, w, h) // canvas y is flipped versus UV v
+	ctx.clip()
+}
+
 // A faint ground arrow marking the scene "front": the side every subject is captured
 // from, so it gets the crisp detail (build doors / faces toward it).
 function createFrontIndicator(size) {
-	const dir = new THREE.Vector3().setFromSpherical(new THREE.Spherical(1, MASTER_POSE.phi, MASTER_POSE.theta))
+	const dir = new THREE.Vector3().setFromSpherical(new THREE.Spherical(1, Math.PI / 2, FRONT_THETA))
 	dir.y = 0
 	dir.normalize()
 	const len = size * 0.07
@@ -215,6 +288,7 @@ class World {
 		placeMeshOnSurface(mesh, hit)
 		this.group.worldToLocal(mesh.position)
 		mesh.userData.world = this
+		recordSupport(mesh, hit)
 		this.primitives.push(mesh)
 		this.group.add(mesh)
 		return mesh
@@ -223,6 +297,11 @@ class World {
 	removePrimitive(mesh) {
 		const index = this.primitives.indexOf(mesh)
 		if (index >= 0) this.primitives.splice(index, 1)
+		// Re-seat anything that was resting on the deleted block onto whatever the
+		// deleted block was resting on, so the attachment forest has no dangling refs.
+		for (const p of this.primitives) {
+			if (p.userData.support === mesh) p.userData.support = mesh.userData.support ?? null
+		}
 		if (selectedPrimitive === mesh) selectPrimitive(null)
 		disposeObject(mesh)
 	}
@@ -230,14 +309,23 @@ class World {
 	paintAt(hit) {
 		const uv = hit.uv
 		if (!uv) return
-		const { canvas, ctx, texture } = this.paint
+		const surface = ensurePaintSurface(hit.object)
+		if (!surface) return
+		// Remember each colour painted onto a primitive (or the ground), so it joins that
+		// subject's palette for the hue lock — e.g. red berry spots become an available
+		// colour, and a painted blue river joins the floor's palette.
+		;(hit.object.userData.paintedColors ??= new Set()).add(activeColor)
+		const { canvas, ctx, texture } = surface
 		const px = uv.x * canvas.width
 		const py = (1 - uv.y) * canvas.height
 		const radius = Math.max(6, ((activeBrushScale * 0.8) * canvas.width) / this.size)
+		ctx.save()
+		if (hit.object.userData.type === "box" && !hit.object.userData.isGround) clipToAtlasCell(ctx, canvas, uv)
 		ctx.fillStyle = activeColor
 		ctx.beginPath()
 		ctx.arc(px, py, radius, 0, Math.PI * 2)
 		ctx.fill()
+		ctx.restore()
 		texture.needsUpdate = true
 	}
 
@@ -370,7 +458,8 @@ function raycast(event, objects, recursive = false) {
 }
 
 function surfaceHit(event, exclude = null) {
-	const objects = world.raycastables().filter(mesh => mesh !== exclude && !mesh.userData.isSelectionOutline)
+	const skip = exclude instanceof Set ? exclude : exclude ? new Set([exclude]) : null
+	const objects = world.raycastables().filter(mesh => !(skip?.has(mesh)) && !mesh.userData.isSelectionOutline)
 	const hit = raycast(event, objects)
 	if (!hit) return null
 	const normal = hit.face?.normal ? hit.face.normal.clone() : new THREE.Vector3(0, 1, 0)
@@ -429,6 +518,52 @@ function alignMeshToNormal(mesh, normal) {
 	mesh.quaternion.setFromUnitVectors(localUp, normal)
 }
 
+// --- Attachment graph -------------------------------------------------------
+// Every block remembers the block it was seated on (`support`) and which face of
+// that support it sits against (`supportAxis`, in the support's local space). The
+// support pointers form a forest rooted at blocks resting on the ground; moving or
+// scaling a block walks its descendants so seated stacks stay glued face-to-face.
+
+function recordSupport(mesh, hit) {
+	const onPrim = Boolean(hit) && !hit.object.userData.isGround && !hit.object.userData.locked && world.primitives.includes(hit.object)
+	mesh.userData.support = onPrim ? hit.object : null
+	mesh.userData.supportAxis = onPrim ? hitFaceAxis(hit) : { name: "y", sign: 1 }
+}
+
+// All blocks transitively seated on `mesh` (its dependents), nearest first.
+function collectSubtree(mesh) {
+	const out = []
+	const seen = new Set([mesh])
+	const stack = [mesh]
+	while (stack.length) {
+		const parent = stack.pop()
+		for (const p of world.primitives) {
+			if (p.userData.support === parent && !seen.has(p)) {
+				seen.add(p)
+				out.push(p)
+				stack.push(p)
+			}
+		}
+	}
+	return out
+}
+
+// Local-space centre of the bounding box.
+function boundsCenter(mesh, out) {
+	if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
+	const b = mesh.geometry.boundingBox
+	return out.set((b.min.x + b.max.x) / 2, (b.min.y + b.max.y) / 2, (b.min.z + b.max.z) / 2)
+}
+
+// Local-space centre of the bounding-box face facing `axis` (e.g. {name:"y",sign:1} = top).
+function faceLocalPoint(mesh, axis, out) {
+	if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
+	const b = mesh.geometry.boundingBox
+	boundsCenter(mesh, out)
+	out[axis.name] = axis.sign > 0 ? b.max[axis.name] : b.min[axis.name]
+	return out
+}
+
 function updatePlacement(event) {
 	if (!placementPreview) return
 	const hit = surfaceHit(event)
@@ -445,8 +580,8 @@ function updatePlacement(event) {
 const orbit = {
 	target: new THREE.Vector3(0, floorSize * 0.05, 0),
 	radius: floorSize * 1.25,
-	theta: MASTER_POSE.theta,
-	phi: MASTER_POSE.phi,
+	theta: FRONT_THETA, // open the editor at the same isometric angle objects are captured from
+	phi: FRONT_PHI,
 }
 
 function updateCamera() {
@@ -494,13 +629,64 @@ function startPrimitiveDrag(event, mesh) {
 		startAngle: 0,
 	}
 	drag.startAngle = pointerScreenAngle(event, drag.rollCenter)
+	if (drag.mode === "scale") setupScaleDrag(mesh)
+	if (drag.mode === "roll") setupRollDrag(mesh)
 	renderer.domElement.setPointerCapture(event.pointerId)
+}
+
+// Capture the rotating block's pivot and the start pose of every dependent, so the
+// whole stack can turn as one rigid body and seated faces stay connected.
+function setupRollDrag(mesh) {
+	drag.roll = {
+		pivot: mesh.getWorldPosition(new THREE.Vector3()),
+		members: collectSubtree(mesh).map(m => ({
+			mesh: m,
+			startPos: m.getWorldPosition(new THREE.Vector3()),
+			startQuat: m.quaternion.clone(),
+		})),
+	}
+}
+
+// Capture everything the scale drag needs: the on-screen direction of each local
+// axis (so the drag direction can pick one), the seated face to pin, and the start
+// state of every dependent block so they can be re-glued to the moving faces.
+function setupScaleDrag(mesh) {
+	mesh.updateWorldMatrix(true, false)
+	const center = mesh.getWorldPosition(new THREE.Vector3())
+	const worldQuat = mesh.getWorldQuaternion(new THREE.Quaternion())
+	const centerScreen = objectScreenPosition(center)
+	const screenAxis = {}
+	for (const name of ["x", "y", "z"]) {
+		scaleAxisDir.set(0, 0, 0)
+		scaleAxisDir[name] = 1
+		scaleAxisDir.applyQuaternion(worldQuat).multiplyScalar(0.5).add(center)
+		const tip = objectScreenPosition(scaleAxisDir)
+		const sx = tip.x - centerScreen.x
+		const sy = tip.y - centerScreen.y
+		const len = Math.hypot(sx, sy) || 1
+		screenAxis[name] = { x: sx / len, y: sy / len }
+	}
+	const bottomLocal = faceLocalPoint(mesh, { name: "y", sign: -1 }, new THREE.Vector3())
+	const anchorWorld = mesh.localToWorld(bottomLocal.clone())
+	const children = []
+	for (const child of world.primitives) {
+		if (child.userData.support !== mesh) continue
+		const axis = child.userData.supportAxis ?? { name: "y", sign: 1 }
+		const faceLocal = faceLocalPoint(mesh, axis, new THREE.Vector3())
+		const subtree = [child, ...collectSubtree(child)]
+		children.push({
+			faceLocal,
+			startFaceWorld: mesh.localToWorld(faceLocal.clone()),
+			subtree,
+			startPos: subtree.map(m => m.position.clone()),
+		})
+	}
+	drag.scale = { mesh, worldQuat, screenAxis, bottomLocal, anchorWorld, children }
 }
 
 function updatePrimitiveDrag(event) {
 	if (drag.mode === "scale") {
-		const delta = Math.max(-0.75, Math.min(2.5, (event.clientY - drag.startY) * -0.01))
-		drag.mesh.scale.copy(drag.startScale).multiplyScalar(Math.max(0.15, 1 + delta))
+		updateScaleDrag(event)
 		return
 	}
 	if (drag.mode === "roll") {
@@ -508,14 +694,71 @@ function updatePrimitiveDrag(event) {
 		rollQuat.setFromAxisAngle(drag.rollAxis, delta)
 		drag.mesh.quaternion.copy(rollQuat).multiply(drag.startQuaternion)
 		drag.mesh.userData.manualRotation = true
+		// Orbit each dependent around the rotating block's centre and spin it by the same
+		// amount, so the whole stack turns rigidly and stays face-to-face.
+		for (const m of drag.roll.members) {
+			tmpWorld.copy(m.startPos).sub(drag.roll.pivot).applyQuaternion(rollQuat).add(drag.roll.pivot)
+			world.group.worldToLocal(tmpWorld)
+			m.mesh.position.copy(tmpWorld)
+			m.mesh.quaternion.copy(rollQuat).multiply(m.startQuat)
+			m.mesh.userData.manualRotation = true
+		}
 		return
 	}
-	const hit = surfaceHit(event, drag.mesh)
+	// Move: re-seat the block on whatever is under the cursor, then carry its whole
+	// dependent stack by the same delta so attached blocks travel with their root.
+	const subtree = collectSubtree(drag.mesh)
+	const hit = surfaceHit(event, new Set([drag.mesh, ...subtree]))
 	if (!hit) return
+	const before = drag.mesh.position.clone()
 	placeMeshOnSurface(drag.mesh, hit)
-	const worldPosition = drag.mesh.position.clone()
-	world.group.worldToLocal(worldPosition)
-	drag.mesh.position.copy(worldPosition)
+	world.group.worldToLocal(drag.mesh.position)
+	tmpDelta.copy(drag.mesh.position).sub(before)
+	for (const d of subtree) d.position.add(tmpDelta)
+	recordSupport(drag.mesh, hit)
+}
+
+function updateScaleDrag(event) {
+	const s = drag.scale
+	const dx = event.clientX - drag.startX
+	const dy = event.clientY - drag.startY
+	// Lock to one axis on the first decisive movement and keep it until release, so a
+	// scale never wanders onto another axis mid-drag.
+	if (!s.axis) {
+		if (Math.hypot(dx, dy) < 4) return // wait for a deliberate drag before committing
+		let best = -1
+		for (const name of ["x", "y", "z"]) {
+			const sa = s.screenAxis[name]
+			const p = Math.abs(dx * sa.x + dy * sa.y)
+			if (p > best) {
+				best = p
+				s.axis = name
+			}
+		}
+	}
+	const axis = s.axis
+	const sa = s.screenAxis[axis]
+	const proj = dx * sa.x + dy * sa.y
+	const factor = Math.min(6, Math.max(0.15, 1 + proj * 0.01))
+	const newScale = drag.startScale.clone()
+	newScale[axis] = drag.startScale[axis] * factor
+	s.mesh.scale.copy(newScale)
+	// Pin the seated (bottom) face so the block keeps touching its support instead of
+	// growing symmetrically about its centre.
+	tmpScale.copy(s.bottomLocal).multiply(newScale).applyQuaternion(s.worldQuat)
+	tmpWorld.copy(s.anchorWorld).sub(tmpScale)
+	world.group.worldToLocal(tmpWorld)
+	s.mesh.position.copy(tmpWorld)
+	s.mesh.updateWorldMatrix(true, false)
+	// Drag every dependent stack along with the face it is seated on.
+	for (const rec of s.children) {
+		tmpFace.copy(rec.faceLocal)
+		s.mesh.localToWorld(tmpFace)
+		tmpDelta.copy(tmpFace).sub(rec.startFaceWorld)
+		for (let i = 0; i < rec.subtree.length; i++) {
+			rec.subtree[i].position.copy(rec.startPos[i]).add(tmpDelta)
+		}
+	}
 }
 
 function objectScreenPosition(worldPosition) {
@@ -540,7 +783,7 @@ function startPaint(event) {
 }
 
 function paintAtEvent(event) {
-	const hit = raycast(event, [world.ground])
+	const hit = raycast(event, world.raycastables())
 	if (hit) world.paintAt(hit)
 }
 
@@ -554,7 +797,7 @@ function pointerDown(event) {
 	}
 
 	if (activeTool === "paint") {
-		if (raycast(event, [world.ground])) startPaint(event)
+		if (raycast(event, world.raycastables())) startPaint(event)
 		else startOrbit(event)
 		return
 	}
@@ -626,9 +869,34 @@ function syncGenerateButton() {
 	els.generate.classList.toggle("is-disabled", generating)
 }
 
-// Generate the whole world one subject at a time: the floor first, then each object
-// (a connected group of snapped primitives), seating every splat by its own bounding
-// box. The progress bar advances per subject since this now takes a while.
+// Run `worker` over `items` with at most `limit` in flight at once (bounded concurrency).
+async function runPool(items, limit, worker) {
+	let next = 0
+	const runners = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+		while (next < items.length) {
+			const i = next++
+			await worker(items[i], i)
+		}
+	})
+	await Promise.all(runners)
+}
+
+// The unique hex colours of an object's primitives (painted blocks report their pre-paint
+// base colour). Sent with the subject so the server can lock the generated texture's hues
+// to exactly these — instant and exact, no palette-guessing from the screenshot.
+function primitiveColors(primitives) {
+	const colors = new Set()
+	for (const mesh of primitives) {
+		colors.add("#" + (mesh.userData.baseColor ?? mesh.material.color.getHexString()))
+		if (mesh.userData.paintedColors) for (const c of mesh.userData.paintedColors) colors.add(c)
+	}
+	return [...colors]
+}
+
+// Generate the whole world: capture every subject's guide serially (the captures share
+// the renderer, so they can't overlap), then re-texture + reconstruct them CONCURRENTLY
+// (the per-subject image edit + Tripo call is network-bound and the real bottleneck).
+// Each splat is seated as it returns; concurrency is bounded by WS_GEN_CONCURRENCY.
 async function generateWorld(prompt) {
 	if (generating) return
 	generating = true
@@ -637,12 +905,34 @@ async function generateWorld(prompt) {
 	setStatus("")
 	world.resetGenerated()
 
-	const objects = computeObjects(world.primitives)
-	const total = objects.length + 1 // +1 for the floor
+	// Debug flags (server env, surfaced via /api/config): WS_SINGLE_OBJECT generates only
+	// the first object and skips the floor; WS_OBJECTS_ONLY generates every object but
+	// skips the floor (the painted ground stays as a primitive); WS_FLOOR_ONLY generates
+	// only the floor and skips every object; WS_IDENTIFY_ONLY stops after the Gemini
+	// identification phase (logs the numbered graphic + labels, generates nothing).
+	const cfg = await getConfig()
+	const { singleObject, objectsOnly, floorOnly, identifyOnly, yOffset, genConcurrency } = cfg
+	if (Number.isFinite(cfg.opacityFloor)) opacityFloor = cfg.opacityFloor // WS_OPACITY_FLOOR
+	paletteLockOn = Boolean(cfg.paletteLock) // WS_PALETTE_MATCH=lock
+	if (Number.isFinite(cfg.paletteStrength)) paletteStrength = cfg.paletteStrength
+	if (Number.isFinite(cfg.paletteLightness)) paletteLightness = cfg.paletteLightness
+	if (Number.isFinite(cfg.objectYaw)) objectYawDeg = cfg.objectYaw // WS_OBJECT_YAW
+	if (Number.isFinite(cfg.floorYaw)) floorYawDeg = cfg.floorYaw // WS_FLOOR_YAW
+	const objectYOffset = yOffset ?? 0 // WS_CULL_Y_OFFSET: lift seated objects after fitting
+	const concurrency = Math.max(1, Math.floor(genConcurrency || 1)) // WS_GEN_CONCURRENCY: subjects in flight at once
+	let objects = computeObjects(world.primitives)
+	if (floorOnly) objects = []
+	else if (singleObject) objects = objects.slice(0, 1)
+	const doFloor = floorOnly || (!singleObject && !objectsOnly)
+	const total = objects.length + (doFloor ? 1 : 0)
 	let done = 0
-	showProgress(0, total, "Preparing…")
+	showProgress(0, total, singleObject ? "Preparing (single-object test)…" : "Preparing…")
 
 	try {
+		const genStart = performance.now()
+		const subjectTimes = []
+		let idMs = 0
+		let captureMs = 0
 		let output = null
 		try {
 			output = (await newOutput()).index
@@ -650,46 +940,94 @@ async function generateWorld(prompt) {
 			// non-fatal: generation still works, just won't be saved under outputs/NNNN
 		}
 
-		// 1. Floor.
-		showProgress(done, total, "Generating floor…")
-		const floorCapture = await captureFloor(renderer, scene, camera, world)
-		// Send only the guide (one input image). The guide already carries the flat
-		// material colours + painted terrain, so the separate material-ID map is
-		// redundant here and skipping it halves the per-call input-image cost on the
-		// cheap gpt-image-1-mini path.
-		const floorBytes = await generateSubject({
-			prompt,
-			kind: "floor",
-			steps: FLOOR_STEPS,
-			output,
-			name: "floor",
-			groundColor: world.baseGroundColor,
-			image: floorCapture.guide,
-		})
-		await seatSubject(floorBytes, world.floorBox(), "floor", null, FLOOR_YAW_TURNS)
-		world.groundGenerated()
-		done++
-		showProgress(done, total)
+		// 0. Identification: name each object from a numbered whole-world context capture
+		// so each is generated as the right thing (a boulder in a "forest" stays a boulder,
+		// not a stump). Best-effort — on any failure we fall back to scene-context prompting.
+		let labels = {}
+		let groundDesc = "" // Gemini's terrain description; used as the floor's texturing prompt
+		const tId = performance.now()
+		if (objects.length) {
+			showProgress(done, total, "Identifying objects…")
+			try {
+				const context = await captureWorldContext(renderer, scene, world, objects)
+				const identified = await identifyObjects({ image: context, scene: prompt, count: objects.length, output })
+				labels = identified.labels
+				groundDesc = identified.ground
+			} catch {
+				labels = {}
+			}
+		}
+		idMs = performance.now() - tId
 
-		// 2. Each object.
-		for (let i = 0; i < objects.length; i++) {
-			const object = objects[i]
-			const label = objects.length === 1 ? "Generating object…" : `Generating object ${i + 1} of ${objects.length}…`
-			showProgress(done, total, label)
-			const capture = await captureObject(renderer, scene, camera, world, object)
-			const bytes = await generateSubject({
-				prompt,
-				kind: "object",
-				steps: stepsForVolume(object.volume),
-				gaussians: MIN_GAUSSIANS,
-				output,
-				name: `obj-${String(i + 1).padStart(3, "0")}`,
-				image: capture.guide, // guide only — see the floor call above for why
+		// WS_IDENTIFY_ONLY: stop here — the numbered graphic + Gemini labels are already
+		// logged under outputs/NNNN; surface the result and generate nothing.
+		if (identifyOnly) {
+			const summary = Object.keys(labels).length
+				? Object.entries(labels).map(([n, label]) => `${n}: ${label}`).join("  ·  ")
+				: "no labels returned"
+			console.log("[identify-only] labels:", labels, "ground:", groundDesc)
+			setStatus(`Identified — ${summary}`)
+			hideProgress()
+			return
+		}
+
+		// 1. Capture every subject's guide SERIALLY (captures share the renderer + scene, so
+		// they can't overlap) while the block-out is still fully intact. Floor first (if
+		// enabled), then each object. Only the guide is sent — it already carries the flat
+		// material colours + painted terrain, so the material-ID map is redundant and skipping
+		// it halves the per-call input-image cost on the cheap gpt-image-1-mini path.
+		const tCap = performance.now()
+		const subjects = []
+		if (doFloor) {
+			showProgress(done, total, "Capturing floor…")
+			const cap = await captureFloor(renderer, scene, world)
+			subjects.push({
+				kind: "floor", image: cap.guide, box: world.floorBox(), name: "floor", isFloor: true,
+				prompt: groundDesc || prompt, // Gemini's terrain description (falls back to the scene prompt)
+				steps: FLOOR_STEPS, groundColor: world.baseGroundColor, yawTurns: FLOOR_YAW_TURNS, yawDeg: floorYawDeg, yOffset: 0,
+				primitives: null, colors: primitiveColors([world.ground]), // base ground + painted terrain colours
 			})
-			await seatSubject(bytes, object.box, `obj-${i + 1}`, object.primitives, OBJECT_YAW_TURNS)
+		}
+		for (let i = 0; i < objects.length; i++) {
+			showProgress(done, total, `Capturing object ${i + 1} of ${objects.length}…`)
+			const cap = await captureObject(renderer, scene, world, objects[i])
+			subjects.push({
+				kind: "object", image: cap.guide, box: objects[i].box, name: `obj-${String(i + 1).padStart(3, "0")}`,
+				prompt, gaussians: MIN_GAUSSIANS, label: labels[String(i + 1)] || "", // server sets object steps/guidance
+				yawTurns: OBJECT_YAW_TURNS, yawDeg: objectYawDeg, yOffset: objectYOffset, fitHeight: true, primitives: objects[i].primitives,
+				colors: primitiveColors(objects[i].primitives),
+			})
+		}
+		captureMs = performance.now() - tCap
+
+		// 2. Re-texture + reconstruct every subject CONCURRENTLY (bounded by `concurrency`).
+		// The image edit + Tripo call is the per-subject bottleneck and parallelises cleanly;
+		// each splat is seated as it returns. Nothing here touches the shared renderer.
+		done = 0
+		showProgress(0, total, concurrency > 1 ? "Generating (concurrent)…" : "Generating…")
+		await runPool(subjects, concurrency, async s => {
+			const tReq = performance.now()
+			try {
+				const bytes = await generateSubject({
+					prompt: s.prompt, kind: s.kind, steps: s.steps, gaussians: s.gaussians,
+					output, name: s.name, label: s.label, groundColor: s.groundColor, colors: s.colors, image: s.image,
+				})
+				const requestMs = performance.now() - tReq // server-side image edit + Tripo (see server [timing] log)
+				const tSeat = performance.now()
+				await seatSubject(bytes, s.box, s.name, s.primitives, { yawTurns: s.yawTurns, yawDeg: s.yawDeg, yOffset: s.yOffset, fitHeight: Boolean(s.fitHeight), colors: s.colors })
+				subjectTimes.push({ subject: s.name, "request(s)": +(requestMs / 1000).toFixed(2), "seat(ms)": Math.round(performance.now() - tSeat) })
+				if (s.isFloor) world.groundGenerated()
+			} catch (error) {
+				console.warn(`${s.name}:`, error.message)
+			}
 			done++
 			showProgress(done, total)
-		}
+		})
+
+		const totalS = ((performance.now() - genStart) / 1000).toFixed(1)
+		const genS = ((performance.now() - genStart - idMs - captureMs) / 1000).toFixed(1)
+		console.log(`[timing] total ${totalS}s — identify ${(idMs / 1000).toFixed(1)}s · capture ${(captureMs / 1000).toFixed(1)}s · generate+seat ${genS}s (×${concurrency} concurrent)`)
+		console.table(subjectTimes)
 
 		world.state = "generated"
 		applyOverlayVisibility()
@@ -704,11 +1042,21 @@ async function generateWorld(prompt) {
 	}
 }
 
-// Reconstruct + seat one subject's splat into its target box.
-async function seatSubject(bytes, box, name, sourcePrimitives, yawTurns = 0) {
-	const raw = new SplatMesh({ fileBytes: bytes, fileName: `${name}.splat` })
+// Reconstruct + seat one subject's splat into its target box. `colors` (hex palette) drives
+// the optional splat-side palette lock when it's enabled in config.
+async function seatSubject(bytes, box, name, sourcePrimitives, { yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, colors = null, fileName = `${name}.splat` } = {}) {
+	const raw = new SplatMesh({ fileBytes: bytes, fileName })
 	await raw.initialized
-	const fitted = await fitSplatToBox(raw, box, { yawTurns })
+	const fitted = await fitSplatToBox(raw, box, {
+		yawTurns,
+		yawDeg,
+		yOffset,
+		fitHeight,
+		opacityFloor,
+		palette: paletteLockOn && colors?.length ? colors : null,
+		paletteStrength,
+		paletteLightness,
+	})
 	if (!fitted) {
 		disposeObject(raw)
 		throw new Error(`${name}: splat had no usable bounds after culling`)
@@ -716,9 +1064,190 @@ async function seatSubject(bytes, box, name, sourcePrimitives, yawTurns = 0) {
 	world.addGenerated(fitted, sourcePrimitives || [])
 }
 
+// Load one or more uploaded .splat/.ply files and lay them out in a grid of cells on
+// the floor — each splat fit into its own cell box via the normal seat pipeline. Clears
+// any current generation first and hides the block-out so it reads as a splat gallery.
+async function uploadSplats(files) {
+	const list = [...(files || [])]
+	if (!list.length || generating) return
+	generating = true
+	syncGenerateButton()
+	setStatus("")
+	try {
+		world.resetGenerated()
+		for (const primitive of world.primitives) primitive.visible = false
+		world.front.visible = false
+
+		const cols = Math.ceil(Math.sqrt(list.length))
+		const rows = Math.ceil(list.length / cols)
+		const cell = 4 // each splat's footprint is fit into a cell this many plot units wide
+		const spacing = cell * 1.3
+		const half = cell / 2
+		showProgress(0, list.length, "Loading splats…")
+		for (let i = 0; i < list.length; i++) {
+			const file = list[i]
+			const cx = ((i % cols) - (cols - 1) / 2) * spacing
+			const cz = (Math.floor(i / cols) - (rows - 1) / 2) * spacing
+			const box = new THREE.Box3(
+				new THREE.Vector3(cx - half, groundTopY, cz - half),
+				new THREE.Vector3(cx + half, groundTopY + cell, cz + half),
+			)
+			const name = file.name.replace(/\.[^.]+$/, "")
+			try {
+				const bytes = new Uint8Array(await file.arrayBuffer())
+				await seatSubject(bytes, box, name, null, { fileName: file.name })
+			} catch (error) {
+				console.warn(`upload ${file.name}:`, error.message)
+			}
+			showProgress(i + 1, list.length)
+		}
+		world.state = "generated"
+		applyOverlayVisibility()
+		showProgress(list.length, list.length, "Done")
+		window.setTimeout(hideProgress, 1000)
+	} catch (error) {
+		setStatus(error.message || "Upload failed")
+		hideProgress()
+	} finally {
+		generating = false
+		syncGenerateButton()
+	}
+}
+
+// Serialize the block-out primitives to a JSON file so a layout can be saved and fully
+// reloaded — including the support/attachment forest (saved as array indices, since the
+// links are by-reference) so seated stacks survive a round-trip.
+function downloadPrimitives() {
+	const index = new Map(world.primitives.map((mesh, i) => [mesh, i]))
+	const data = {
+		version: 2,
+		primitives: world.primitives.map(mesh => ({
+			type: mesh.userData.type,
+			position: mesh.position.toArray(),
+			rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+			scale: mesh.scale.toArray(),
+			color: `#${mesh.material.color.getHexString()}`,
+			locked: Boolean(mesh.userData.locked),
+			support: mesh.userData.support ? index.get(mesh.userData.support) ?? null : null,
+			supportAxis: mesh.userData.supportAxis ?? { name: "y", sign: 1 },
+		})),
+	}
+	const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+	downloadBlob(blob, `primitives-${Date.now()}.json`)
+}
+
+// Load a primitives JSON file (from downloadPrimitives), replacing the current block-out
+// and restoring the support links once every mesh exists.
+async function uploadPrimitives(file) {
+	if (!file || generating) return
+	let parsed
+	try {
+		parsed = JSON.parse(await file.text())
+	} catch {
+		setStatus("Invalid primitives file (not JSON)")
+		return
+	}
+	const prims = Array.isArray(parsed) ? parsed : parsed?.primitives
+	if (!Array.isArray(prims)) {
+		setStatus("No primitives found in file")
+		return
+	}
+
+	world.resetGenerated() // back to an editable draft before swapping the block-out
+	selectPrimitive(null)
+	for (const mesh of [...world.primitives]) world.removePrimitive(mesh)
+
+	// Pass 1: create every mesh (kept index-aligned with `prims`, null for bad entries).
+	const created = prims.map(p => {
+		if (!p?.type) return null
+		const mesh = createPrimitive(p.type, `prim_${String(nextPrimitiveId++).padStart(3, "0")}`, {
+			color: p.color,
+			position: p.position,
+			rotation: p.rotation,
+			scale: p.scale,
+			locked: p.locked,
+		})
+		mesh.userData.world = world
+		world.primitives.push(mesh)
+		world.group.add(mesh)
+		return mesh
+	})
+
+	// Pass 2: resolve support indices -> mesh refs now that all meshes exist.
+	prims.forEach((p, i) => {
+		const mesh = created[i]
+		if (!mesh) return
+		mesh.userData.support = Number.isInteger(p?.support) ? created[p.support] ?? null : null
+		mesh.userData.supportAxis = p?.supportAxis ?? { name: "y", sign: 1 }
+	})
+
+	setStatus(`Loaded ${world.primitives.length} primitive${world.primitives.length === 1 ? "" : "s"}`)
+}
+
 function applyOverlayVisibility() {
 	world.setCollidersVisible(showColliders)
 	world.setBoundsVisible(showBounds)
+}
+
+// Capture a PNG of JUST the floor from the CURRENT live camera (the exact on-screen
+// view), hiding the block-out objects, generated object splats, and debug overlays.
+// The floor itself — the painted ground while editing, or the floor splat once
+// generated — is left untouched. Downloads the image.
+async function screenshotFloor() {
+	const restored = []
+	const hide = obj => {
+		if (obj && obj.visible) {
+			obj.visible = false
+			restored.push(obj)
+		}
+	}
+	for (const primitive of world.primitives) hide(primitive)
+	for (const { mesh, primitives } of world.generated) if (primitives.length) hide(mesh) // keep the floor splat (no source primitives)
+	for (const helper of world.boundsHelpers) hide(helper)
+	hide(world.front)
+	hide(placementPreview)
+
+	const w = renderer.domElement.width
+	const h = renderer.domElement.height
+	const target = new THREE.WebGLRenderTarget(w, h)
+	try {
+		renderer.setRenderTarget(target)
+		renderer.render(scene, camera)
+		const pixels = new Uint8Array(w * h * 4)
+		renderer.readRenderTargetPixels(target, 0, 0, w, h, pixels)
+		const blob = await pixelsToPngBlob(pixels, w, h)
+		downloadBlob(blob, `floor-${Date.now()}.png`)
+	} finally {
+		renderer.setRenderTarget(null)
+		target.dispose()
+		for (const obj of restored) obj.visible = true
+	}
+}
+
+function pixelsToPngBlob(pixels, w, h) {
+	const canvas = document.createElement("canvas")
+	canvas.width = w
+	canvas.height = h
+	const ctx = canvas.getContext("2d")
+	const image = ctx.createImageData(w, h)
+	for (let y = 0; y < h; y++) {
+		const src = y * w * 4
+		const dst = (h - y - 1) * w * 4 // GL reads bottom-up; flip to top-down
+		image.data.set(pixels.subarray(src, src + w * 4), dst)
+	}
+	ctx.putImageData(image, 0, 0)
+	return new Promise(resolve => canvas.toBlob(resolve, "image/png"))
+}
+
+function downloadBlob(blob, filename) {
+	const url = URL.createObjectURL(blob)
+	const a = document.createElement("a")
+	a.href = url
+	a.download = filename
+	document.body.appendChild(a)
+	a.click()
+	a.remove()
+	URL.revokeObjectURL(url)
 }
 
 // --- UI wiring --------------------------------------------------------------
@@ -726,6 +1255,26 @@ function applyOverlayVisibility() {
 for (const button of els.toolButtons) button.addEventListener("click", () => setActiveTool(button.dataset.tool))
 for (const swatch of els.colorSwatches) swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
 for (const swatch of els.brushSwatches) swatch.addEventListener("click", () => applyBrushScale(Number(swatch.dataset.scale)))
+
+els.floorShot?.addEventListener("click", async () => {
+	try {
+		await screenshotFloor()
+	} catch (error) {
+		setStatus(error.message || "Floor screenshot failed")
+	}
+})
+
+els.uploadSplats?.addEventListener("change", async event => {
+	await uploadSplats(event.target.files)
+	event.target.value = "" // let the same file(s) be re-selected
+})
+
+els.downloadPrims?.addEventListener("click", downloadPrimitives)
+
+els.uploadPrims?.addEventListener("change", async event => {
+	await uploadPrimitives(event.target.files[0])
+	event.target.value = "" // let the same file be re-selected
+})
 
 els.showColliders?.addEventListener("change", () => {
 	showColliders = els.showColliders.checked
