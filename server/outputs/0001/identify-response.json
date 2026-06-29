@@ -1,0 +1,7 @@
+{
+  "ground": "flat dark green forest ground",
+  "labels": {
+    "1": "green umbrella-canopy tree with brown trunk"
+  },
+  "raw": "{\n  \"objects\": {\n    \"1\": \"green umbrella-canopy tree with brown trunk\"\n  },\n  \"ground\": \"flat dark green forest ground\"\n}"
+}
