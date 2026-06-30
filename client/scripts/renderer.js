@@ -6,6 +6,7 @@ import { captureObject, captureFloor, captureWorldContext, FRONT_THETA, FRONT_PH
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject } from "/scripts/primitives.js"
+import { addBuild, listBuilds, getBuildSplats, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { createSky } from "/scripts/sky.js"
 
 const root = document.getElementById("canvas")
@@ -90,18 +91,26 @@ const els = {
 	customColor: document.getElementById("custom_color_input"),
 	brushSwatches: [...document.querySelectorAll("[data-scale]")],
 	generate: document.getElementById("generate_btn"),
+	chatForm: document.getElementById("chat_form"),
+	chatPrompt: document.getElementById("chat_prompt"),
 	floorShot: document.getElementById("floor_shot_btn"),
 	uploadSplats: document.getElementById("upload_splats_input"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
 	downloadZip: document.getElementById("download_zip_btn"),
 	uploadZip: document.getElementById("upload_zip_input"),
-	generateModal: document.getElementById("generate_modal"),
-	generateForm: document.getElementById("generate_form"),
-	cancelGenerate: document.getElementById("cancel_generate_btn"),
-	scenePrompt: document.getElementById("scene_prompt"),
 	showColliders: document.getElementById("show_colliders_input"),
 	showBounds: document.getElementById("show_splat_box_input"),
+	settingsBtn: document.getElementById("settings_btn"),
+	settingsMenu: document.getElementById("settings_menu"),
+	settingsPopover: document.getElementById("settings_popover"),
+	historyToggle: document.getElementById("history_toggle_btn"),
+	historyPanel: document.getElementById("history_panel"),
+	historyList: document.getElementById("history_list"),
+	historyCount: document.getElementById("history_count"),
+	historyClear: document.getElementById("history_clear_btn"),
+	historyClose: document.getElementById("history_close_btn"),
+	historyEmpty: document.getElementById("history_empty"),
 }
 
 renderer.setSize(window.innerWidth, window.innerHeight)
@@ -1155,6 +1164,7 @@ async function generateWorld(prompt) {
 
 		world.state = "generated"
 		applyOverlayVisibility()
+		saveBuildToHistory(world.prompt) // snapshot this completed build into the history panel (best-effort)
 		showProgress(total, total, "Done")
 		window.setTimeout(hideProgress, 1000)
 	} catch (error) {
@@ -1317,68 +1327,12 @@ async function uploadZip(file) {
 		const subjects = sceneData.subjects ?? []
 		if (!subjects.length) throw new Error("ZIP has no subjects in scene.json")
 
-		// Reload primitives (resets generated state, rebuilds block-out).
-		await uploadPrimitives(new File([primBytes], "primitives.json", { type: "application/json" }))
-
-		// Pull fresh fit params from the server so the user can tune via .env and re-fit.
-		const cfg = await getConfig()
-		applyRuntimeConfig(cfg)
-
-		// Group the newly loaded primitives into objects (same logic as generation).
-		const objectGroups = computeObjects(world.primitives)
-		let objectIdx = 0
-
-		splatStore.clear()
-		sessionSubjects = []
-		world.resetGenerated()
-
-		const total = subjects.length
-		let done = 0
-		showProgress(0, total, "Re-fitting…")
-
-		for (const s of subjects) {
-			const splatBytes = files[`splats/${s.name}.splat`]
-			if (!splatBytes) { console.warn(`ZIP missing splats/${s.name}.splat`); done++; showProgress(done, total); continue }
-
-			let box, sourcePrimitives, colors
-			if (s.kind === "floor") {
-				box = world.floorBox()
-				sourcePrimitives = null
-				colors = primitiveColors([world.ground])
-			} else {
-				const group = objectGroups[objectIdx++]
-				if (!group) { done++; showProgress(done, total); continue }
-				box = group.box
-				sourcePrimitives = group.primitives
-				colors = primitiveColors(sourcePrimitives)
-			}
-
-			const fit = fitSettingsFor(s.kind)
-			try {
-				await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
-					kind: s.kind,
-					yawTurns: s.yawTurns ?? 0,
-					yawDeg: fit.yawDeg,
-					yOffset: fit.yOffset,
-					fitHeight: Boolean(s.fitHeight),
-					colors,
-				})
-				splatStore.set(s.name, splatBytes)
-				sessionSubjects.push(s)
-				if (s.kind === "floor") world.groundGenerated()
-			} catch (err) {
-				console.warn(`refit ${s.name}:`, err.message)
-			}
-			done++
-			showProgress(done, total)
-		}
-
-		world.state = "generated"
-		applyOverlayVisibility()
-		const n = sessionSubjects.length
+		const n = await applyStoredBuild({
+			primitives: primBytes,
+			subjects,
+			getSplat: name => files[`splats/${name}.splat`],
+		})
 		setStatus(`Re-fitted ${n} subject${n === 1 ? "" : "s"}`)
-		showProgress(total, total, "Done")
-		window.setTimeout(hideProgress, 1000)
 	} catch (err) {
 		setStatus(err.message || "Re-fit failed")
 		hideProgress()
@@ -1386,6 +1340,81 @@ async function uploadZip(file) {
 		generating = false
 		syncGenerateButton()
 	}
+}
+
+// Shared re-fit core for ZIP re-fit and history restore: swap the block-out to the
+// stored primitives, then re-seat every subject's stored splat bytes against freshly
+// computed boxes (same fit pipeline as generation). `primitives` is the serialized
+// block-out (Uint8Array, JSON string, or object); `getSplat(name)` returns that
+// subject's raw bytes (or undefined). Assumes the caller owns the `generating` lock and
+// will report status / clear it. Returns the number of subjects successfully re-seated.
+async function applyStoredBuild({ primitives, subjects, getSplat }) {
+	if (!subjects?.length) throw new Error("Build has no subjects")
+	const primBytes = primitives instanceof Uint8Array
+		? primitives
+		: new TextEncoder().encode(typeof primitives === "string" ? primitives : JSON.stringify(primitives))
+
+	// Reload primitives (resets generated state, rebuilds block-out).
+	await uploadPrimitives(new File([primBytes], "primitives.json", { type: "application/json" }))
+
+	// Pull fresh fit params from the server so the user can tune via .env and re-fit.
+	const cfg = await getConfig()
+	applyRuntimeConfig(cfg)
+
+	// Group the newly loaded primitives into objects (same logic as generation).
+	const objectGroups = computeObjects(world.primitives)
+	let objectIdx = 0
+
+	splatStore.clear()
+	sessionSubjects = []
+	world.resetGenerated()
+
+	const total = subjects.length
+	let done = 0
+	showProgress(0, total, "Re-fitting…")
+
+	for (const s of subjects) {
+		const splatBytes = getSplat(s.name)
+		if (!splatBytes) { console.warn(`missing splat ${s.name}`); done++; showProgress(done, total); continue }
+
+		let box, sourcePrimitives, colors
+		if (s.kind === "floor") {
+			box = world.floorBox()
+			sourcePrimitives = null
+			colors = primitiveColors([world.ground])
+		} else {
+			const group = objectGroups[objectIdx++]
+			if (!group) { done++; showProgress(done, total); continue }
+			box = group.box
+			sourcePrimitives = group.primitives
+			colors = primitiveColors(sourcePrimitives)
+		}
+
+		const fit = fitSettingsFor(s.kind)
+		try {
+			await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
+				kind: s.kind,
+				yawTurns: s.yawTurns ?? 0,
+				yawDeg: fit.yawDeg,
+				yOffset: fit.yOffset,
+				fitHeight: Boolean(s.fitHeight),
+				colors,
+			})
+			splatStore.set(s.name, splatBytes)
+			sessionSubjects.push(s)
+			if (s.kind === "floor") world.groundGenerated()
+		} catch (err) {
+			console.warn(`refit ${s.name}:`, err.message)
+		}
+		done++
+		showProgress(done, total)
+	}
+
+	world.state = "generated"
+	applyOverlayVisibility()
+	showProgress(total, total, "Done")
+	window.setTimeout(hideProgress, 1000)
+	return sessionSubjects.length
 }
 
 // Load a primitives JSON file (from downloadPrimitives), replacing the current block-out
@@ -1502,6 +1531,177 @@ function downloadBlob(blob, filename) {
 	URL.revokeObjectURL(url)
 }
 
+// --- Build history ----------------------------------------------------------
+
+let historyOpen = false
+
+// Render the current scene to a small offscreen target and return a JPEG data URL for
+// the history thumbnail. Independent of the live framebuffer (same render-to-target
+// trick as screenshotFloor). Returns "" on any failure — a thumb is never essential.
+function captureThumb(maxW = 320) {
+	try {
+		const fullW = renderer.domElement.width
+		const fullH = renderer.domElement.height
+		if (!fullW || !fullH) return ""
+		const scale = Math.min(1, maxW / fullW)
+		const w = Math.max(1, Math.round(fullW * scale))
+		const h = Math.max(1, Math.round(fullH * scale))
+		const target = new THREE.WebGLRenderTarget(w, h)
+		try {
+			renderer.setRenderTarget(target)
+			renderer.render(scene, camera)
+			const pixels = new Uint8Array(w * h * 4)
+			renderer.readRenderTargetPixels(target, 0, 0, w, h, pixels)
+			const canvas = document.createElement("canvas")
+			canvas.width = w
+			canvas.height = h
+			const ctx = canvas.getContext("2d")
+			const image = ctx.createImageData(w, h)
+			for (let y = 0; y < h; y++) {
+				const src = y * w * 4
+				const dst = (h - y - 1) * w * 4 // GL reads bottom-up; flip to top-down
+				image.data.set(pixels.subarray(src, src + w * 4), dst)
+			}
+			ctx.putImageData(image, 0, 0)
+			return canvas.toDataURL("image/jpeg", 0.62)
+		} finally {
+			renderer.setRenderTarget(null)
+			target.dispose()
+		}
+	} catch {
+		return ""
+	}
+}
+
+// Snapshot the just-completed build (block-out + every subject's splat bytes + prompt +
+// a thumbnail) into the persistent history. Best-effort: never blocks or breaks
+// generation if storage fails. Fired (not awaited) from generateWorld.
+async function saveBuildToHistory(prompt) {
+	if (!splatStore.size) return
+	const thumb = captureThumb()
+	const subjects = sessionSubjects.map(s => ({ ...s }))
+	const primitives = JSON.stringify(serializePrimitives())
+	try {
+		await addBuild({ prompt, thumb, subjects, primitives, splats: splatStore })
+		await refreshHistoryPanel()
+	} catch (err) {
+		console.warn("history save failed:", err.message || err)
+	}
+}
+
+function relTime(ts) {
+	const s = Math.max(0, Math.round((Date.now() - ts) / 1000))
+	if (s < 60) return "just now"
+	const m = Math.round(s / 60)
+	if (m < 60) return `${m}m ago`
+	const h = Math.round(m / 60)
+	if (h < 24) return `${h}h ago`
+	return `${Math.round(h / 24)}d ago`
+}
+
+// Rebuild the history panel list from IndexedDB (newest first). Also keeps the count
+// badge + empty-state in sync so it's right whether the panel is open or closed.
+async function refreshHistoryPanel() {
+	if (!els.historyList) return
+	let builds = []
+	try { builds = await listBuilds() } catch (err) { console.warn("history list failed:", err.message || err) }
+	if (els.historyCount) els.historyCount.textContent = builds.length ? String(builds.length) : ""
+	if (els.historyEmpty) els.historyEmpty.classList.toggle("hidden", builds.length > 0)
+	els.historyList.replaceChildren()
+	for (const b of builds) els.historyList.appendChild(historyItem(b))
+}
+
+function historyItem(b) {
+	const item = document.createElement("div")
+	item.className = "history-item"
+
+	const thumbBtn = document.createElement("button")
+	thumbBtn.className = "history-thumb"
+	thumbBtn.title = "Restore this build"
+	if (b.thumb) {
+		const img = document.createElement("img")
+		img.src = b.thumb
+		img.alt = b.prompt || "build"
+		thumbBtn.appendChild(img)
+	} else {
+		thumbBtn.textContent = "—"
+	}
+	thumbBtn.addEventListener("click", () => restoreBuild(b.id))
+
+	const meta = document.createElement("button")
+	meta.className = "history-meta"
+	const title = document.createElement("div")
+	title.className = "history-title"
+	title.textContent = b.prompt?.trim() || "Untitled build"
+	title.title = b.prompt || ""
+	const sub = document.createElement("div")
+	sub.className = "history-sub"
+	sub.textContent = `${b.subjectCount} part${b.subjectCount === 1 ? "" : "s"} · ${relTime(b.ts)}`
+	meta.append(title, sub)
+	meta.addEventListener("click", () => restoreBuild(b.id))
+
+	const del = document.createElement("button")
+	del.className = "history-del"
+	del.title = "Delete this build"
+	del.textContent = "×"
+	del.addEventListener("click", async event => {
+		event.stopPropagation()
+		try { await deleteBuild(b.id) } catch (err) { console.warn(err) }
+		await refreshHistoryPanel()
+	})
+
+	item.append(thumbBtn, meta, del)
+	return item
+}
+
+// Restore a stored build: swap in its block-out and re-seat its splats from IndexedDB
+// without regenerating. Replaces the current scene (same as ZIP re-fit).
+async function restoreBuild(id) {
+	if (generating) return
+	let entry, splats
+	try {
+		entry = (await listBuilds()).find(b => b.id === id)
+		splats = await getBuildSplats(id)
+	} catch {
+		setStatus("Couldn't load that build")
+		return
+	}
+	if (!entry || !splats) { setStatus("That build is no longer available"); await refreshHistoryPanel(); return }
+	generating = true
+	syncGenerateButton()
+	setStatus("")
+	try {
+		const n = await applyStoredBuild({
+			primitives: entry.primitives,
+			subjects: entry.subjects,
+			getSplat: name => splats[name],
+		})
+		world.prompt = entry.prompt || ""
+		if (els.chatPrompt) els.chatPrompt.value = world.prompt
+		setStatus(`Restored ${n} part${n === 1 ? "" : "s"} from history`)
+	} catch (err) {
+		setStatus(err.message || "Restore failed")
+		hideProgress()
+	} finally {
+		generating = false
+		syncGenerateButton()
+	}
+}
+
+function toggleHistoryPanel(open) {
+	historyOpen = open ?? !historyOpen
+	if (historyOpen && els.settingsPopover) toggleSettings(false) // close settings so the two panels don't overlap
+	els.historyPanel?.classList.toggle("hidden", !historyOpen)
+	els.historyToggle?.classList.toggle("active", historyOpen)
+	if (historyOpen) refreshHistoryPanel()
+}
+
+function toggleSettings(open) {
+	const next = open ?? els.settingsPopover.classList.contains("hidden")
+	els.settingsPopover.classList.toggle("hidden", !next)
+	els.settingsBtn.setAttribute("aria-expanded", String(next))
+}
+
 // --- UI wiring --------------------------------------------------------------
 
 for (const button of els.toolButtons) button.addEventListener("click", () => setActiveTool(button.dataset.tool))
@@ -1548,20 +1748,32 @@ els.showBounds?.addEventListener("change", () => {
 	world.setBoundsVisible(showBounds)
 })
 
-els.generate.addEventListener("click", () => {
-	if (els.generate.disabled) return
-	els.scenePrompt.value = world.prompt || ""
-	els.generateModal.showModal()
-	els.scenePrompt.focus()
+els.settingsBtn?.addEventListener("click", event => {
+	event.stopPropagation() // don't let the document handler immediately re-close it
+	toggleSettings()
 })
 
-els.cancelGenerate.addEventListener("click", () => els.generateModal.close())
+document.addEventListener("click", event => {
+	if (!els.settingsMenu?.contains(event.target)) toggleSettings(false)
+})
 
-els.generateForm.addEventListener("submit", event => {
+document.addEventListener("keydown", event => {
+	if (event.key === "Escape") toggleSettings(false)
+})
+
+els.historyToggle?.addEventListener("click", () => toggleHistoryPanel())
+
+els.historyClear?.addEventListener("click", async () => {
+	try { await clearBuilds() } catch (err) { console.warn(err) }
+	await refreshHistoryPanel()
+})
+
+els.historyClose?.addEventListener("click", () => toggleHistoryPanel(false))
+
+els.chatForm.addEventListener("submit", event => {
 	event.preventDefault()
-	const prompt = els.scenePrompt.value.trim()
-	els.generateModal.close()
-	generateWorld(prompt)
+	if (els.generate.disabled) return
+	generateWorld(els.chatPrompt.value.trim())
 })
 
 window.addEventListener("resize", () => {
@@ -1581,4 +1793,6 @@ applyColor(activeColor)
 applyBrushScale(activeBrushScale)
 updateCamera()
 syncGenerateButton()
+if (world.prompt) els.chatPrompt.value = world.prompt
+refreshHistoryPanel() // populate the count badge from any builds saved in earlier sessions
 requestAnimationFrame(animate)
