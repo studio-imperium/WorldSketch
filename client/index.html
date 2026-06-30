@@ -15,7 +15,8 @@
 		"imports": {
 			"three": "/lib/three.module.js",
 			"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
-			"spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js"
+			"spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js",
+			"fflate": "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js"
 		}
 	}
 	</script>
@@ -39,6 +40,13 @@
 					<button class="color-swatch btn btn-ghost btn-square" data-color="#6f7446" aria-label="Olive" title="Olive"><span style="background: #6f7446"></span></button>
 					<button class="color-swatch btn btn-ghost btn-square" data-color="#59686c" aria-label="Slate" title="Slate"><span style="background: #59686c"></span></button>
 					<button class="color-swatch btn btn-ghost btn-square" data-color="#6c7f89" aria-label="Muted blue" title="Muted blue"><span style="background: #6c7f89"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#7cc8ff" aria-label="Sky blue" title="Sky blue"><span style="background: #7cc8ff"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#1769aa" aria-label="Ocean blue" title="Ocean blue"><span style="background: #1769aa"></span></button>
+					<button class="color-swatch btn btn-ghost btn-square" data-color="#f4a6c8" aria-label="Light pink" title="Light pink"><span style="background: #f4a6c8"></span></button>
+					<button class="add-color-swatch btn btn-ghost btn-square" id="add_color_btn" aria-label="Add color" title="Add color">
+						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+					</button>
+					<input type="color" id="custom_color_input" value="#7cc8ff" hidden>
 				</div>
 			</div>
 		</section>
@@ -70,6 +78,13 @@
 			<label class="floor-shot-btn btn btn-square" id="upload_prims_label" aria-label="Upload primitives" title="Load block-out primitives from a JSON file (replaces the current block-out)">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-11a2 2 0 0 1 2 -2"></path></svg>
 				<input type="file" id="upload_prims_input" accept=".json" hidden>
+			</label>
+			<button class="floor-shot-btn btn btn-square" id="download_zip_btn" aria-label="Download session ZIP" title="Export splats + primitives as a ZIP for quick re-fitting">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"></path><path d="M7 11l5 5l5 -5"></path><path d="M12 4l0 12"></path></svg>
+			</button>
+			<label class="floor-shot-btn btn btn-square" id="upload_zip_label" aria-label="Upload session ZIP" title="Re-fit a previously exported ZIP to the current primitives (skips generation)">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"></path><path d="M7 9l5 -5l5 5"></path><path d="M12 4l0 12"></path></svg>
+				<input type="file" id="upload_zip_input" accept=".zip" hidden>
 			</label>
 			<div class="gen-progress hidden" id="progress" aria-live="polite">
 				<div class="gen-progress-track"><span class="gen-progress-fill" id="progress_fill"></span></div>

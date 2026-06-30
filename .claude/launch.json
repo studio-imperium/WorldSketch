@@ -8,6 +8,14 @@
       "cwd": "server",
       "port": 8067,
       "autoPort": true
+    },
+    {
+      "name": "soccer",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "/Users/wqm/Documents/Projects/Viggle/Soccer",
+      "port": 5176,
+      "autoPort": true
     }
   ]
 }

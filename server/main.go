@@ -25,6 +25,31 @@ import (
 
 const defaultTripoURL = "http://148.153.245.160:18080"
 
+type imageEditSettings struct {
+	Provider      string
+	GeminiModel   string
+	OpenAIModel   string
+	Size          string
+	Quality       string
+	Fidelity      string
+	Background    string
+	Format        string
+	SkipImageEdit bool
+}
+
+type paletteSettings struct {
+	Mode      string
+	Strength  float64
+	Lightness float64
+}
+
+type tripoSettings struct {
+	Steps     string
+	Guidance  string
+	Gaussians string
+	Format    string
+}
+
 var httpClient = &http.Client{Timeout: 180 * time.Second}
 
 func main() {
@@ -69,17 +94,28 @@ func handleConfig(w http.ResponseWriter, r *http.Request) {
 		"objectsOnly":    envBool("WS_OBJECTS_ONLY", false),
 		"floorOnly":      envBool("WS_FLOOR_ONLY", false),
 		"identifyOnly":   envBool("WS_IDENTIFY_ONLY", false),
-		"yOffset":        envFloat("WS_CULL_Y_OFFSET", 0),   // plot-local Y nudge applied to seated objects
 		"genConcurrency": envFloat("WS_GEN_CONCURRENCY", 4), // subjects re-textured + reconstructed in parallel
-		"opacityFloor":   envFloat("WS_OPACITY_FLOOR", 0.1), // drop gaussians below this opacity (kills wisps)
-		// Splat-side palette lock: when WS_PALETTE_MATCH=lock, the client recolours the
-		// reconstructed gaussians onto the block-out palette with the same strength/lightness.
-		"paletteLock":      paletteMode(env("WS_PALETTE_MATCH", "off")) == "lock",
-		"paletteStrength":  envFloat("WS_PALETTE_MATCH_STRENGTH", 0.75),
-		"paletteLightness": envFloat("WS_PALETTE_MATCH_LIGHTNESS", 0),
-		"objectYaw":        envFloat("WS_OBJECT_YAW", 0), // post-seat yaw (deg) applied to object splats
-		"floorYaw":         envFloat("WS_FLOOR_YAW", 0),  // post-seat yaw (deg) applied to the floor splat
+		"object":         subjectClientConfig("object"),
+		"floor":          subjectClientConfig("floor"),
 	})
+}
+
+func subjectClientConfig(kind string) map[string]any {
+	palette := subjectPaletteSettings(kind)
+	yOffsetLegacy := []string{}
+	if kind == "object" {
+		yOffsetLegacy = []string{"WS_CULL_Y_OFFSET"}
+	}
+	return map[string]any{
+		"yOffset":           subjectEnvFloat(kind, "Y_OFFSET", yOffsetLegacy, 0),
+		"opacityFloor":      subjectEnvFloat(kind, "OPACITY_FLOOR", []string{"WS_OPACITY_FLOOR"}, 0.03),
+		"paletteLock":       palette.Mode == "lock",
+		"paletteStrength":   palette.Strength,
+		"paletteLightness":  palette.Lightness,
+		"yaw":               subjectEnvFloat(kind, "YAW", nil, 0),
+		"fitClampK":         subjectEnvFloat(kind, "FIT_CLAMP_K", []string{"WS_FIT_CLAMP_K"}, 0),
+		"fitBboxPercentile": subjectEnvFloat(kind, "FIT_BBOX_PERCENTILE", []string{"WS_FIT_BBOX_PERCENTILE"}, 0),
+	}
 }
 
 // handleGenerate re-textures a single isolated subject (one object, or the floor)
@@ -125,23 +161,22 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	promptText := imagePromptFor(kind, prompt, groundColor, strings.TrimSpace(r.FormValue("label")))
+	imageSettings := subjectImageEditSettings(kind)
+	palette := subjectPaletteSettings(kind)
 
 	tImage := time.Now()
 	edited := image
-	if envBool("WS_SKIP_IMAGE_EDIT", envBool("WS_SKIP_OPENAI", false)) {
+	if imageSettings.SkipImageEdit {
 		// Image edit skipped: the raw block-out screenshot is fed straight to Tripo.
 		// Still record the (input -> output) pair so the screenshot is always saved.
 		saveGeneration(dir, name, image, materialImage, edited, prompt)
 	} else {
-		// Re-texture the block-out. WS_IMAGE_PROVIDER picks the backend: "openai"
-		// (gpt-image-1-mini, default — the cheap path) or "gemini" (2.5 Flash Image).
-		// Both run the same promptText + image inputs so they are an apples-to-apples A/B.
-		model, fidelity := imageModelFor(kind)
-		switch strings.ToLower(env("WS_IMAGE_PROVIDER", "openai")) {
+		// Re-texture the block-out. Each subject type has its own image backend/settings.
+		switch strings.ToLower(imageSettings.Provider) {
 		case "gemini":
-			edited, err = geminiEdit(image, materialImage, promptText)
+			edited, err = geminiEdit(image, materialImage, promptText, imageSettings.GeminiModel)
 		default:
-			edited, err = openAIEdit(image, materialImage, promptText, model, fidelity)
+			edited, err = openAIEdit(image, materialImage, promptText, imageSettings)
 		}
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
@@ -153,18 +188,17 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 		//   "lock"   — snap every pixel's hue/chroma to the nearest block-out palette
 		//              colour, keeping ONLY the model's brightness. Kills all hue drift.
 		// Off / false / "" disables it. (WS_PALETTE_MATCH=1/true still means "global".)
-		strength := envFloat("WS_PALETTE_MATCH_STRENGTH", 0.75)
 		var matched []byte
 		var perr error
-		switch paletteMode(env("WS_PALETTE_MATCH", "off")) {
+		switch palette.Mode {
 		case "global":
-			matched, perr = paletteMatch(image, edited, strength)
+			matched, perr = paletteMatch(image, edited, palette.Strength)
 		case "lock":
 			// Lock the generated hues to the object's exact primitive colours (sent by the
 			// client). WS_PALETTE_MATCH_LIGHTNESS in [0,1] additionally pulls each pixel's
 			// lightness toward its matched flat palette colour's brightness (0 = keep the
 			// model's lightness, 1 = flat onto the palette colour). No palette = no-op.
-			matched, perr = paletteLock(edited, parsePaletteColors(r.FormValue("colors")), strength, envFloat("WS_PALETTE_MATCH_LIGHTNESS", 0))
+			matched, perr = paletteLock(edited, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
 		}
 		if perr != nil {
 			log.Printf("palette match skipped for %s: %v", name, perr)
@@ -176,16 +210,9 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 	imageDur := time.Since(tImage)
 
-	// Objects are cheap, fixed-budget subjects (OBJECT_STEPS/OBJECT_GUIDANCE); the floor
-	// keeps the client-sized steps + the global guidance.
-	steps := tripoSteps(r.FormValue("steps"))
-	guidance := env("WS_TRIPO_GUIDANCE", "7")
-	if kind == "object" {
-		steps = env("OBJECT_STEPS", "3")
-		guidance = env("OBJECT_GUIDANCE", "2")
-	}
+	tripo := subjectTripoSettings(kind, r.FormValue("steps"), r.FormValue("gaussians"))
 	tTripo := time.Now()
-	splat, err := tripoGenerate(edited, steps, tripoGaussians(r.FormValue("gaussians")), guidance)
+	splat, err := tripoGenerate(edited, tripo)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -200,18 +227,48 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(splat)
 }
 
-// imageModelFor picks the OpenAI image model + input fidelity per subject. The floor
-// is the one subject we don't skimp on — it uses the full gpt-image-1 with high input
-// fidelity so the painted terrain layout is preserved precisely. Objects use the cheap
-// gpt-image-1-mini (which ignores fidelity). All overridable via env.
-func imageModelFor(kind string) (string, string) {
+func subjectImageEditSettings(kind string) imageEditSettings {
 	if kind == "floor" {
-		return env("WS_FLOOR_IMAGE_MODEL", "gpt-image-1"), env("WS_FLOOR_IMAGE_FIDELITY", "high")
+		return imageEditSettings{
+			Provider:      subjectEnv(kind, "IMAGE_PROVIDER", []string{"WS_IMAGE_PROVIDER"}, "openai"),
+			GeminiModel:   subjectEnv(kind, "GEMINI_IMAGE_MODEL", []string{"WS_GEMINI_IMAGE_MODEL"}, "gemini-2.5-flash-image"),
+			OpenAIModel:   subjectEnv(kind, "IMAGE_MODEL", []string{"WS_FLOOR_IMAGE_MODEL", "WS_IMAGE_MODEL"}, "gpt-image-1"),
+			Size:          subjectEnv(kind, "IMAGE_SIZE", []string{"WS_IMAGE_SIZE"}, "1024x1024"),
+			Quality:       subjectEnv(kind, "IMAGE_QUALITY", []string{"WS_IMAGE_QUALITY"}, "medium"),
+			Fidelity:      subjectEnv(kind, "IMAGE_FIDELITY", []string{"WS_FLOOR_IMAGE_FIDELITY", "WS_IMAGE_FIDELITY"}, "high"),
+			Background:    subjectEnv(kind, "IMAGE_BACKGROUND", []string{"WS_IMAGE_BACKGROUND"}, "transparent"),
+			Format:        subjectEnv(kind, "IMAGE_FORMAT", []string{"WS_IMAGE_FORMAT"}, "png"),
+			SkipImageEdit: subjectSkipImageEdit(kind),
+		}
 	}
-	return env("WS_IMAGE_MODEL", "gpt-image-1-mini"), env("WS_IMAGE_FIDELITY", "low")
+	return imageEditSettings{
+		Provider:      subjectEnv(kind, "IMAGE_PROVIDER", []string{"WS_IMAGE_PROVIDER"}, "openai"),
+		GeminiModel:   subjectEnv(kind, "GEMINI_IMAGE_MODEL", []string{"WS_GEMINI_IMAGE_MODEL"}, "gemini-2.5-flash-image"),
+		OpenAIModel:   subjectEnv(kind, "IMAGE_MODEL", []string{"WS_IMAGE_MODEL"}, "gpt-image-1-mini"),
+		Size:          subjectEnv(kind, "IMAGE_SIZE", []string{"WS_IMAGE_SIZE"}, "1024x1024"),
+		Quality:       subjectEnv(kind, "IMAGE_QUALITY", []string{"WS_IMAGE_QUALITY"}, "medium"),
+		Fidelity:      subjectEnv(kind, "IMAGE_FIDELITY", []string{"WS_IMAGE_FIDELITY"}, "low"),
+		Background:    subjectEnv(kind, "IMAGE_BACKGROUND", []string{"WS_IMAGE_BACKGROUND"}, "transparent"),
+		Format:        subjectEnv(kind, "IMAGE_FORMAT", []string{"WS_IMAGE_FORMAT"}, "png"),
+		SkipImageEdit: subjectSkipImageEdit(kind),
+	}
 }
 
-func openAIEdit(image, materialImage []byte, promptText, model, fidelity string) ([]byte, error) {
+func subjectSkipImageEdit(kind string) bool {
+	fallback := envBool("WS_SKIP_IMAGE_EDIT", envBool("WS_SKIP_OPENAI", false))
+	return subjectEnvBool(kind, "SKIP_IMAGE_EDIT", nil, fallback)
+}
+
+func subjectPaletteSettings(kind string) paletteSettings {
+	mode := paletteMode(subjectEnv(kind, "PALETTE_MATCH", []string{"WS_PALETTE_MATCH"}, "off"))
+	return paletteSettings{
+		Mode:      mode,
+		Strength:  subjectEnvFloat(kind, "PALETTE_MATCH_STRENGTH", []string{"WS_PALETTE_MATCH_STRENGTH"}, 0.75),
+		Lightness: subjectEnvFloat(kind, "PALETTE_MATCH_LIGHTNESS", []string{"WS_PALETTE_MATCH_LIGHTNESS"}, 0),
+	}
+}
+
+func openAIEdit(image, materialImage []byte, promptText string, settings imageEditSettings) ([]byte, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	if key == "" {
 		return nil, errors.New("OPENAI_API_KEY is not set")
@@ -219,19 +276,19 @@ func openAIEdit(image, materialImage []byte, promptText, model, fidelity string)
 
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
-	mustField(writer, "model", model)
-	mustField(writer, "size", env("WS_IMAGE_SIZE", "1024x1024"))
+	mustField(writer, "model", settings.OpenAIModel)
+	mustField(writer, "size", settings.Size)
 	mustField(writer, "prompt", promptText)
-	optField(writer, "quality", env("WS_IMAGE_QUALITY", "low"))
+	optField(writer, "quality", settings.Quality)
 	// input_fidelity is ONLY supported by the full gpt-image-1 model — gpt-image-1-mini
 	// (and gpt-image-1.5 / gpt-image-2) reject it. Only send it for the full model, so
 	// the default mini object path never passes it. On full gpt-image-1 (the floor), high
 	// fidelity preserves the painted terrain layout (but adds ~4160 input tokens/image).
-	if strings.EqualFold(model, "gpt-image-1") {
-		optField(writer, "input_fidelity", fidelity)
+	if strings.EqualFold(settings.OpenAIModel, "gpt-image-1") {
+		optField(writer, "input_fidelity", settings.Fidelity)
 	}
-	optField(writer, "background", env("WS_IMAGE_BACKGROUND", "opaque"))
-	optField(writer, "output_format", env("WS_IMAGE_FORMAT", "png"))
+	optField(writer, "background", settings.Background)
+	optField(writer, "output_format", settings.Format)
 
 	images := []struct {
 		name string
@@ -300,12 +357,11 @@ func openAIEdit(image, materialImage []byte, promptText, model, fidelity string)
 // geminiEdit re-textures the block-out with Gemini 2.5 Flash Image (the default
 // backend). Same promptText + image inputs as openAIEdit; the key is sourced via
 // geminiAPIKey (env or the Viggle .env).
-func geminiEdit(image, materialImage []byte, promptText string) ([]byte, error) {
+func geminiEdit(image, materialImage []byte, promptText, model string) ([]byte, error) {
 	key := geminiAPIKey()
 	if key == "" {
 		return nil, errors.New("GEMINI_API_KEY is not set (and not found in the Viggle backend .env)")
 	}
-	model := env("WS_GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image")
 
 	// Parts: the prompt, then the geometry guide, then the optional material-ID map —
 	// same order/role the prompt text refers to as "Image 1" / "Image 2".
@@ -487,17 +543,34 @@ func saveSplat(dir, name string, splat []byte) {
 	}
 }
 
-// tripoSteps resolves the diffusion step count for this subject. The client sizes it
-// by object volume (tiny rocks get a cheap 2-3 steps), passed in the "steps" field;
-// it falls back to WS_TRIPO_STEPS and is clamped to a sane range.
-func tripoSteps(field string) string {
-	steps := env("WS_TRIPO_STEPS", "24")
-	if s := strings.TrimSpace(field); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			steps = strconv.Itoa(clampInt(n, 1, 64))
-		}
+func subjectTripoSettings(kind, stepsField, gaussiansField string) tripoSettings {
+	stepsDefault := "24"
+	stepsLegacy := []string{"WS_TRIPO_STEPS"}
+	guidanceDefault := "7"
+	guidanceLegacy := []string{"WS_TRIPO_GUIDANCE"}
+	if kind == "object" {
+		stepsDefault = "14"
+		stepsLegacy = []string{"OBJECT_STEPS", "WS_TRIPO_STEPS"}
+		guidanceDefault = "3"
+		guidanceLegacy = []string{"OBJECT_GUIDANCE", "WS_TRIPO_GUIDANCE"}
 	}
-	return steps
+	return tripoSettings{
+		Steps:     clampIntString(subjectEnv(kind, "TRIPO_STEPS", stepsLegacy, stepsField), stepsDefault, 1, 64),
+		Guidance:  subjectEnv(kind, "TRIPO_GUIDANCE", guidanceLegacy, guidanceDefault),
+		Gaussians: clampIntString(subjectEnv(kind, "TRIPO_GAUSSIANS", []string{"WS_TRIPO_GAUSSIANS"}, gaussiansField), "32768", 1024, 262144),
+		Format:    subjectEnv(kind, "TRIPO_FORMAT", []string{"WS_TRIPO_FORMAT"}, "splat"),
+	}
+}
+
+func clampIntString(value, fallback string, min, max int) string {
+	out := fallback
+	if s := strings.TrimSpace(value); s != "" {
+		out = s
+	}
+	if n, err := strconv.Atoi(out); err == nil && n > 0 {
+		return strconv.Itoa(clampInt(n, min, max))
+	}
+	return fallback
 }
 
 // paletteMatch nudges the re-textured image (dst) toward the source block-out's CHROMA
@@ -624,16 +697,16 @@ func paletteLock(dstPNG []byte, palette [][3]float64, strength, lightnessLock fl
 	return out.Bytes(), nil
 }
 
-// nearestLab returns the palette colour closest to (L,a,b), weighting lightness low so a
-// dark and a bright shade of the same hue still classify to the same palette entry.
+// nearestLab returns the palette colour closest to (L,a,b) by chroma only. Lightness is
+// intentionally ignored here so dark greens do not snap to a brown palette entry just
+// because brown has a closer brightness.
 func nearestLab(palette [][3]float64, L, a, b float64) [3]float64 {
 	best := palette[0]
 	bestD := math.Inf(1)
 	for _, p := range palette {
-		dL := (p[0] - L) * 0.25
 		da := p[1] - a
 		db := p[2] - b
-		if d := dL*dL + da*da + db*db; d < bestD {
+		if d := da*da + db*db; d < bestD {
 			bestD = d
 			best = p
 		}
@@ -769,28 +842,15 @@ func clamp8(c float64) uint8 {
 	return uint8(v + 0.5)
 }
 
-// tripoGaussians resolves the gaussian count. The client pins objects to the minimum
-// (2^15) to keep the modular many-subject world cheap; the field falls back to
-// WS_TRIPO_GAUSSIANS (used by the floor, which sends none) and is clamped sane.
-func tripoGaussians(field string) string {
-	gaussians := env("WS_TRIPO_GAUSSIANS", "32768")
-	if s := strings.TrimSpace(field); s != "" {
-		if n, err := strconv.Atoi(s); err == nil && n > 0 {
-			gaussians = strconv.Itoa(clampInt(n, 1024, 262144))
-		}
-	}
-	return gaussians
-}
-
-func tripoGenerate(image []byte, steps, gaussians, guidance string) ([]byte, error) {
+func tripoGenerate(image []byte, settings tripoSettings) ([]byte, error) {
 	var body bytes.Buffer
 	writer := multipart.NewWriter(&body)
 	mustField(writer, "seed", "42") // fixed seed so generations are reproducible
-	mustField(writer, "steps", steps)
+	mustField(writer, "steps", settings.Steps)
 	mustField(writer, "preprocess", "true")
-	mustField(writer, "guidance_scale", guidance)
-	mustField(writer, "num_gaussians", gaussians)
-	mustField(writer, "output_format", env("WS_TRIPO_FORMAT", "splat"))
+	mustField(writer, "guidance_scale", settings.Guidance)
+	mustField(writer, "num_gaussians", settings.Gaussians)
+	mustField(writer, "output_format", settings.Format)
 
 	part, err := createPNGFormFile(writer, "image", "subject.png")
 	if err != nil {
@@ -1048,7 +1108,7 @@ func objectPrompt(scene, label string) string {
 	if label != "" {
 		subject = "a single " + label
 	}
-	return "Using the same structure and colors as Image 1, transform the structure into " + subject + ", photorealistic."
+	return "Using the same structure and colors as Image 1, transform the structure into " + subject + ", photorealistic. The object must appear completely alone — no floor, no ground plane, no shadow beneath it, no background scenery — just the isolated object on a pure black background."
 }
 
 func floorPrompt(scene, groundColor string) string {
@@ -1182,6 +1242,33 @@ func env(name, fallback string) string {
 	return value
 }
 
+func envMaybe(name string) (string, bool) {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+func subjectPrefix(kind string) string {
+	if kind == "floor" {
+		return "WS_FLOOR_"
+	}
+	return "WS_OBJECT_"
+}
+
+func subjectEnv(kind, suffix string, legacy []string, fallback string) string {
+	if value, ok := envMaybe(subjectPrefix(kind) + suffix); ok {
+		return value
+	}
+	for _, key := range legacy {
+		if value, ok := envMaybe(key); ok {
+			return value
+		}
+	}
+	return fallback
+}
+
 func envBool(name string, fallback bool) bool {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -1194,6 +1281,26 @@ func envBool(name string, fallback bool) bool {
 	return parsed
 }
 
+func parseBoolDefault(value string, fallback bool) bool {
+	parsed, err := strconv.ParseBool(value)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func subjectEnvBool(kind, suffix string, legacy []string, fallback bool) bool {
+	if value, ok := envMaybe(subjectPrefix(kind) + suffix); ok {
+		return parseBoolDefault(value, fallback)
+	}
+	for _, key := range legacy {
+		if value, ok := envMaybe(key); ok {
+			return parseBoolDefault(value, fallback)
+		}
+	}
+	return fallback
+}
+
 func envFloat(name string, fallback float64) float64 {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -1204,6 +1311,26 @@ func envFloat(name string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
+}
+
+func parseFloatDefault(value string, fallback float64) float64 {
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil {
+		return fallback
+	}
+	return parsed
+}
+
+func subjectEnvFloat(kind, suffix string, legacy []string, fallback float64) float64 {
+	if value, ok := envMaybe(subjectPrefix(kind) + suffix); ok {
+		return parseFloatDefault(value, fallback)
+	}
+	for _, key := range legacy {
+		if value, ok := envMaybe(key); ok {
+			return parseFloatDefault(value, fallback)
+		}
+	}
+	return fallback
 }
 
 func rootDir() string {

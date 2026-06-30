@@ -8,13 +8,14 @@ const colors = {
 }
 
 export function createPrimitive(type, id, seed = {}) {
+	const baseColor = seed.color ?? colors[type]
 	const material = new THREE.MeshStandardMaterial({
-		color: seed.color ?? colors[type],
+		color: baseColor,
 		roughness: 0.86,
 		metalness: 0,
 	})
 	const mesh = new THREE.Mesh(geometryFor(type), material)
-	mesh.userData = { id, type, locked: Boolean(seed.locked) }
+	mesh.userData = { id, type, locked: Boolean(seed.locked), baseColor: material.color.getHexString() }
 	mesh.position.fromArray(seed.position ?? [0, 0.5, 0])
 	mesh.rotation.fromArray(seed.rotation ?? [0, 0, 0])
 	// `scaleFactor` uniformly scales the type's default scale, so it preserves

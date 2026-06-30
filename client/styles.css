@@ -347,7 +347,8 @@ button {
 	gap: 0.45rem;
 }
 
-.color-swatch {
+.color-swatch,
+.add-color-swatch {
 	display: grid;
 	place-items: center;
 	width: 2.7rem;
@@ -359,7 +360,8 @@ button {
 }
 
 .color-swatch:hover,
-.color-swatch.active {
+.color-swatch.active,
+.add-color-swatch:hover {
 	background: color-mix(in srgb, #b8ff38 28%, transparent) !important;
 }
 
@@ -368,6 +370,16 @@ button {
 	height: 1.35rem;
 	border-radius: 50%;
 	box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+
+.add-color-swatch svg {
+	width: 1.25rem;
+	height: 1.25rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 2.2;
+	stroke-linecap: round;
+	stroke-linejoin: round;
 }
 
 .color-swatch:disabled {

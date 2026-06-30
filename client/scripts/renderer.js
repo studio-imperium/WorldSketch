@@ -1,5 +1,6 @@
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
+import { zip, unzip } from "fflate"
 import { getConfig, newOutput, generateSubject, identifyObjects } from "/scripts/api.js"
 import { captureObject, captureFloor, captureWorldContext, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
 import { fitSplatToBox } from "/scripts/fit.js"
@@ -33,27 +34,20 @@ const floorSize = 16 // the single world's ground tile (bigger now that it is it
 const groundThickness = 0.05
 const groundTopY = groundThickness // plot-local Y of the ground's top surface
 const baseGroundColor = "#587553" // default terrain; painted regions layer on top
-const FLOOR_STEPS = 16 // the flat floor needs detail but not a huge step budget
-// Objects use the minimum gaussian count Tripo supports (2^15). Modularization means
-// many small subjects, so keeping every object at the floor count keeps the whole
-// world cheap; detail comes from the per-object capture, not raw gaussian volume.
-const MIN_GAUSSIANS = 32768
 const accent = 0xb8ff38
 
-// Drop gaussians below this opacity when seating a splat (kills wisps/haze). Set from the
-// server config (WS_OPACITY_FLOOR) at generate time; falls back to the fit.js default.
-let opacityFloor = 0.1
-
-// Splat-side palette lock: recolour the reconstructed gaussians onto the block-out palette,
-// matching the server's image lock. Enabled + parameterised from config at generate time.
-let paletteLockOn = false
-let paletteStrength = 0.75
-let paletteLightness = 0
-
-// Post-generation yaw (degrees) applied to seated splats, for dialing in a turned
-// reconstruction. From WS_OBJECT_YAW / WS_FLOOR_YAW at generate time.
-let objectYawDeg = 0
-let floorYawDeg = 0
+const defaultFitSettings = {
+	yOffset: 0,
+	opacityFloor: 0.03,
+	fitClampK: 0,
+	fitBboxPercentile: 0,
+	paletteLock: false,
+	paletteStrength: 0.75,
+	paletteLightness: 0,
+	yawDeg: 0,
+}
+let objectFit = { ...defaultFitSettings }
+let floorFit = { ...defaultFitSettings }
 
 // Fixed yaw applied to every seated splat (0|1|2|3 = 0/90/180/270°). NOT an
 // orientation search — the capture angle is constant so any needed turn is constant
@@ -72,10 +66,15 @@ let drag = null
 let nextPrimitiveId = 1
 let generating = false
 
+// Raw splat bytes + subject metadata kept in memory for ZIP export and re-fitting.
+// Populated during generateWorld (or uploadZip); cleared at the start of each fresh generation.
+const splatStore = new Map()   // name → Uint8Array (unfitted raw bytes)
+let sessionSubjects = []        // [{name, kind, yawTurns, fitHeight}] in generation order
+
 // Debug overlays. "Colliders" re-shows the source primitives as a wireframe over the
 // generated splats; "Bounds" draws each splat's seated content AABB.
 const colliderColor = 0xb8ff38
-const boundsColor = 0xff3b8d
+const boundsColor = 0x0088ff
 let showColliders = false
 let showBounds = false
 
@@ -85,13 +84,18 @@ const els = {
 	progressFill: document.getElementById("progress_fill"),
 	progressLabel: document.getElementById("progress_label"),
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
+	colorGrid: document.querySelector(".swatch-grid"),
 	colorSwatches: [...document.querySelectorAll("[data-color]")],
+	addColor: document.getElementById("add_color_btn"),
+	customColor: document.getElementById("custom_color_input"),
 	brushSwatches: [...document.querySelectorAll("[data-scale]")],
 	generate: document.getElementById("generate_btn"),
 	floorShot: document.getElementById("floor_shot_btn"),
 	uploadSplats: document.getElementById("upload_splats_input"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
+	downloadZip: document.getElementById("download_zip_btn"),
+	uploadZip: document.getElementById("upload_zip_input"),
 	generateModal: document.getElementById("generate_modal"),
 	generateForm: document.getElementById("generate_form"),
 	cancelGenerate: document.getElementById("cancel_generate_btn"),
@@ -251,6 +255,7 @@ class World {
 		this.state = "draft"
 		this.prompt = ""
 		this.baseGroundColor = baseGroundColor
+		this.floorGenerated = false
 
 		this.paint = createPaintSurface(baseGroundColor)
 		this.ground = createPrimitive("box", "ground", {
@@ -260,6 +265,7 @@ class World {
 			locked: true,
 		})
 		this.ground.material.map = this.paint.texture
+		this.ground.userData.baseColor = baseGroundColor.replace("#", "")
 		this.ground.material.color.set(0xffffff) // let the painted texture show its true colours
 		this.ground.material.needsUpdate = true
 		this.ground.userData.isGround = true
@@ -274,7 +280,39 @@ class World {
 	}
 
 	raycastables() {
-		return [this.ground, ...this.primitives.filter(mesh => mesh.visible)]
+		return [this.ground, ...this.primitives.filter(mesh => mesh.visible)].filter(mesh => mesh.visible)
+	}
+
+	selectables() {
+		return [this.ground, ...this.primitives].filter(mesh => mesh.visible)
+	}
+
+	setGroundColor(color) {
+		const next = color.replace("#", "").toLowerCase()
+		const prev = this.ground.userData.baseColor ?? this.baseGroundColor.replace("#", "").toLowerCase()
+		this.baseGroundColor = `#${next}`
+		this.ground.userData.baseColor = next
+
+		const from = new THREE.Color(`#${prev}`)
+		const to = new THREE.Color(`#${next}`)
+		const fromRgb = [Math.round(from.r * 255), Math.round(from.g * 255), Math.round(from.b * 255)]
+		const toRgb = [Math.round(to.r * 255), Math.round(to.g * 255), Math.round(to.b * 255)]
+		const { canvas, ctx, texture } = this.paint
+		const img = ctx.getImageData(0, 0, canvas.width, canvas.height)
+		let changed = 0
+		for (let i = 0; i < img.data.length; i += 4) {
+			if (Math.abs(img.data[i] - fromRgb[0]) > 2 || Math.abs(img.data[i + 1] - fromRgb[1]) > 2 || Math.abs(img.data[i + 2] - fromRgb[2]) > 2) continue
+			img.data[i] = toRgb[0]
+			img.data[i + 1] = toRgb[1]
+			img.data[i + 2] = toRgb[2]
+			changed++
+		}
+		if (changed) ctx.putImageData(img, 0, 0)
+		else {
+			ctx.fillStyle = `#${next}`
+			ctx.fillRect(0, 0, canvas.width, canvas.height)
+		}
+		texture.needsUpdate = true
 	}
 
 	// Target box the floor splat is fitted into: the full tile footprint, seated at y=0.
@@ -338,6 +376,7 @@ class World {
 	}
 
 	groundGenerated() {
+		this.floorGenerated = true
 		this.ground.visible = false
 		this.front.visible = false
 	}
@@ -347,8 +386,10 @@ class World {
 		for (const { mesh } of this.generated) disposeObject(mesh)
 		this.generated = []
 		this.setBoundsVisible(false)
+		this.floorGenerated = false
 		this.ground.visible = true
 		this.front.visible = true
+		setColliderStyle(this.ground, false)
 		for (const primitive of this.primitives) {
 			primitive.visible = true
 			setColliderStyle(primitive, false)
@@ -358,6 +399,8 @@ class World {
 
 	setCollidersVisible(show) {
 		if (this.state !== "generated") return
+		this.ground.visible = show || !this.floorGenerated
+		setColliderStyle(this.ground, show)
 		for (const primitive of this.primitives) {
 			primitive.visible = show
 			setColliderStyle(primitive, show)
@@ -427,11 +470,46 @@ function selectPrimitive(mesh) {
 
 function applyColor(color) {
 	activeColor = color
-	if (selectedPrimitive) selectedPrimitive.material.color.set(color)
-	if (placementPreview) placementPreview.material.color.set(color)
+	if (selectedPrimitive) {
+		if (selectedPrimitive.userData.isGround) world.setGroundColor(color)
+		else {
+			selectedPrimitive.material.color.set(color)
+			selectedPrimitive.userData.baseColor = selectedPrimitive.material.color.getHexString()
+		}
+	}
+	if (placementPreview) {
+		placementPreview.material.color.set(color)
+		placementPreview.userData.baseColor = placementPreview.material.color.getHexString()
+	}
 	for (const swatch of els.colorSwatches) {
 		swatch.classList.toggle("active", swatch.dataset.color.toLowerCase() === color.toLowerCase())
 	}
+}
+
+function bindColorSwatch(swatch) {
+	swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
+}
+
+function addPaletteColor(color) {
+	const hex = color.toLowerCase()
+	const existing = els.colorSwatches.find(swatch => swatch.dataset.color.toLowerCase() === hex)
+	if (existing) {
+		applyColor(hex)
+		return
+	}
+	const swatch = document.createElement("button")
+	swatch.type = "button"
+	swatch.className = "color-swatch btn btn-ghost btn-square"
+	swatch.dataset.color = hex
+	swatch.setAttribute("aria-label", hex)
+	swatch.title = hex
+	const dot = document.createElement("span")
+	dot.style.background = hex
+	swatch.appendChild(dot)
+	els.colorGrid.insertBefore(swatch, els.addColor)
+	els.colorSwatches.push(swatch)
+	bindColorSwatch(swatch)
+	applyColor(hex)
 }
 
 function applyBrushScale(scale) {
@@ -615,6 +693,7 @@ function updateOrbit(event) {
 
 function startPrimitiveDrag(event, mesh) {
 	selectPrimitive(mesh)
+	if (mesh.userData.isGround || mesh.userData.locked) return
 	const worldPosition = mesh.getWorldPosition(new THREE.Vector3())
 	drag = {
 		mode: activeTool === "rotate" ? "roll" : activeTool === "scale" ? "scale" : "primitive",
@@ -809,10 +888,14 @@ function pointerDown(event) {
 		return
 	}
 
-	// pointer / scale / rotate / eraser act on a primitive under the cursor.
-	const hit = raycast(event, world.primitives.filter(mesh => mesh.visible))
+	// pointer / scale / rotate / eraser act on a selectable block-out mesh under the cursor.
+	const hit = raycast(event, world.selectables())
 	if (hit?.object) {
 		if (activeTool === "eraser") {
+			if (hit.object.userData.isGround || hit.object.userData.locked) {
+				selectPrimitive(hit.object)
+				return
+			}
 			world.removePrimitive(hit.object)
 			return
 		}
@@ -893,6 +976,46 @@ function primitiveColors(primitives) {
 	return [...colors]
 }
 
+function fitSettingsFromConfig(cfg, kind) {
+	const scoped = cfg?.[kind] ?? {}
+	const legacy = {
+		yOffset: kind === "object" ? cfg?.yOffset : 0,
+		opacityFloor: cfg?.opacityFloor,
+		fitClampK: cfg?.fitClampK,
+		fitBboxPercentile: cfg?.fitBboxPercentile,
+		paletteLock: cfg?.paletteLock,
+		paletteStrength: cfg?.paletteStrength,
+		paletteLightness: cfg?.paletteLightness,
+		yaw: kind === "floor" ? cfg?.floorYaw : cfg?.objectYaw,
+	}
+	const value = (key, fallbackKey = key) => (
+		scoped[key] ?? scoped[fallbackKey] ?? legacy[key] ?? legacy[fallbackKey] ?? defaultFitSettings[key] ?? defaultFitSettings[fallbackKey]
+	)
+	const number = (key, fallbackKey = key) => {
+		const n = Number(value(key, fallbackKey))
+		return Number.isFinite(n) ? n : defaultFitSettings[key]
+	}
+	return {
+		yOffset: number("yOffset"),
+		opacityFloor: number("opacityFloor"),
+		fitClampK: number("fitClampK"),
+		fitBboxPercentile: number("fitBboxPercentile"),
+		paletteLock: Boolean(value("paletteLock")),
+		paletteStrength: number("paletteStrength"),
+		paletteLightness: number("paletteLightness"),
+		yawDeg: number("yawDeg", "yaw"),
+	}
+}
+
+function applyRuntimeConfig(cfg) {
+	objectFit = fitSettingsFromConfig(cfg, "object")
+	floorFit = fitSettingsFromConfig(cfg, "floor")
+}
+
+function fitSettingsFor(kind) {
+	return kind === "floor" ? floorFit : objectFit
+}
+
 // Generate the whole world: capture every subject's guide serially (the captures share
 // the renderer, so they can't overlap), then re-texture + reconstruct them CONCURRENTLY
 // (the per-subject image edit + Tripo call is network-bound and the real bottleneck).
@@ -911,14 +1034,8 @@ async function generateWorld(prompt) {
 	// only the floor and skips every object; WS_IDENTIFY_ONLY stops after the Gemini
 	// identification phase (logs the numbered graphic + labels, generates nothing).
 	const cfg = await getConfig()
-	const { singleObject, objectsOnly, floorOnly, identifyOnly, yOffset, genConcurrency } = cfg
-	if (Number.isFinite(cfg.opacityFloor)) opacityFloor = cfg.opacityFloor // WS_OPACITY_FLOOR
-	paletteLockOn = Boolean(cfg.paletteLock) // WS_PALETTE_MATCH=lock
-	if (Number.isFinite(cfg.paletteStrength)) paletteStrength = cfg.paletteStrength
-	if (Number.isFinite(cfg.paletteLightness)) paletteLightness = cfg.paletteLightness
-	if (Number.isFinite(cfg.objectYaw)) objectYawDeg = cfg.objectYaw // WS_OBJECT_YAW
-	if (Number.isFinite(cfg.floorYaw)) floorYawDeg = cfg.floorYaw // WS_FLOOR_YAW
-	const objectYOffset = yOffset ?? 0 // WS_CULL_Y_OFFSET: lift seated objects after fitting
+	applyRuntimeConfig(cfg)
+	const { singleObject, objectsOnly, floorOnly, identifyOnly, genConcurrency } = cfg
 	const concurrency = Math.max(1, Math.floor(genConcurrency || 1)) // WS_GEN_CONCURRENCY: subjects in flight at once
 	let objects = computeObjects(world.primitives)
 	if (floorOnly) objects = []
@@ -984,7 +1101,7 @@ async function generateWorld(prompt) {
 			subjects.push({
 				kind: "floor", image: cap.guide, box: world.floorBox(), name: "floor", isFloor: true,
 				prompt: groundDesc || prompt, // Gemini's terrain description (falls back to the scene prompt)
-				steps: FLOOR_STEPS, groundColor: world.baseGroundColor, yawTurns: FLOOR_YAW_TURNS, yawDeg: floorYawDeg, yOffset: 0,
+				groundColor: world.baseGroundColor, yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
 				primitives: null, colors: primitiveColors([world.ground]), // base ground + painted terrain colours
 			})
 		}
@@ -993,8 +1110,8 @@ async function generateWorld(prompt) {
 			const cap = await captureObject(renderer, scene, world, objects[i])
 			subjects.push({
 				kind: "object", image: cap.guide, box: objects[i].box, name: `obj-${String(i + 1).padStart(3, "0")}`,
-				prompt, gaussians: MIN_GAUSSIANS, label: labels[String(i + 1)] || "", // server sets object steps/guidance
-				yawTurns: OBJECT_YAW_TURNS, yawDeg: objectYawDeg, yOffset: objectYOffset, fitHeight: true, primitives: objects[i].primitives,
+				prompt, label: labels[String(i + 1)] || "", // server sets object steps/guidance/gaussian count
+				yawTurns: OBJECT_YAW_TURNS, yawDeg: objectFit.yawDeg, yOffset: objectFit.yOffset, fitHeight: true, primitives: objects[i].primitives,
 				colors: primitiveColors(objects[i].primitives),
 			})
 		}
@@ -1004,6 +1121,8 @@ async function generateWorld(prompt) {
 		// The image edit + Tripo call is the per-subject bottleneck and parallelises cleanly;
 		// each splat is seated as it returns. Nothing here touches the shared renderer.
 		done = 0
+		splatStore.clear()
+		sessionSubjects = []
 		showProgress(0, total, concurrency > 1 ? "Generating (concurrent)…" : "Generating…")
 		await runPool(subjects, concurrency, async s => {
 			const tReq = performance.now()
@@ -1014,15 +1133,20 @@ async function generateWorld(prompt) {
 				})
 				const requestMs = performance.now() - tReq // server-side image edit + Tripo (see server [timing] log)
 				const tSeat = performance.now()
-				await seatSubject(bytes, s.box, s.name, s.primitives, { yawTurns: s.yawTurns, yawDeg: s.yawDeg, yOffset: s.yOffset, fitHeight: Boolean(s.fitHeight), colors: s.colors })
+				await seatSubject(bytes, s.box, s.name, s.primitives, { kind: s.kind, yawTurns: s.yawTurns, yawDeg: s.yawDeg, yOffset: s.yOffset, fitHeight: Boolean(s.fitHeight), colors: s.colors })
 				subjectTimes.push({ subject: s.name, "request(s)": +(requestMs / 1000).toFixed(2), "seat(ms)": Math.round(performance.now() - tSeat) })
 				if (s.isFloor) world.groundGenerated()
+				splatStore.set(s.name, bytes)
 			} catch (error) {
 				console.warn(`${s.name}:`, error.message)
 			}
 			done++
 			showProgress(done, total)
 		})
+		// Build subject metadata for ZIP export / re-fitting (only successfully seated subjects).
+		sessionSubjects = subjects
+			.filter(s => splatStore.has(s.name))
+			.map(s => ({ name: s.name, kind: s.kind ?? "object", yawTurns: s.yawTurns ?? 0, fitHeight: Boolean(s.fitHeight) }))
 
 		const totalS = ((performance.now() - genStart) / 1000).toFixed(1)
 		const genS = ((performance.now() - genStart - idMs - captureMs) / 1000).toFixed(1)
@@ -1044,18 +1168,22 @@ async function generateWorld(prompt) {
 
 // Reconstruct + seat one subject's splat into its target box. `colors` (hex palette) drives
 // the optional splat-side palette lock when it's enabled in config.
-async function seatSubject(bytes, box, name, sourcePrimitives, { yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, colors = null, fileName = `${name}.splat` } = {}) {
+async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, colors = null, fileName = `${name}.splat` } = {}) {
 	const raw = new SplatMesh({ fileBytes: bytes, fileName })
 	await raw.initialized
+	const fit = fitSettingsFor(kind)
 	const fitted = await fitSplatToBox(raw, box, {
 		yawTurns,
 		yawDeg,
 		yOffset,
 		fitHeight,
-		opacityFloor,
-		palette: paletteLockOn && colors?.length ? colors : null,
-		paletteStrength,
-		paletteLightness,
+		opacityFloor: fit.opacityFloor,
+		clampK: fit.fitClampK,
+		spanLo: fit.fitBboxPercentile,
+		spanHi: 1 - fit.fitBboxPercentile,
+		palette: fit.paletteLock && colors?.length ? colors : null,
+		paletteStrength: fit.paletteStrength,
+		paletteLightness: fit.paletteLightness,
 	})
 	if (!fitted) {
 		disposeObject(raw)
@@ -1114,26 +1242,150 @@ async function uploadSplats(files) {
 	}
 }
 
-// Serialize the block-out primitives to a JSON file so a layout can be saved and fully
-// reloaded — including the support/attachment forest (saved as array indices, since the
-// links are by-reference) so seated stacks survive a round-trip.
-function downloadPrimitives() {
+// Serialize the block-out primitives to a plain object (shared by download and ZIP export).
+function serializePrimitives() {
 	const index = new Map(world.primitives.map((mesh, i) => [mesh, i]))
-	const data = {
+	return {
 		version: 2,
 		primitives: world.primitives.map(mesh => ({
 			type: mesh.userData.type,
 			position: mesh.position.toArray(),
 			rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
 			scale: mesh.scale.toArray(),
-			color: `#${mesh.material.color.getHexString()}`,
+			color: `#${mesh.userData.baseColor ?? mesh.material.color.getHexString()}`,
 			locked: Boolean(mesh.userData.locked),
 			support: mesh.userData.support ? index.get(mesh.userData.support) ?? null : null,
 			supportAxis: mesh.userData.supportAxis ?? { name: "y", sign: 1 },
 		})),
 	}
-	const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" })
+}
+
+// Save the block-out primitives to a JSON file so a layout can be saved and fully
+// reloaded — including the support/attachment forest (saved as array indices, since the
+// links are by-reference) so seated stacks survive a round-trip.
+function downloadPrimitives() {
+	const blob = new Blob([JSON.stringify(serializePrimitives(), null, 2)], { type: "application/json" })
 	downloadBlob(blob, `primitives-${Date.now()}.json`)
+}
+
+// Export the current session (splats + primitives + subject metadata) as a ZIP so it can
+// be re-fitted later without regenerating. The ZIP contains:
+//   primitives.json  — block-out scene (same format as the standalone primitive download)
+//   scene.json       — ordered subject list with kind/yaw/fitHeight metadata
+//   splats/*.splat   — raw Tripo bytes for each seated object / floor
+async function downloadZip() {
+	if (!splatStore.size) { setStatus("Nothing to export — generate first"); return }
+	const enc = new TextEncoder()
+	const files = {
+		"primitives.json": [enc.encode(JSON.stringify(serializePrimitives(), null, 2)), { level: 6 }],
+		"scene.json": [enc.encode(JSON.stringify({ version: 1, subjects: sessionSubjects }, null, 2)), { level: 6 }],
+	}
+	for (const [name, bytes] of splatStore) {
+		files[`splats/${name}.splat`] = [bytes, { level: 0 }]
+	}
+	try {
+		await new Promise((resolve, reject) => {
+			zip(files, (err, data) => {
+				if (err) { reject(err); return }
+				downloadBlob(new Blob([data], { type: "application/zip" }), `worldsketch-${Date.now()}.zip`)
+				resolve()
+			})
+		})
+	} catch (err) {
+		setStatus("ZIP export failed: " + (err.message || err))
+	}
+}
+
+// Load a previously exported ZIP, replace the block-out with the stored primitives, then
+// re-seat every splat against the freshly computed object-group boxes. This skips
+// generation entirely so object/floor fit params can be iterated fast from .env.
+async function uploadZip(file) {
+	if (!file || generating) return
+	generating = true
+	syncGenerateButton()
+	setStatus("")
+	try {
+		const raw = new Uint8Array(await file.arrayBuffer())
+		const files = await new Promise((resolve, reject) => unzip(raw, (err, data) => err ? reject(err) : resolve(data)))
+
+		const primBytes = files["primitives.json"]
+		const sceneBytes = files["scene.json"]
+		if (!primBytes) throw new Error("ZIP missing primitives.json")
+		if (!sceneBytes) throw new Error("ZIP missing scene.json")
+
+		const sceneData = JSON.parse(new TextDecoder().decode(sceneBytes))
+		const subjects = sceneData.subjects ?? []
+		if (!subjects.length) throw new Error("ZIP has no subjects in scene.json")
+
+		// Reload primitives (resets generated state, rebuilds block-out).
+		await uploadPrimitives(new File([primBytes], "primitives.json", { type: "application/json" }))
+
+		// Pull fresh fit params from the server so the user can tune via .env and re-fit.
+		const cfg = await getConfig()
+		applyRuntimeConfig(cfg)
+
+		// Group the newly loaded primitives into objects (same logic as generation).
+		const objectGroups = computeObjects(world.primitives)
+		let objectIdx = 0
+
+		splatStore.clear()
+		sessionSubjects = []
+		world.resetGenerated()
+
+		const total = subjects.length
+		let done = 0
+		showProgress(0, total, "Re-fitting…")
+
+		for (const s of subjects) {
+			const splatBytes = files[`splats/${s.name}.splat`]
+			if (!splatBytes) { console.warn(`ZIP missing splats/${s.name}.splat`); done++; showProgress(done, total); continue }
+
+			let box, sourcePrimitives, colors
+			if (s.kind === "floor") {
+				box = world.floorBox()
+				sourcePrimitives = null
+				colors = primitiveColors([world.ground])
+			} else {
+				const group = objectGroups[objectIdx++]
+				if (!group) { done++; showProgress(done, total); continue }
+				box = group.box
+				sourcePrimitives = group.primitives
+				colors = primitiveColors(sourcePrimitives)
+			}
+
+			const fit = fitSettingsFor(s.kind)
+			try {
+				await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
+					kind: s.kind,
+					yawTurns: s.yawTurns ?? 0,
+					yawDeg: fit.yawDeg,
+					yOffset: fit.yOffset,
+					fitHeight: Boolean(s.fitHeight),
+					colors,
+				})
+				splatStore.set(s.name, splatBytes)
+				sessionSubjects.push(s)
+				if (s.kind === "floor") world.groundGenerated()
+			} catch (err) {
+				console.warn(`refit ${s.name}:`, err.message)
+			}
+			done++
+			showProgress(done, total)
+		}
+
+		world.state = "generated"
+		applyOverlayVisibility()
+		const n = sessionSubjects.length
+		setStatus(`Re-fitted ${n} subject${n === 1 ? "" : "s"}`)
+		showProgress(total, total, "Done")
+		window.setTimeout(hideProgress, 1000)
+	} catch (err) {
+		setStatus(err.message || "Re-fit failed")
+		hideProgress()
+	} finally {
+		generating = false
+		syncGenerateButton()
+	}
 }
 
 // Load a primitives JSON file (from downloadPrimitives), replacing the current block-out
@@ -1253,8 +1505,11 @@ function downloadBlob(blob, filename) {
 // --- UI wiring --------------------------------------------------------------
 
 for (const button of els.toolButtons) button.addEventListener("click", () => setActiveTool(button.dataset.tool))
-for (const swatch of els.colorSwatches) swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
+for (const swatch of els.colorSwatches) bindColorSwatch(swatch)
 for (const swatch of els.brushSwatches) swatch.addEventListener("click", () => applyBrushScale(Number(swatch.dataset.scale)))
+
+els.addColor?.addEventListener("click", () => els.customColor?.click())
+els.customColor?.addEventListener("change", event => addPaletteColor(event.target.value))
 
 els.floorShot?.addEventListener("click", async () => {
 	try {
@@ -1273,6 +1528,13 @@ els.downloadPrims?.addEventListener("click", downloadPrimitives)
 
 els.uploadPrims?.addEventListener("change", async event => {
 	await uploadPrimitives(event.target.files[0])
+	event.target.value = "" // let the same file be re-selected
+})
+
+els.downloadZip?.addEventListener("click", downloadZip)
+
+els.uploadZip?.addEventListener("change", async event => {
+	await uploadZip(event.target.files[0])
 	event.target.value = "" // let the same file be re-selected
 })
 
