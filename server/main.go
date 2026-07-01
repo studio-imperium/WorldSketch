@@ -64,7 +64,10 @@ func main() {
 	mux.HandleFunc("/api/ground", handleGround)
 	mux.HandleFunc("/api/identify", handleIdentify)
 	mux.HandleFunc("/api/config", handleConfig)
-	mux.Handle("/", http.FileServer(http.Dir(filepath.Join(rootDir(), "client"))))
+	// Serve the client with no-store so an edited renderer.js/module is never served stale from
+	// the browser cache (this is a live-edited dev app; a hard-refresh shouldn't be required).
+	fileServer := http.FileServer(http.Dir(filepath.Join(rootDir(), "client")))
+	mux.Handle("/", noCache(fileServer))
 
 	addr := env("PORT", "8067")
 	log.Printf("WorldSketch listening on http://localhost:%s", addr)
@@ -1686,6 +1689,15 @@ func subjectEnvFloat(kind, suffix string, legacy []string, fallback float64) flo
 // works without a wrapper that exports secrets. Real environment variables always win. Best-effort:
 // a missing .env is fine (nothing to load). Supports `export KEY=`, `# comments`, blank lines, and
 // single/double-quoted values.
+// noCache wraps a handler so every response tells the browser not to cache — the client is edited
+// live, so a stale cached module must never mask a code change.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		next.ServeHTTP(w, r)
+	})
+}
+
 func loadDotEnv() {
 	path := env("WS_ENV_FILE", filepath.Join(rootDir(), ".env"))
 	data, err := os.ReadFile(path)
