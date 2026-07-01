@@ -58,6 +58,7 @@ func main() {
 	// folder once (/api/new-output) and then POSTs /api/generate per object/floor.
 	mux.HandleFunc("/api/new-output", handleNewOutput)
 	mux.HandleFunc("/api/generate", handleGenerate)
+	mux.HandleFunc("/api/floor-texture", handleFloorTexture)
 	mux.HandleFunc("/api/ground", handleGround)
 	mux.HandleFunc("/api/identify", handleIdentify)
 	mux.HandleFunc("/api/config", handleConfig)
@@ -163,6 +164,9 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 	promptText := imagePromptFor(kind, prompt, groundColor, strings.TrimSpace(r.FormValue("label")))
 	imageSettings := subjectImageEditSettings(kind)
+	if parseBoolDefault(r.FormValue("skip_image_edit"), false) {
+		imageSettings.SkipImageEdit = true
+	}
 	palette := subjectPaletteSettings(kind)
 
 	tImage := time.Now()
@@ -226,6 +230,73 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s.splat"`, name))
 	_, _ = w.Write(splat)
+}
+
+// handleFloorTexture turns the user's flat top-down floor paint map into a realistic
+// top-down albedo texture with Gemini. The client then applies this texture to the actual
+// floor plane, captures the standard isometric guide, and sends that guide to Tripo.
+func handleFloorTexture(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	groundColor := strings.TrimSpace(r.FormValue("ground_color"))
+	name := sanitizeName(r.FormValue("name"))
+	if name == "" {
+		name = "floor-texture"
+	}
+	dir := outputSubdir(r.FormValue("output"))
+
+	file, _, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing image", http.StatusBadRequest)
+		return
+	}
+	image, err := io.ReadAll(io.LimitReader(file, 20<<20))
+	file.Close()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	settings := subjectImageEditSettings("floor")
+	palette := subjectPaletteSettings("floor")
+	promptText := floorTexturePrompt(prompt, groundColor)
+
+	tImage := time.Now()
+	edited := image
+	if !settings.SkipImageEdit {
+		edited, err = geminiEdit(image, nil, promptText, settings.GeminiModel)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		var matched []byte
+		var perr error
+		switch palette.Mode {
+		case "global":
+			matched, perr = paletteMatch(image, edited, palette.Strength)
+		case "lock":
+			matched, perr = paletteLock(edited, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
+		}
+		if perr != nil {
+			log.Printf("floor texture palette match skipped for %s: %v", name, perr)
+		} else if matched != nil {
+			edited = matched
+		}
+	}
+	saveGeneration(dir, name+"-topdown", image, nil, edited, promptText)
+	log.Printf("[timing] %-8s texture=%s", name, time.Since(tImage).Round(time.Millisecond))
+
+	w.Header().Set("Content-Type", "image/png")
+	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s.png"`, name))
+	_, _ = w.Write(edited)
 }
 
 // handleGround generates the UNIFIED ground for an expanded (multi-plot) world. The client
@@ -416,7 +487,8 @@ func groundPrompt(scene, groundColor string, extending bool) string {
 	if groundColor != "" {
 		ground = " The base ground colour is " + groundColor + "; keep that hue and material family (sandy/tan/brown stays sand or soil, green stays grass or moss)."
 	}
-	base := "This is a flat, top-down view of ground terrain for Gaussian-splat reconstruction. Render a high-fidelity, photorealistic, evenly-lit terrain surface that FILLS the entire canvas edge to edge with NO padding, border, frame, vignette, or margin. The ground is ONE LEVEL flat surface at a single height — NO hills, mounds, dunes, slopes, ridges, banks, cliffs, terraces, or raised landforms; only a thin textured skin of natural surface detail (grass blades, moss, scattered pebbles, dirt, small cracks, twigs, leaves) and flush flat features (paths, rivers, and ponds sit level with the surrounding ground, never carved or raised). Use fully ambient illumination: no cast shadows, no directional sunlight, no dramatic lighting. The material and colour stay UNIFORM all the way to every edge so the terrain tiles seamlessly with no rim, fade, or detail bunching."
+	layout := " The painted floor design is a HARD LAYOUT CONSTRAINT, not a suggestion: preserve the exact positions, silhouettes, topology, curvature, width, and connectivity of all painted regions. Do not straighten, reroute, simplify, merge, split, rotate, resize, or invent terrain markings. A circular or looping river must remain circular/looping in the same place; a winding path must keep the same bends; islands, ponds, crossings, and branches must keep their exact relative layout. Only replace flat colours with matching terrain materials inside those same shapes."
+	base := "This is a flat, top-down view of ground terrain for Gaussian-splat reconstruction. Render a high-fidelity, photorealistic, evenly-lit terrain surface that FILLS the entire canvas edge to edge with NO padding, border, frame, vignette, or margin. The ground is ONE LEVEL flat surface at a single height — NO hills, mounds, dunes, slopes, ridges, banks, cliffs, terraces, or raised landforms; only a thin textured skin of natural surface detail (grass blades, moss, scattered pebbles, dirt, small cracks, twigs, leaves) and flush flat features (paths, rivers, and ponds sit level with the surrounding ground, never carved or raised)." + layout + " Use fully ambient illumination: no cast shadows, no directional sunlight, no dramatic lighting. The material and colour stay UNIFORM all the way to every edge so the terrain tiles seamlessly with no rim, fade, or detail bunching."
 	cont := ""
 	if extending {
 		cont = " IMPORTANT — this is an EXTENSION: the opaque (kept) part of the image is already-generated terrain that you must preserve unchanged. Paint ONLY the masked (empty) region, and make it a perfectly seamless CONTINUATION of the existing terrain across the boundary: identical materials, colours, lighting, texture grain, and scale, flowing across with NO visible seam, line, edge, or change in tone. Do NOT copy, repeat, or mirror the existing region — grow it naturally as if the whole ground had always been one continuous piece."
@@ -1357,7 +1429,20 @@ func floorPrompt(scene, groundColor string) string {
 	if groundColor != "" {
 		ground = " The ground/baseplate input colour is " + groundColor + "; preserve that ground hue and material category. If it is sandy, tan, yellow, beige, orange, or brown, the ground must become sand, dry soil, clay, stone, or desert terrain, never green grass. If it is green, use grass, moss, or foliage in that same green tone."
 	}
-	return "Re-texture this near top-down view of a single flat, square ground tile into a high-fidelity, photorealistic terrain surface for Gaussian-splat reconstruction. The ground stays a single LEVEL surface at one height — NO hills, mounds, dunes, ridges, raised banks, embankments, slopes, terraces, plateaus, cliffs, craters, or other large 3D landforms; the overall plane does not rise or dip. Shallow SURFACE TEXTURE and natural detail are very welcome and encouraged, though: grass blades, moss, scattered pebbles, small stones, dirt clods, twigs, leaves, cracks, and fine material grain make the ground lively and dynamic — just keep that detail as a thin textured skin on the flat plane, never built up into raised terrain. Rivers, paths, and ponds read as essentially flat changes of colour and material: a river or pond water surface sits flush and level (not a deep carved canyon, not raised banks), and a path is flush with the surrounding grass. The tile itself is a thin flat slab — never a tall block, plinth, wall, or pedestal — and a perfect square with straight edges and square corners. Change MATERIALS and surface detail ONLY, preserving the exact square footprint. The square must FILL the canvas: its corners reach the image edges with NO empty padding, NO transparent margin, and NO border between the tile and the image edge (the splat is scaled to the canvas, so any padding breaks scale alignment with the colliders). Image 1 is the geometry guide. Image 2, when provided, is a flat painted material-ID map: treat the painted regions as TERRAIN INTENT and blend them naturally into the surrounding ground — BLUE marks water (a flat river, stream, or pond), BROWN or TAN marks a dirt path or sand, GREY or DARK marks rock or stone, GREEN marks grass or moss." + ground + " The ground material and colour must be UNIFORM all the way to the four edges (except where painted terrain runs off an edge): no color shift, no fade, no darker rim, no vignette, no detail bunching, so adjacent tiles tile seamlessly. Render as flat, evenly-lit albedo with fully ambient illumination: no cast shadows, no directional sunlight, no dramatic lighting (fine surface texture and shallow material detail are welcome — just avoid shading that reads as hills or raised landforms). The area outside the square tile must be pure black and empty: no background, no walls, no sky, no scenery. No UI, text, frames, or camera-angle change. Scene context: " + scene
+	layout := " Image 2, when provided, is a flat painted material-ID map and must be treated as a HARD LAYOUT CONSTRAINT. Preserve the exact positions, silhouettes, topology, curvature, width, and connectivity of all painted regions. Do not straighten, reroute, simplify, merge, split, rotate, resize, or invent terrain markings. A circular or looping river must remain circular/looping in the same place; a winding path must keep the same bends; islands, ponds, crossings, and branches must keep their exact relative layout. BLUE marks water (a flat river, stream, or pond), BROWN or TAN marks a dirt path or sand, GREY or DARK marks rock or stone, GREEN marks grass or moss. Change only the material/detail inside those same painted shapes."
+	return "Re-texture this isometric view of a single flat, square ground tile into a high-fidelity, photorealistic terrain surface for Gaussian-splat reconstruction. The ground stays a single LEVEL surface at one height — NO hills, mounds, dunes, ridges, raised banks, embankments, slopes, terraces, plateaus, cliffs, craters, or other large 3D landforms; the overall plane does not rise or dip. Shallow SURFACE TEXTURE and natural detail are very welcome and encouraged, though: grass blades, moss, scattered pebbles, small stones, dirt clods, twigs, leaves, cracks, and fine material grain make the ground lively and dynamic — just keep that detail as a thin textured skin on the flat plane, never built up into raised terrain. Rivers, paths, and ponds read as essentially flat changes of colour and material: a river or pond water surface sits flush and level (not a deep carved canyon, not raised banks), and a path is flush with the surrounding grass. The tile itself is a thin flat slab — never a tall block, plinth, wall, or pedestal — and a perfect square with straight edges and square corners. Change MATERIALS and surface detail ONLY, preserving the exact square footprint. The square must FILL the canvas: its corners reach the image edges with NO empty padding, NO transparent margin, and NO border between the tile and the image edge (the splat is scaled to the canvas, so any padding breaks scale alignment with the colliders). Image 1 is the isometric geometry guide." + layout + ground + " The ground material and colour must be UNIFORM all the way to the four edges (except where painted terrain runs off an edge): no color shift, no fade, no darker rim, no vignette, no detail bunching, so adjacent tiles tile seamlessly. Render as flat, evenly-lit albedo with fully ambient illumination: no cast shadows, no directional sunlight, no dramatic lighting (fine surface texture and shallow material detail are welcome — just avoid shading that reads as hills or raised landforms). The area outside the square tile must be pure black and empty: no background, no walls, no sky, no scenery. No UI, text, frames, or camera-angle change. Scene context: " + scene
+}
+
+func floorTexturePrompt(scene, groundColor string) string {
+	scene = strings.TrimSpace(scene)
+	if scene == "" {
+		scene = "a coherent stylized natural game environment"
+	}
+	ground := ""
+	if groundColor != "" {
+		ground = " The base ground colour is " + groundColor + "; preserve that hue and material category. If it is green, render grass, moss, or foliage in that green family. If it is tan, yellow, beige, orange, or brown, render sand, dry soil, clay, dirt, or desert terrain, never green grass."
+	}
+	return "Image 1 is a FLAT TOP-DOWN material and layout map for one square floor tile. Create a more realistic TOP-DOWN terrain texture from it, preserving the exact layout pixel-for-pixel in position and topology. The output must remain a square top-down orthographic texture, not perspective, not isometric, not 3D. Preserve the exact positions, silhouettes, curvature, widths, connectivity, and edge crossings of every painted region. Do not straighten, reroute, simplify, merge, split, rotate, resize, offset, or invent terrain shapes. A circular or looping river must remain circular/looping in the same place; a winding path must keep the same bends; islands, ponds, crossings, branches, and shoreline contours must keep their exact relative layout. BLUE regions become flat water; BROWN or TAN regions become dirt, sand, or path material; GREY or DARK regions become stone or rock; GREEN regions become grass or moss. Change only the material detail inside those same shapes. The terrain is a flat albedo texture: no hills, banks, cliffs, shadows, lighting direction, perspective, walls, objects, labels, UI, border, padding, vignette, or frame. Fill the entire image edge to edge, and keep materials seamless at the four edges except where a painted feature exits the tile." + ground + " Scene context: " + scene
 }
 
 func readOptionalFormFile(r *http.Request, name string, maxBytes int64) ([]byte, error) {

@@ -1,9 +1,9 @@
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { zip, unzip } from "fflate"
-import { getConfig, newOutput, generateSubject, generateGround, identifyObjects } from "/scripts/api.js"
+import { getConfig, newOutput, generateSubject, generateFloorTexture, identifyObjects } from "/scripts/api.js"
 import { captureObject, captureFloor, captureWorldContext, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
-import { fitSplatToBox } from "/scripts/fit.js"
+import { fitSplatToBox, ensureSplatEditBase, applySplatEditTransform } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject } from "/scripts/primitives.js"
 import { addBuild, listBuilds, getBuildSplats, deleteBuild, clearBuilds } from "/scripts/history.js"
@@ -33,12 +33,18 @@ const tmpScale = new THREE.Vector3()
 const tmpWorld = new THREE.Vector3()
 const tmpFace = new THREE.Vector3()
 const tmpDelta = new THREE.Vector3()
+const gizmoRayPoint = new THREE.Vector3()
+const gizmoPlane = new THREE.Plane()
+const gizmoAxisWorld = new THREE.Vector3()
+const gizmoCameraDir = new THREE.Vector3()
+const gizmoPlaneNormal = new THREE.Vector3()
 const backgroundColor = new THREE.Color(0xfcfcfc)
 
 const shapeTools = new Set(["box", "sphere", "cylinder", "cone"])
 const floorSize = 16 // the single world's ground tile (bigger now that it is its own splat)
 const groundThickness = 0.05
 const groundTopY = groundThickness // plot-local Y of the ground's top surface
+const floorSeamOverlap = 0.18 // tiny X/Z overfit so adjacent per-plot floor splats do not reveal seams
 const baseGroundColor = "#587553" // default terrain; painted regions layer on top
 const accent = 0xb8ff38
 
@@ -75,15 +81,13 @@ let generating = false
 // Raw splat bytes + subject metadata kept in memory for ZIP export and re-fitting.
 // Populated during generateWorld (or uploadZip); cleared at the start of each fresh generation.
 const splatStore = new Map()   // name → Uint8Array (unfitted raw bytes)
-let sessionSubjects = []        // [{name, kind, yawTurns, fitHeight}] in generation order
+let sessionSubjects = []        // [{name, kind, plotId, yawTurns, fitHeight}] in generation order
 
 // World expansion state. Plots are 16×16 ground tiles laid edge-to-edge; new primitives
-// belong to the active plot. The ground is ONE shared surface: generated once then outpainted
-// to extend seamlessly into new tiles. groundMaster keeps the last ground image as the
-// context the next outpaint continues from.
+// belong to the active plot. Generated floors are independent per plot.
 let activePlotId = 0 // the plot new primitives join and Add-plot grows from
 let plotSeq = 0      // last assigned plot id (plot 0 is the base tile)
-let groundMaster = null // { imageEl, cols, rows, minIx, minIz } — kept ground for the next expand
+let groundMaster = null // legacy unified-ground context; reset before new per-plot floor generation
 const plotHeights = new Map() // plotId → Y offset; drives the ground height-field (hills between plots)
 
 // Debug overlays. "Colliders" re-shows the source primitives as a wireframe over the
@@ -176,6 +180,39 @@ function setColliderStyle(mesh, on) {
 		mesh.renderOrder = s.renderOrder
 		mat.needsUpdate = true
 		mesh.userData.colliderSnapshot = null
+	}
+}
+
+function setPickableHidden(mesh, on) {
+	const mat = mesh.material
+	if (on) {
+		if (!mesh.userData.pickableSnapshot) {
+			mesh.userData.pickableSnapshot = {
+				transparent: mat.transparent, opacity: mat.opacity, depthTest: mat.depthTest,
+				depthWrite: mat.depthWrite, color: mat.color.getHex(), renderOrder: mesh.renderOrder,
+				map: mat.map, wireframe: mat.wireframe,
+			}
+		}
+		mesh.visible = true
+		mat.transparent = true
+		mat.opacity = 0
+		mat.depthTest = false
+		mat.depthWrite = false
+		mat.wireframe = false
+		mesh.renderOrder = 1001
+		mat.needsUpdate = true
+	} else if (mesh.userData.pickableSnapshot) {
+		const s = mesh.userData.pickableSnapshot
+		mat.transparent = s.transparent
+		mat.opacity = s.opacity
+		mat.depthTest = s.depthTest
+		mat.depthWrite = s.depthWrite
+		mat.map = s.map
+		mat.wireframe = s.wireframe
+		mat.color.setHex(s.color)
+		mesh.renderOrder = s.renderOrder
+		mat.needsUpdate = true
+		mesh.userData.pickableSnapshot = null
 	}
 }
 
@@ -277,6 +314,7 @@ class World {
 		this.generated = [] // { mesh, primitives }
 		this.boundsHelpers = []
 		this.ghostTiles = [] // dashed "expand here" outlines around the active plot
+		this.groundSlopePreviews = []
 		this.state = "draft"
 		this.prompt = ""
 		this.baseGroundColor = baseGroundColor
@@ -310,6 +348,17 @@ class World {
 		return [...this.groundTiles, ...this.primitives]
 	}
 
+	floorCaptureMeshes() {
+		const previews = this.groundSlopePreviews.filter(mesh => mesh.visible)
+		return previews.length ? previews : this.groundTiles
+	}
+
+	floorCaptureMeshesForTile(tile) {
+		const plotId = tile.userData.plotId
+		const preview = this.groundSlopePreviews.find(mesh => mesh.visible && mesh.userData.plotId === plotId)
+		return [preview ?? tile]
+	}
+
 	raycastables() {
 		return [...this.groundTiles, ...this.primitives.filter(mesh => mesh.visible)].filter(mesh => mesh.visible)
 	}
@@ -324,38 +373,53 @@ class World {
 	setGroundColor(color) {
 		const next = color.replace("#", "").toLowerCase()
 		this.baseGroundColor = `#${next}`
-		const to = new THREE.Color(`#${next}`)
-		const toRgb = [Math.round(to.r * 255), Math.round(to.g * 255), Math.round(to.b * 255)]
 		for (const tile of this.groundTiles) {
-			const surface = tile.userData.paint
-			if (!surface) continue
-			const prev = tile.userData.baseColor ?? next
-			tile.userData.baseColor = next
-			const from = new THREE.Color(`#${prev}`)
-			const fromRgb = [Math.round(from.r * 255), Math.round(from.g * 255), Math.round(from.b * 255)]
-			const { canvas, ctx, texture } = surface
-			const img = ctx.getImageData(0, 0, canvas.width, canvas.height)
-			let changed = 0
-			for (let i = 0; i < img.data.length; i += 4) {
-				if (Math.abs(img.data[i] - fromRgb[0]) > 2 || Math.abs(img.data[i + 1] - fromRgb[1]) > 2 || Math.abs(img.data[i + 2] - fromRgb[2]) > 2) continue
-				img.data[i] = toRgb[0]
-				img.data[i + 1] = toRgb[1]
-				img.data[i + 2] = toRgb[2]
-				changed++
-			}
-			if (changed) ctx.putImageData(img, 0, 0)
-			else {
-				ctx.fillStyle = `#${next}`
-				ctx.fillRect(0, 0, canvas.width, canvas.height)
-			}
-			texture.needsUpdate = true
+			this.setGroundTileColor(tile, color)
 		}
 	}
 
-	// Target box the floor splat is fitted into: the full tile footprint, seated at y=0.
-	floorBox() {
+	setGroundTileColor(tile, color) {
+		const next = color.replace("#", "").toLowerCase()
+		const surface = tile.userData.paint
+		if (!surface) return
+		const prev = tile.userData.baseColor ?? next
+		tile.userData.baseColor = next
+		const from = new THREE.Color(`#${prev}`)
+		const to = new THREE.Color(`#${next}`)
+		const fromRgb = [Math.round(from.r * 255), Math.round(from.g * 255), Math.round(from.b * 255)]
+		const toRgb = [Math.round(to.r * 255), Math.round(to.g * 255), Math.round(to.b * 255)]
+		const { canvas, ctx, texture } = surface
+		const img = ctx.getImageData(0, 0, canvas.width, canvas.height)
+		let changed = 0
+		for (let i = 0; i < img.data.length; i += 4) {
+			if (Math.abs(img.data[i] - fromRgb[0]) > 2 || Math.abs(img.data[i + 1] - fromRgb[1]) > 2 || Math.abs(img.data[i + 2] - fromRgb[2]) > 2) continue
+			img.data[i] = toRgb[0]
+			img.data[i + 1] = toRgb[1]
+			img.data[i + 2] = toRgb[2]
+			changed++
+		}
+		if (changed) ctx.putImageData(img, 0, 0)
+		else {
+			ctx.fillStyle = `#${next}`
+			ctx.fillRect(0, 0, canvas.width, canvas.height)
+		}
+		texture.needsUpdate = true
+		updateGroundSlopePreview()
+	}
+
+	// Target box a plot floor splat is fitted into: that tile footprint, seated at y=0.
+	floorBoxForTile(tile = this.ground) {
 		const half = this.size / 2
-		return new THREE.Box3(new THREE.Vector3(-half, 0, -half), new THREE.Vector3(half, groundTopY, half))
+		const origin = tile?.userData?.origin ?? new THREE.Vector3()
+		return new THREE.Box3(
+			new THREE.Vector3(origin.x - half, 0, origin.z - half),
+			new THREE.Vector3(origin.x + half, groundTopY, origin.z + half),
+		)
+	}
+
+	floorBox(plotId = 0) {
+		const tile = this.groundTiles.find(t => t.userData.plotId === plotId) ?? this.ground
+		return this.floorBoxForTile(tile)
 	}
 
 	// Add an adjacent ground tile at grid cell (ix, iz) for a new plot. Mirrors the
@@ -380,11 +444,11 @@ class World {
 		tile.userData.origin = new THREE.Vector3(cx, 0, cz)
 		this.groundTiles.push(tile)
 		this.group.add(tile)
+		updateGroundSlopePreview()
 		return tile
 	}
 
-	// AABB spanning EVERY ground tile (the whole plot footprint), seated at y=0. The unified
-	// expansion ground splat is fitted into this so one surface covers all plots.
+	// AABB spanning EVERY ground tile (the whole plot footprint), seated at y=0.
 	footprintBox() {
 		const box = new THREE.Box3()
 		const half = floorSize / 2
@@ -396,8 +460,18 @@ class World {
 		return box
 	}
 
-	// Drop one seated splat by its generation name (e.g. "floor" when re-running the unified
-	// ground on each expand), leaving every other plot's splats in place.
+	floorClipBoxes() {
+		const half = floorSize / 2
+		return this.groundTiles.map(tile => {
+			const { x, z } = tile.userData.origin
+			return new THREE.Box3(
+				new THREE.Vector3(x - half, 0, z - half),
+				new THREE.Vector3(x + half, groundTopY, z + half),
+			)
+		})
+	}
+
+	// Drop one seated splat by its generation name, leaving every other plot's splats in place.
 	removeGenerated(name) {
 		const i = this.generated.findIndex(g => g.mesh.userData.genName === name)
 		if (i < 0) return
@@ -405,12 +479,20 @@ class World {
 		this.generated.splice(i, 1)
 	}
 
+	removeGeneratedWhere(predicate) {
+		for (let i = this.generated.length - 1; i >= 0; i--) {
+			if (!predicate(this.generated[i])) continue
+			disposeObject(this.generated[i].mesh)
+			this.generated.splice(i, 1)
+		}
+	}
+
 	addPrimitive(type, hit) {
 		const mesh = createPrimitive(type, `prim_${String(nextPrimitiveId++).padStart(3, "0")}`, { color: activeColor, scaleFactor: activeBrushScale })
 		placeMeshOnSurface(mesh, hit)
 		this.group.worldToLocal(mesh.position)
 		mesh.userData.world = this
-		mesh.userData.plotId = activePlotId // which plot this object belongs to (for per-plot builds)
+		mesh.userData.plotId = plotIdFromHit(hit) // bind to the floor/support that was actually clicked
 		recordSupport(mesh, hit)
 		this.primitives.push(mesh)
 		this.group.add(mesh)
@@ -455,14 +537,23 @@ class World {
 	// Seat a generated splat, hiding the source primitives it replaces (progressive
 	// reveal as each object completes).
 	addGenerated(mesh, sourcePrimitives) {
-		this.generated.push({ mesh, primitives: sourcePrimitives })
+		const record = { mesh, primitives: sourcePrimitives }
+		this.generated.push(record)
 		this.group.add(mesh)
-		for (const primitive of sourcePrimitives) primitive.visible = false
+		prepareGeneratedEdit(record)
+		for (const primitive of sourcePrimitives) {
+			setColliderStyle(primitive, false)
+			setPickableHidden(primitive, true)
+		}
 	}
 
 	groundGenerated() {
 		this.floorGenerated = true
-		for (const tile of this.groundTiles) tile.visible = false
+		for (const tile of this.groundTiles) {
+			setColliderStyle(tile, false)
+			setPickableHidden(tile, true)
+		}
+		updateElevationHandles()
 		this.front.visible = false
 	}
 
@@ -473,27 +564,43 @@ class World {
 		this.setBoundsVisible(false)
 		this.floorGenerated = false
 		for (const tile of this.groundTiles) {
+			setPickableHidden(tile, false)
 			tile.visible = true
 			setColliderStyle(tile, false)
 		}
 		this.front.visible = true
 		for (const primitive of this.primitives) {
+			setPickableHidden(primitive, false)
 			primitive.visible = true
 			setColliderStyle(primitive, false)
 		}
 		this.state = "draft"
 		groundMaster = null // a fresh draft invalidates the kept outpaint context
+		updateElevationHandles()
 	}
 
 	setCollidersVisible(show) {
 		if (this.state !== "generated") return
 		for (const tile of this.groundTiles) {
-			tile.visible = show || !this.floorGenerated
-			setColliderStyle(tile, show)
+			if (show) {
+				setPickableHidden(tile, false)
+				tile.visible = true
+				setColliderStyle(tile, true)
+			} else {
+				setColliderStyle(tile, false)
+				setPickableHidden(tile, this.floorGenerated)
+				tile.visible = true
+			}
 		}
 		for (const primitive of this.primitives) {
-			primitive.visible = show
-			setColliderStyle(primitive, show)
+			if (show) {
+				setPickableHidden(primitive, false)
+				primitive.visible = true
+				setColliderStyle(primitive, true)
+			} else {
+				setColliderStyle(primitive, false)
+				setPickableHidden(primitive, true)
+			}
 		}
 	}
 
@@ -519,6 +626,209 @@ class World {
 
 const world = new World()
 
+function generatedForPrimitive(mesh) {
+	return world.generated.find(record => record.primitives?.includes(mesh)) ?? null
+}
+
+function editablePrimitiveFor(mesh) {
+	if (world.state !== "generated" || mesh.userData.isGround) return mesh
+	const record = generatedForPrimitive(mesh)
+	return record?.primitives?.[0] ?? mesh
+}
+
+function prepareGeneratedEdit(record) {
+	if (!record?.mesh || !record.primitives?.length) return
+	const root = record.primitives[0]
+	root.updateWorldMatrix(true, false)
+	record.editRoot = root
+	record.editRootBase = root.matrixWorld.clone()
+	ensureSplatEditBase(record.mesh)
+}
+
+function syncGeneratedForPrimitive(mesh) {
+	const record = generatedForPrimitive(mesh)
+	if (!record?.mesh || !record.primitives?.length) return
+	if (!record.editRoot || !record.editRootBase) prepareGeneratedEdit(record)
+	const root = record.editRoot ?? record.primitives[0]
+	root.updateWorldMatrix(true, false)
+	const delta = root.matrixWorld.clone().multiply(record.editRootBase.clone().invert())
+	applySplatEditTransform(record.mesh, delta)
+	const pos = root.getWorldPosition(tmpWorld)
+	record.mesh.userData.seatX = pos.x
+	record.mesh.userData.seatZ = pos.z
+	record.mesh.userData.genPlotId = root.userData.plotId ?? record.mesh.userData.genPlotId
+	seatObjectOnGround(record.mesh)
+	if (showBounds) world.setBoundsVisible(true)
+}
+
+function syncGeneratedForPrimitives(meshes) {
+	const seen = new Set()
+	for (const mesh of meshes) {
+		const record = generatedForPrimitive(mesh)
+		if (!record || seen.has(record)) continue
+		seen.add(record)
+		syncGeneratedForPrimitive(record.primitives[0])
+	}
+}
+
+// --- Translation gizmo ------------------------------------------------------
+
+const gizmoAxes = [
+	{ name: "x", color: 0xe44b4b, dir: new THREE.Vector3(1, 0, 0) },
+	{ name: "y", color: 0xf4d03f, dir: new THREE.Vector3(0, 1, 0) },
+	{ name: "z", color: 0x3b82f6, dir: new THREE.Vector3(0, 0, 1) },
+]
+
+function createGizmoAxis({ name, color, dir }) {
+	const group = new THREE.Group()
+	group.userData.isGizmo = true
+	group.userData.axis = name
+	const material = new THREE.MeshBasicMaterial({ color, depthTest: false, depthWrite: false })
+	const hitMaterial = new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.001, depthTest: false, depthWrite: false })
+	const shaft = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.95, 12), material)
+	shaft.position.y = 0.48
+	const cone = new THREE.Mesh(new THREE.ConeGeometry(0.14, 0.34, 20), material)
+	cone.position.y = 1.12
+	const hit = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.18, 1.45, 12), hitMaterial)
+	hit.position.y = 0.72
+	hit.userData.isGizmoHandle = true
+	hit.userData.axis = name
+	group.add(shaft, cone, hit)
+	group.quaternion.setFromUnitVectors(localUp, dir)
+	group.renderOrder = 1000
+	group.traverse(object => {
+		object.userData.isGizmo = true
+		object.renderOrder = 1000
+	})
+	return group
+}
+
+const transformGizmo = new THREE.Group()
+transformGizmo.visible = false
+transformGizmo.userData.isGizmo = true
+const gizmoAxisGroups = new Map()
+const gizmoHandleMeshes = []
+for (const axis of gizmoAxes) {
+	const group = createGizmoAxis(axis)
+	gizmoAxisGroups.set(axis.name, group)
+	const handle = group.children.find(child => child.userData.isGizmoHandle)
+	if (handle) gizmoHandleMeshes.push(handle)
+	transformGizmo.add(group)
+}
+scene.add(transformGizmo)
+
+function selectedGizmoPosition(out = new THREE.Vector3()) {
+	if (!selectedPrimitive) return out.set(0, 0, 0)
+	if (!selectedPrimitive.geometry.boundingBox) selectedPrimitive.geometry.computeBoundingBox()
+	selectedPrimitive.updateWorldMatrix(true, false)
+	const box = selectedPrimitive.geometry.boundingBox.clone().applyMatrix4(selectedPrimitive.matrixWorld)
+	box.getCenter(out)
+	if (selectedPrimitive.userData.isGround) out.y = box.max.y + 0.25
+	return out
+}
+
+function updateTransformGizmo() {
+	const show = Boolean(selectedPrimitive) && activeTool === "pointer" && !generating
+	transformGizmo.visible = show
+	if (!show) return
+	selectedGizmoPosition(transformGizmo.position)
+	const floorSelected = Boolean(selectedPrimitive.userData.isGround)
+	for (const [axis, group] of gizmoAxisGroups) group.visible = !floorSelected || axis === "y"
+	const dist = Math.max(1, camera.position.distanceTo(transformGizmo.position))
+	const scale = Math.min(2.2, Math.max(0.8, dist * 0.055))
+	transformGizmo.scale.setScalar(scale)
+}
+
+function gizmoHit(event) {
+	if (!transformGizmo.visible) return null
+	const handles = gizmoHandleMeshes.filter(mesh => mesh.parent?.visible)
+	return handles.length ? raycast(event, handles) : null
+}
+
+function gizmoAxisVector(axis) {
+	if (axis === "x") return new THREE.Vector3(1, 0, 0)
+	if (axis === "y") return new THREE.Vector3(0, 1, 0)
+	return new THREE.Vector3(0, 0, 1)
+}
+
+function intersectGizmoPlane(event, out) {
+	pointerFromEvent(event)
+	raycaster.setFromCamera(pointer, camera)
+	return raycaster.ray.intersectPlane(gizmoPlane, out)
+}
+
+function startGizmoDrag(event, handle) {
+	if (!selectedPrimitive) return false
+	const axis = handle.userData.axis
+	const floorDrag = Boolean(selectedPrimitive.userData.isGround)
+	gizmoAxisWorld.copy(gizmoAxisVector(axis)).normalize()
+	camera.getWorldDirection(gizmoCameraDir)
+	gizmoPlaneNormal.copy(gizmoCameraDir).addScaledVector(gizmoAxisWorld, -gizmoCameraDir.dot(gizmoAxisWorld))
+	if (gizmoPlaneNormal.lengthSq() < 1e-5) {
+		gizmoPlaneNormal.set(axis === "y" ? 1 : 0, axis === "y" ? 0 : 1, 0)
+	}
+	gizmoPlaneNormal.normalize()
+	gizmoPlane.setFromNormalAndCoplanarPoint(gizmoPlaneNormal, transformGizmo.position)
+	let startScalar = 0
+	if (!floorDrag) {
+		if (!intersectGizmoPlane(event, gizmoRayPoint)) return false
+		startScalar = gizmoRayPoint.clone().sub(transformGizmo.position).dot(gizmoAxisWorld)
+	}
+	const subtree = floorDrag ? [] : collectSubtree(selectedPrimitive)
+	drag = {
+		mode: "gizmo",
+		pointerId: event.pointerId,
+		mesh: selectedPrimitive,
+		axis,
+		axisWorld: gizmoAxisWorld.clone(),
+		origin: transformGizmo.position.clone(),
+		startScalar,
+		startY: event.clientY,
+		subtree,
+		startPositions: [selectedPrimitive, ...subtree].map(mesh => mesh.position.clone()),
+		startPlotHeight: floorDrag ? (plotHeights.get(selectedPrimitive.userData.plotId) || 0) : 0,
+	}
+	renderer.domElement.setPointerCapture(event.pointerId)
+	renderer.domElement.classList.add("is-dragging")
+	return true
+}
+
+function bindPrimitiveTreeToCurrentPlot(mesh, subtree) {
+	const pos = mesh.getWorldPosition(tmpWorld)
+	const half = floorSize / 2
+	const tile = world.groundTiles.find(t => {
+		const origin = t.userData.origin
+		return pos.x >= origin.x - half && pos.x <= origin.x + half && pos.z >= origin.z - half && pos.z <= origin.z + half
+	})
+	if (tile) bindPrimitiveTreeToPlot(mesh, subtree, tile.userData.plotId ?? 0)
+}
+
+function updateGizmoDrag(event) {
+	if (drag.mesh.userData.isGround) {
+		setPlotHeight(drag.mesh.userData.plotId ?? 0, drag.startPlotHeight + (drag.startY - event.clientY) * 0.03)
+		updateTransformGizmo()
+		return
+	}
+	if (!intersectGizmoPlane(event, gizmoRayPoint)) return
+	const currentScalar = gizmoRayPoint.clone().sub(drag.origin).dot(drag.axisWorld)
+	const delta = currentScalar - drag.startScalar
+	tmpDelta.copy(drag.axisWorld).multiplyScalar(delta)
+	const moved = [drag.mesh, ...drag.subtree]
+	for (let i = 0; i < moved.length; i++) moved[i].position.copy(drag.startPositions[i]).add(tmpDelta)
+	if (drag.axis !== "y") bindPrimitiveTreeToCurrentPlot(drag.mesh, drag.subtree)
+	syncGeneratedForPrimitive(drag.mesh)
+	updateTransformGizmo()
+}
+
+function finishGizmoDrag() {
+	if (!drag || drag.mode !== "gizmo") return
+	if (drag.mesh.userData.isGround) applyGroundDeform()
+	else {
+		bindPrimitiveTreeToCurrentPlot(drag.mesh, drag.subtree)
+		syncGeneratedForPrimitive(drag.mesh)
+	}
+}
+
 // --- Tools / palette --------------------------------------------------------
 
 function setActiveTool(tool) {
@@ -532,9 +842,9 @@ function setActiveTool(tool) {
 	renderer.domElement.classList.toggle("is-painting", tool === "paint")
 	renderer.domElement.classList.toggle("is-scaling", tool === "scale")
 	renderer.domElement.classList.toggle("is-rotating", tool === "rotate")
-	renderer.domElement.classList.toggle("is-elevating", tool === "elevate")
 	syncPlacementPreview()
 	updateElevationHandles()
+	updateTransformGizmo()
 }
 
 function syncPlacementPreview() {
@@ -555,26 +865,40 @@ function syncPlacementPreview() {
 }
 
 function selectPrimitive(mesh) {
+	mesh = mesh ? editablePrimitiveFor(mesh) : null
 	if (selectedPrimitive) clearSelectionOutline(selectedPrimitive)
 	selectedPrimitive = mesh
-	if (mesh) createSelectionOutline(mesh, 0xffffff)
+	if (mesh) {
+		createSelectionOutline(mesh)
+		syncActiveColorFromSelection(mesh)
+	}
+	updateTransformGizmo()
 }
 
-function applyColor(color) {
+function setActiveColorOnly(color) {
 	activeColor = color
-	if (selectedPrimitive) {
-		if (selectedPrimitive.userData.isGround) world.setGroundColor(color)
-		else {
-			selectedPrimitive.material.color.set(color)
-			selectedPrimitive.userData.baseColor = selectedPrimitive.material.color.getHexString()
-		}
-	}
 	if (placementPreview) {
 		placementPreview.material.color.set(color)
 		placementPreview.userData.baseColor = placementPreview.material.color.getHexString()
 	}
 	for (const swatch of els.colorSwatches) {
 		swatch.classList.toggle("active", swatch.dataset.color.toLowerCase() === color.toLowerCase())
+	}
+}
+
+function syncActiveColorFromSelection(mesh) {
+	const hex = "#" + (mesh.userData.baseColor ?? mesh.material.color.getHexString())
+	setActiveColorOnly(hex)
+}
+
+function applyColor(color) {
+	setActiveColorOnly(color)
+	if (selectedPrimitive) {
+		if (selectedPrimitive.userData.isGround) world.setGroundTileColor(selectedPrimitive, color)
+		else {
+			selectedPrimitive.material.color.set(color)
+			selectedPrimitive.userData.baseColor = selectedPrimitive.material.color.getHexString()
+		}
 	}
 }
 
@@ -648,7 +972,10 @@ function placeMeshOnSurface(mesh, hit) {
 }
 
 function placementAnchor(hit) {
-	if (hit.object.userData.isGround || hit.object.userData.locked) return hit.point.clone()
+	if (hit.object.userData.isGround || hit.object.userData.locked) {
+		if (!hit.object.userData.isGround || !hasPlotElevation()) return hit.point.clone()
+		return new THREE.Vector3(hit.point.x, heightAt(hit.point.x, hit.point.z) + groundTopY, hit.point.z)
+	}
 	if (!hit.object.geometry.boundingBox) hit.object.geometry.computeBoundingBox()
 	const bounds = hit.object.geometry.boundingBox
 	const axis = hitFaceAxis(hit)
@@ -664,7 +991,9 @@ function placementAnchor(hit) {
 }
 
 function placementNormalFromHit(hit) {
-	if (hit.object.userData.isGround || hit.object.userData.locked) return hit.normal.clone()
+	if (hit.object.userData.isGround || hit.object.userData.locked) {
+		return hit.object.userData.isGround && hasPlotElevation() ? slopeNormalAt(hit.point.x, hit.point.z) : hit.normal.clone()
+	}
 	const axis = hitFaceAxis(hit)
 	localFaceNormal.set(0, 0, 0)
 	localFaceNormal[axis.name] = axis.sign
@@ -686,6 +1015,16 @@ function hitFaceAxis(hit) {
 function alignMeshToNormal(mesh, normal) {
 	if (mesh.userData.manualRotation) return
 	mesh.quaternion.setFromUnitVectors(localUp, normal)
+}
+
+function plotIdFromHit(hit, fallback = activePlotId) {
+	const pid = hit?.object?.userData?.plotId
+	return Number.isInteger(pid) ? pid : fallback
+}
+
+function bindPrimitiveTreeToPlot(root, descendants, plotId) {
+	root.userData.plotId = plotId
+	for (const child of descendants) child.userData.plotId = plotId
 }
 
 // --- Attachment graph -------------------------------------------------------
@@ -781,14 +1120,16 @@ function updateOrbit(event) {
 	updateCamera()
 }
 
-// --- Primitive drag (move / scale / roll) -----------------------------------
+// --- Primitive transform drags (scale / roll) -------------------------------
 
 function startPrimitiveDrag(event, mesh) {
+	mesh = editablePrimitiveFor(mesh)
 	selectPrimitive(mesh)
 	if (mesh.userData.isGround || mesh.userData.locked) return
+	if (activeTool === "pointer") return
 	const worldPosition = mesh.getWorldPosition(new THREE.Vector3())
 	drag = {
-		mode: activeTool === "rotate" ? "roll" : activeTool === "scale" ? "scale" : "primitive",
+		mode: activeTool === "rotate" ? "roll" : "scale",
 		pointerId: event.pointerId,
 		mesh,
 		startX: event.clientX,
@@ -803,6 +1144,7 @@ function startPrimitiveDrag(event, mesh) {
 	if (drag.mode === "scale") setupScaleDrag(mesh)
 	if (drag.mode === "roll") setupRollDrag(mesh)
 	renderer.domElement.setPointerCapture(event.pointerId)
+	renderer.domElement.classList.add("is-dragging")
 }
 
 // Capture the rotating block's pivot and the start pose of every dependent, so the
@@ -874,19 +1216,9 @@ function updatePrimitiveDrag(event) {
 			m.mesh.quaternion.copy(rollQuat).multiply(m.startQuat)
 			m.mesh.userData.manualRotation = true
 		}
+		syncGeneratedForPrimitives([drag.mesh, ...drag.roll.members.map(m => m.mesh)])
 		return
 	}
-	// Move: re-seat the block on whatever is under the cursor, then carry its whole
-	// dependent stack by the same delta so attached blocks travel with their root.
-	const subtree = collectSubtree(drag.mesh)
-	const hit = surfaceHit(event, new Set([drag.mesh, ...subtree]))
-	if (!hit) return
-	const before = drag.mesh.position.clone()
-	placeMeshOnSurface(drag.mesh, hit)
-	world.group.worldToLocal(drag.mesh.position)
-	tmpDelta.copy(drag.mesh.position).sub(before)
-	for (const d of subtree) d.position.add(tmpDelta)
-	recordSupport(drag.mesh, hit)
 }
 
 function updateScaleDrag(event) {
@@ -930,6 +1262,7 @@ function updateScaleDrag(event) {
 			rec.subtree[i].position.copy(rec.startPos[i]).add(tmpDelta)
 		}
 	}
+	syncGeneratedForPrimitive(s.mesh)
 }
 
 function objectScreenPosition(worldPosition) {
@@ -967,6 +1300,9 @@ function pointerDown(event) {
 		return
 	}
 
+	const hitGizmo = gizmoHit(event)
+	if (hitGizmo?.object && startGizmoDrag(event, hitGizmo.object)) return
+
 	// A dashed ghost outline on any side → grow the world that way (works with any tool active).
 	const ghostHit = world.ghostTiles.length ? raycast(event, world.ghostTiles.map(g => g.userData.fill)) : null
 	if (ghostHit) {
@@ -987,20 +1323,6 @@ function pointerDown(event) {
 		return
 	}
 
-	if (activeTool === "elevate") {
-		// Pick a plot by its (translucent) ground-tile handle, then drag vertically to set height.
-		const hit = raycast(event, world.groundTiles.filter(t => t.visible))
-		if (hit?.object) {
-			selectPrimitive(null)
-			const pid = hit.object.userData.plotId
-			drag = { mode: "elevate", pointerId: event.pointerId, plotId: pid, tile: hit.object, startY: event.clientY, startH: plotHeights.get(pid) || 0 }
-			renderer.domElement.setPointerCapture(event.pointerId)
-		} else {
-			startOrbit(event)
-		}
-		return
-	}
-
 	// pointer / scale / rotate / eraser act on a selectable block-out mesh under the cursor.
 	const hit = raycast(event, world.selectables())
 	if (hit?.object) {
@@ -1012,7 +1334,8 @@ function pointerDown(event) {
 			world.removePrimitive(hit.object)
 			return
 		}
-		startPrimitiveDrag(event, hit.object)
+		if (activeTool === "scale" || activeTool === "rotate") startPrimitiveDrag(event, hit.object)
+		else selectPrimitive(hit.object)
 		return
 	}
 	if (activeTool === "pointer") selectPrimitive(null)
@@ -1024,16 +1347,18 @@ renderer.domElement.addEventListener("pointerdown", pointerDown)
 renderer.domElement.addEventListener("pointermove", event => {
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
-	else if (drag?.mode === "elevate") updateElevateDrag(event)
-	else if (drag && ["primitive", "scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
+	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
+	else if (drag && ["scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
 	else { updateGhostHover(event); updatePlacement(event) }
 })
 
 renderer.domElement.addEventListener("pointerup", event => {
 	if (drag?.pointerId === event.pointerId) {
-		if (drag.mode === "elevate") applyGroundDeform() // re-shape the ground splat once, on release
+		if (drag.mode === "gizmo") finishGizmoDrag()
 		renderer.domElement.releasePointerCapture(event.pointerId)
 		drag = null
+		renderer.domElement.classList.remove("is-dragging")
+		updateTransformGizmo()
 	}
 })
 
@@ -1211,13 +1536,23 @@ async function generateWorld(prompt) {
 		const tCap = performance.now()
 		const subjects = []
 		if (doFloor) {
-			showProgress(done, total, "Capturing floor…")
-			const cap = await captureFloor(renderer, scene, world)
+			const tile = world.ground
+			const colors = primitiveColors([tile])
+			const groundColor = world.baseGroundColor
+			showProgress(done, total, "Texturing floor…")
+			const cap = await texturedFloorCapture(tile, {
+				prompt: groundDesc || prompt,
+				output,
+				name: "floor",
+				groundColor,
+				colors,
+				box: world.floorBox(),
+			})
 			subjects.push({
-				kind: "floor", image: cap.guide, box: world.floorBox(), name: "floor", isFloor: true,
+				kind: "floor", image: cap.guide, box: world.floorBox(), name: "floor", isFloor: true, plotId: 0,
 				prompt: groundDesc || prompt, // Gemini's terrain description (falls back to the scene prompt)
-				groundColor: world.baseGroundColor, yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
-				primitives: null, colors: primitiveColors([world.ground]), // base ground + painted terrain colours
+				groundColor, yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
+				primitives: null, colors, skipImageEdit: true, // Gemini already produced the texture before capture
 			})
 		}
 		for (let i = 0; i < objects.length; i++) {
@@ -1244,11 +1579,11 @@ async function generateWorld(prompt) {
 			try {
 				const bytes = await generateSubject({
 					prompt: s.prompt, kind: s.kind, steps: s.steps, gaussians: s.gaussians,
-					output, name: s.name, label: s.label, groundColor: s.groundColor, colors: s.colors, image: s.image,
+					output, name: s.name, label: s.label, groundColor: s.groundColor, colors: s.colors, image: s.image, skipImageEdit: s.skipImageEdit,
 				})
 				const requestMs = performance.now() - tReq // server-side image edit + Tripo (see server [timing] log)
 				const tSeat = performance.now()
-				await seatSubject(bytes, s.box, s.name, s.primitives, { kind: s.kind, yawTurns: s.yawTurns, yawDeg: s.yawDeg, yOffset: s.yOffset, fitHeight: Boolean(s.fitHeight), colors: s.colors })
+				await seatSubject(bytes, s.box, s.name, s.primitives, { kind: s.kind, yawTurns: s.yawTurns, yawDeg: s.yawDeg, yOffset: s.yOffset, fitHeight: Boolean(s.fitHeight), colors: s.colors, plotId: s.plotId })
 				subjectTimes.push({ subject: s.name, "request(s)": +(requestMs / 1000).toFixed(2), "seat(ms)": Math.round(performance.now() - tSeat) })
 				if (s.isFloor) world.groundGenerated()
 				splatStore.set(s.name, bytes)
@@ -1261,7 +1596,7 @@ async function generateWorld(prompt) {
 		// Build subject metadata for ZIP export / re-fitting (only successfully seated subjects).
 		sessionSubjects = subjects
 			.filter(s => splatStore.has(s.name))
-			.map(s => ({ name: s.name, kind: s.kind ?? "object", yawTurns: s.yawTurns ?? 0, fitHeight: Boolean(s.fitHeight) }))
+			.map(s => ({ name: s.name, kind: s.kind ?? "object", plotId: s.plotId ?? null, yawTurns: s.yawTurns ?? 0, fitHeight: Boolean(s.fitHeight) }))
 
 		const totalS = ((performance.now() - genStart) / 1000).toFixed(1)
 		const genS = ((performance.now() - genStart - idMs - captureMs) / 1000).toFixed(1)
@@ -1284,16 +1619,34 @@ async function generateWorld(prompt) {
 
 // Reconstruct + seat one subject's splat into its target box. `colors` (hex palette) drives
 // the optional splat-side palette lock when it's enabled in config.
-async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, colors = null, fileName = `${name}.splat` } = {}) {
+function floorSeamBox(box) {
+	const out = box.clone()
+	out.min.x -= floorSeamOverlap
+	out.min.z -= floorSeamOverlap
+	out.max.x += floorSeamOverlap
+	out.max.z += floorSeamOverlap
+	return out
+}
+
+function floorSeamClipBoxes(boxes) {
+	return boxes?.map(floorSeamBox) ?? null
+}
+
+async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, colors = null, plotId = null, clipBoxes = null, fileName = `${name}.splat` } = {}) {
 	const raw = new SplatMesh({ fileBytes: bytes, fileName })
 	await raw.initialized
 	const fit = fitSettingsFor(kind)
-	const fitted = await fitSplatToBox(raw, box, {
+	const isFloor = kind === "floor"
+	const fitBox = isFloor ? floorSeamBox(box) : box
+	const fitClipBoxes = isFloor ? floorSeamClipBoxes(clipBoxes ?? [box]) : null
+	const fitted = await fitSplatToBox(raw, fitBox, {
 		yawTurns,
 		yawDeg,
 		yOffset,
 		fitHeight,
-		fillXZ, // unified ground: fill a rectangular multi-tile footprint exactly on X/Z
+		fillXZ: fillXZ || isFloor, // floors fill their rectangular footprint exactly on X/Z
+		exactBounds: isFloor, // floors are clamped into the target slab, including thickness
+		clipBoxes: fitClipBoxes,
 		opacityFloor: fit.opacityFloor,
 		clampK: fit.fitClampK,
 		spanLo: fit.fitBboxPercentile,
@@ -1308,7 +1661,7 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 	}
 	fitted.userData.genName = name
 	fitted.userData.genKind = kind
-	fitted.userData.genPlotId = kind === "floor" ? null : (sourcePrimitives?.[0]?.userData?.plotId ?? 0)
+	fitted.userData.genPlotId = kind === "floor" ? plotId : (sourcePrimitives?.[0]?.userData?.plotId ?? 0)
 	// Footprint centre + base Y, so elevation can stick the object to the deformed ground surface
 	// under it and tilt it to the slope normal there.
 	fitted.userData.seatX = (box.min.x + box.max.x) / 2
@@ -1318,11 +1671,8 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 }
 
 // --- World expansion ("Add plot") -------------------------------------------
-// Plots are 16×16 ground tiles laid edge-to-edge (no gap → seamless). Objects are generated
-// per-plot (incrementally — a new plot's objects can't exist before it does), but the GROUND
-// is one shared surface: generated once, then OUTPAINTED to extend into each new tile so it
-// continues seamlessly (same colour/material, no seam) and is reconstructed as a SINGLE splat
-// spanning every plot. groundMaster keeps the last ground image as the next outpaint's context.
+// Plots are 16×16 ground tiles laid edge-to-edge. Objects are generated incrementally per plot,
+// and floors are generated as one independently bounded splat per plot.
 
 function cellOf(origin) {
 	return { ix: Math.round(origin.x / floorSize), iz: Math.round(origin.z / floorSize) }
@@ -1367,6 +1717,10 @@ function orderedPlotIds() {
 	return world.groundTiles.map(t => t.userData.plotId)
 }
 
+function floorNameForTile(tile) {
+	return `floor-p${tile.userData.plotId ?? 0}`
+}
+
 function plotPrimitives(plotId) {
 	return world.primitives.filter(p => (p.userData.plotId ?? 0) === plotId)
 }
@@ -1400,6 +1754,36 @@ function blobToImage(blob) {
 		img.onerror = reject
 		img.src = URL.createObjectURL(blob)
 	})
+}
+
+async function withTemporaryFloorTexture(tile, textureBlob, fn) {
+	const surface = tile.userData.paint
+	if (!surface?.canvas) return await fn()
+	const { canvas, ctx, texture } = surface
+	const original = ctx.getImageData(0, 0, canvas.width, canvas.height)
+	const image = await blobToImage(textureBlob)
+	ctx.clearRect(0, 0, canvas.width, canvas.height)
+	ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
+	texture.needsUpdate = true
+	updateGroundSlopePreview()
+	try {
+		return await fn()
+	} finally {
+		ctx.putImageData(original, 0, 0)
+		texture.needsUpdate = true
+		updateGroundSlopePreview()
+		if (image.src) URL.revokeObjectURL(image.src)
+	}
+}
+
+async function texturedFloorCapture(tile, { prompt, output, name, groundColor, colors, box }) {
+	const paint = tile.userData.paint?.canvas
+	if (!paint) return await captureFloor(renderer, scene, world, world.floorCaptureMeshesForTile(tile), box)
+	const topDown = await canvasToBlob(paint)
+	const texture = await generateFloorTexture({
+		prompt, image: topDown, groundColor, colors, output, name: `${name}-texture`,
+	})
+	return await withTemporaryFloorTexture(tile, texture, () => captureFloor(renderer, scene, world, world.floorCaptureMeshesForTile(tile), box))
 }
 
 // Average colour of an already-generated ground image, so a NEW plot's ground can be locked to
@@ -1573,7 +1957,7 @@ function frameOrbitOnCell(cell) {
 }
 
 // --- Plot elevation (hills) -------------------------------------------------
-// Raising a plot deforms the ONE unified ground splat via a smooth height field: flat at each
+// Raising a plot deforms every generated floor splat via a smooth height field: flat at each
 // plot's own height near its centre, ramping between plots so a raised plot reads as a hill.
 // The field is a Gaussian-weighted blend of plot heights by distance to each plot's centre.
 
@@ -1590,6 +1974,80 @@ function heightAt(x, z) {
 		hsum += w * h
 	}
 	return wsum > 0 ? hsum / wsum : 0
+}
+
+function slopeNormalAt(x, z) {
+	const eps = Math.max(0.25, floorSize * 0.04)
+	const gradX = (heightAt(x + eps, z) - heightAt(x - eps, z)) / (2 * eps)
+	const gradZ = (heightAt(x, z + eps) - heightAt(x, z - eps)) / (2 * eps)
+	return new THREE.Vector3(-gradX, 1, -gradZ).normalize()
+}
+
+function hasPlotElevation() {
+	for (const h of plotHeights.values()) {
+		if (Math.abs(h) > 1e-4) return true
+	}
+	return false
+}
+
+function makeGroundSlopePreview(tile) {
+	const segments = 24
+	const half = floorSize / 2
+	const origin = tile.userData.origin
+	const positions = []
+	const uvs = []
+	const indices = []
+	for (let z = 0; z <= segments; z++) {
+		for (let x = 0; x <= segments; x++) {
+			const u = x / segments
+			const v = z / segments
+			const wx = origin.x - half + u * floorSize
+			const wz = origin.z - half + v * floorSize
+			positions.push(wx, heightAt(wx, wz) + groundTopY + 0.035, wz)
+			uvs.push(u, 1 - v)
+		}
+	}
+	for (let z = 0; z < segments; z++) {
+		for (let x = 0; x < segments; x++) {
+			const a = z * (segments + 1) + x
+			const b = a + 1
+			const c = a + segments + 1
+			const d = c + 1
+			indices.push(a, c, b, b, c, d)
+		}
+	}
+	const geometry = new THREE.BufferGeometry()
+	geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
+	geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2))
+	geometry.setIndex(indices)
+	geometry.computeVertexNormals()
+	const material = new THREE.MeshBasicMaterial({
+		color: 0xffffff,
+		map: tile.userData.paint?.texture ?? null,
+		side: THREE.DoubleSide,
+		depthWrite: true,
+	})
+	const mesh = new THREE.Mesh(geometry, material)
+	mesh.userData.isGroundSlopePreview = true
+	mesh.userData.isGround = true
+	mesh.userData.plotId = tile.userData.plotId
+	mesh.userData.origin = tile.userData.origin
+	mesh.userData.paint = tile.userData.paint
+	mesh.renderOrder = 3
+	return mesh
+}
+
+function updateGroundSlopePreview() {
+	for (const mesh of world.groundSlopePreviews) disposeObject(mesh)
+	world.groundSlopePreviews = []
+	const show = hasPlotElevation() && !world.floorGenerated
+	if (!show) return
+	for (const tile of world.groundTiles) {
+		const preview = makeGroundSlopePreview(tile)
+		preview.visible = true
+		world.group.add(preview)
+		world.groundSlopePreviews.push(preview)
+	}
 }
 
 // Displace every ground gaussian in Y by the height field, always recomputed from the flat
@@ -1612,8 +2070,9 @@ function deformGround(mesh) {
 }
 
 function applyGroundDeform() {
-	const g = world.generated.find(x => x.mesh.userData.genName === "floor")
-	if (g) deformGround(g.mesh)
+	for (const g of world.generated) {
+		if (g.mesh.userData.genKind === "floor") deformGround(g.mesh)
+	}
 }
 
 // Seat one object splat ON the deformed ground: lift its base to the surface height at its own
@@ -1631,10 +2090,7 @@ function seatObjectOnGround(mesh) {
 		mesh.position.set(0, pid != null ? (plotHeights.get(pid) || 0) : 0, 0)
 		return
 	}
-	const eps = Math.max(0.25, floorSize * 0.04)
-	const gradX = (heightAt(x + eps, z) - heightAt(x - eps, z)) / (2 * eps)
-	const gradZ = (heightAt(x, z + eps) - heightAt(x, z - eps)) / (2 * eps)
-	const normal = new THREE.Vector3(-gradX, 1, -gradZ).normalize()
+	const normal = slopeNormalAt(x, z)
 	const q = new THREE.Quaternion().setFromUnitVectors(localUp, normal)
 	const base = new THREE.Vector3(x, baseY, z)
 	mesh.quaternion.copy(q)
@@ -1651,39 +2107,45 @@ function applyAllPlotHeights() {
 	applyGroundDeform()
 }
 
-// Show the ground tiles as translucent grab-handles (at their plot heights) while the elevate
-// tool is active; otherwise restore them (hidden once generated, normal in draft).
+// Keep editable floor tiles and slope previews aligned to the current plot heights.
 function updateElevationHandles() {
-	const show = activeTool === "elevate"
+	const slopePreview = hasPlotElevation() && !world.floorGenerated
+	updateGroundSlopePreview()
 	for (const tile of world.groundTiles) {
-		tile.material.transparent = show
-		tile.material.opacity = show ? 0.5 : 1
-		tile.material.depthWrite = !show
-		tile.material.needsUpdate = true
 		tile.position.y = groundThickness / 2 + (plotHeights.get(tile.userData.plotId) || 0)
-		tile.visible = show || !world.floorGenerated
+		if (showColliders) {
+			setPickableHidden(tile, false)
+			tile.visible = true
+			continue
+		}
+		if (world.floorGenerated) {
+			setPickableHidden(tile, true)
+			continue
+		}
+		tile.material.transparent = slopePreview
+		tile.material.opacity = slopePreview ? 0 : 1
+		tile.material.depthWrite = !slopePreview
+		tile.material.needsUpdate = true
+		tile.visible = !world.floorGenerated
 	}
 }
 
-// Drag a selected plot up/down: update its height, move the handle + lift its objects live
-// (block-out prims carried by delta). The ground splat re-deforms on pointer-up (heavier).
-function updateElevateDrag(event) {
-	const h = drag.startH + (drag.startY - event.clientY) * 0.03 // px → world units, up = raise
-	const clamped = Math.max(-floorSize, Math.min(floorSize, h))
-	const pid = drag.plotId
-	const delta = clamped - (plotHeights.get(pid) || 0)
+function setPlotHeight(pid, height) {
+	const clamped = Math.max(-floorSize, Math.min(floorSize, height))
+	const old = plotHeights.get(pid) || 0
+	const delta = clamped - old
+	if (Math.abs(delta) < 1e-4) return
 	plotHeights.set(pid, clamped)
-	drag.tile.position.y = groundThickness / 2 + clamped
 	// Re-seat EVERY object onto the surface (a plot's height also tilts objects on neighbouring
 	// plots near the shared seam). Objects follow the height field + tilt to the slope; cheap.
 	for (const g of world.generated) if (g.mesh.userData.genKind !== "floor") seatObjectOnGround(g.mesh)
 	for (const p of world.primitives) if ((p.userData.plotId ?? 0) === pid) p.position.y += delta
-	setStatus(`Plot ${pid} height ${clamped >= 0 ? "+" : ""}${clamped.toFixed(1)} — release to shape the ground`)
+	updateElevationHandles()
+	setStatus(`Plot ${pid} height ${clamped >= 0 ? "+" : ""}${clamped.toFixed(1)}`)
 }
 
-// Generate / extend a multi-plot world: rebuild the UNIFIED ground (outpainting it to grow
-// seamlessly), then generate objects only for plots not yet built (existing plots stay
-// frozen). One ground splat spans every plot, so there is never a seam.
+// Generate / extend a multi-plot world: each plot gets its own floor splat, then objects are
+// generated only for plots not yet built (existing object splats stay frozen).
 async function generateExpanded(prompt) {
 	if (generating) return
 	generating = true
@@ -1699,7 +2161,8 @@ async function generateExpanded(prompt) {
 	const toBuild = orderedPlotIds().filter(pid => !already.has(pid) && plotPrimitives(pid).length)
 	let totalObjects = 0
 	for (const pid of toBuild) totalObjects += computeObjects(plotPrimitives(pid)).length
-	const total = 1 + totalObjects // 1 = the unified ground
+	const floorTiles = [...world.groundTiles]
+	const total = floorTiles.length + totalObjects
 	let done = 0
 	showProgress(0, total, "Preparing expansion…")
 
@@ -1707,43 +2170,45 @@ async function generateExpanded(prompt) {
 		let output = null
 		try { output = (await newOutput()).index } catch {}
 
-		// 1. UNIFIED GROUND — one splat spanning the whole footprint, outpainted to extend.
-		showProgress(done, total, groundMaster ? "Extending ground (seamless)…" : "Generating ground…")
-		const fp = footprint()
-		const size = groundImageSize(fp.cols, fp.rows)
-		const { canvas, mask } = buildGroundComposite(fp, size)
-		const imageBlob = await canvasToBlob(canvas)
-		const maskBlob = mask ? await canvasToBlob(mask) : null
-		// Colour match: lock the new ground to the EXISTING plot's real colour (sampled from the
-		// kept ground image), not just the block-out base — so both plots read as one surface.
-		// Falls back to the block-out palette on the first build (no kept image yet).
-		let groundColorHex = world.baseGroundColor
-		let groundColors = primitiveColors(world.groundTiles)
-		if (groundMaster?.imageEl) {
-			const existing = sampleImageColor(groundMaster.imageEl)
-			if (existing) {
-				groundColorHex = existing
-				groundColors = [existing, ...groundColors]
+		// 1. FLOORS — one independently bounded floor splat per plot. This prevents a generated
+		// floor from spilling into empty footprint cells and lets each plot keep its own colour.
+		world.removeGeneratedWhere(g => g.mesh.userData.genKind === "floor")
+		world.floorGenerated = false
+		updateElevationHandles()
+		for (const name of [...splatStore.keys()]) {
+			if (name === "floor" || name.startsWith("floor-p")) splatStore.delete(name)
+		}
+		let generatedFloorCount = 0
+		for (let i = 0; i < floorTiles.length; i++) {
+			const tile = floorTiles[i]
+			const plotId = tile.userData.plotId ?? 0
+			const name = floorNameForTile(tile)
+			const box = world.floorBoxForTile(tile)
+			const colors = primitiveColors([tile])
+			const groundColor = `#${tile.userData.baseColor ?? world.baseGroundColor.replace("#", "")}`
+			showProgress(done, total, `Texturing floor ${i + 1} of ${floorTiles.length}…`)
+			try {
+				const floorCap = await texturedFloorCapture(tile, { prompt, output, name, groundColor, colors, box })
+				showProgress(done, total, `Generating floor ${i + 1} of ${floorTiles.length}…`)
+				const bytes = await generateSubject({
+					prompt, kind: "floor", image: floorCap.guide, groundColor,
+					colors, output, name, skipImageEdit: true,
+				})
+				await seatSubject(bytes, box, name, null, {
+					kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
+					fillXZ: true, colors, plotId, clipBoxes: [box],
+				})
+				splatStore.set(name, bytes)
+				generatedFloorCount++
+			} catch (error) {
+				console.warn(`${name}:`, error.message)
+				setStatus(`${name} generation failed: ` + (error.message || error))
 			}
+			done++
+			showProgress(done, total)
 		}
-		try {
-			const res = await generateGround({
-				prompt, image: imageBlob, mask: maskBlob, groundColor: groundColorHex,
-				colors: groundColors, cols: fp.cols, rows: fp.rows, imageSize: size.label, output, name: "floor",
-			})
-			world.removeGenerated("floor")
-			await seatSubject(res.splat, world.footprintBox(), "floor", null, {
-				kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset, fillXZ: true, colors: groundColors,
-			})
-			splatStore.set("floor", res.splat)
-			world.groundGenerated()
-			groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
-		} catch (error) {
-			console.warn("ground:", error.message)
-			setStatus("Ground generation failed: " + (error.message || error))
-		}
-		done++
-		showProgress(done, total)
+		if (generatedFloorCount === floorTiles.length) world.groundGenerated()
+		groundMaster = null
 
 		// 2. OBJECTS — only for plots that aren't built yet (frozen plots are left untouched).
 		for (const pid of toBuild) {
@@ -1781,7 +2246,13 @@ async function generateExpanded(prompt) {
 		world.state = "generated"
 		applyOverlayVisibility()
 		sessionSubjects = world.generated
-			.map(g => ({ name: g.mesh.userData.genName, kind: g.mesh.userData.genKind ?? "object", yawTurns: g.mesh.userData.genKind === "floor" ? FLOOR_YAW_TURNS : OBJECT_YAW_TURNS, fitHeight: g.mesh.userData.genKind !== "floor" }))
+			.map(g => ({
+				name: g.mesh.userData.genName,
+				kind: g.mesh.userData.genKind ?? "object",
+				plotId: g.mesh.userData.genPlotId ?? null,
+				yawTurns: g.mesh.userData.genKind === "floor" ? FLOOR_YAW_TURNS : OBJECT_YAW_TURNS,
+				fitHeight: g.mesh.userData.genKind !== "floor",
+			}))
 			.filter(s => s.name)
 		saveBuildToHistory(world.prompt)
 		showProgress(total, total, "Done")
@@ -1857,6 +2328,7 @@ function serializePrimitives() {
 			scale: mesh.scale.toArray(),
 			color: `#${mesh.userData.baseColor ?? mesh.material.color.getHexString()}`,
 			locked: Boolean(mesh.userData.locked),
+			plotId: mesh.userData.plotId ?? 0,
 			support: mesh.userData.support ? index.get(mesh.userData.support) ?? null : null,
 			supportAxis: mesh.userData.supportAxis ?? { name: "y", sign: 1 },
 		})),
@@ -1957,6 +2429,7 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 	// Group the newly loaded primitives into objects (same logic as generation).
 	const objectGroups = computeObjects(world.primitives)
 	let objectIdx = 0
+	let floorIdx = 0
 
 	splatStore.clear()
 	sessionSubjects = []
@@ -1970,11 +2443,22 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 		const splatBytes = getSplat(s.name)
 		if (!splatBytes) { console.warn(`missing splat ${s.name}`); done++; showProgress(done, total); continue }
 
-		let box, sourcePrimitives, colors
+		let box, sourcePrimitives, colors, plotId = null, clipBoxes = null
 		if (s.kind === "floor") {
-			box = world.floorBox()
+			const legacyUnifiedFloor = s.plotId == null && s.name === "floor"
+			if (legacyUnifiedFloor) {
+				box = world.footprintBox?.() ?? world.floorBox()
+				colors = primitiveColors(world.groundTiles)
+				clipBoxes = world.floorClipBoxes()
+			} else {
+				plotId = s.plotId ?? world.groundTiles[floorIdx]?.userData.plotId ?? 0
+				const tile = world.groundTiles.find(t => t.userData.plotId === plotId) ?? world.groundTiles[floorIdx] ?? world.ground
+				box = world.floorBoxForTile(tile)
+				colors = primitiveColors([tile])
+				clipBoxes = [box]
+			}
+			floorIdx++
 			sourcePrimitives = null
-			colors = primitiveColors([world.ground])
 		} else {
 			const group = objectGroups[objectIdx++]
 			if (!group) { done++; showProgress(done, total); continue }
@@ -1992,10 +2476,11 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 				yOffset: fit.yOffset,
 				fitHeight: Boolean(s.fitHeight),
 				colors,
+				plotId,
+				clipBoxes,
 			})
 			splatStore.set(s.name, splatBytes)
-			sessionSubjects.push(s)
-			if (s.kind === "floor") world.groundGenerated()
+			sessionSubjects.push({ ...s, plotId: s.kind === "floor" ? plotId : (sourcePrimitives?.[0]?.userData?.plotId ?? s.plotId ?? null) })
 		} catch (err) {
 			console.warn(`refit ${s.name}:`, err.message)
 		}
@@ -2003,6 +2488,8 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 		showProgress(done, total)
 	}
 
+	if (sessionSubjects.some(s => s.kind === "floor")) world.groundGenerated()
+	applyAllPlotHeights()
 	world.state = "generated"
 	applyOverlayVisibility()
 	showProgress(total, total, "Done")
@@ -2042,6 +2529,7 @@ async function uploadPrimitives(file) {
 			locked: p.locked,
 		})
 		mesh.userData.world = world
+		mesh.userData.plotId = Number.isInteger(p.plotId) ? p.plotId : 0
 		world.primitives.push(mesh)
 		world.group.add(mesh)
 		return mesh
@@ -2063,56 +2551,15 @@ function applyOverlayVisibility() {
 	world.setBoundsVisible(showBounds)
 }
 
-// Capture a PNG of JUST the floor from the CURRENT live camera (the exact on-screen
-// view), hiding the block-out objects, generated object splats, and debug overlays.
-// The floor itself — the painted ground while editing, or the floor splat once
-// generated — is left untouched. Downloads the image.
+// Capture the exact isometric floor guide used by generation. This is intentionally not
+// the current editor camera; it is the canonical floor capture sent to the image model.
 async function screenshotFloor() {
-	const restored = []
-	const hide = obj => {
-		if (obj && obj.visible) {
-			obj.visible = false
-			restored.push(obj)
-		}
-	}
-	for (const primitive of world.primitives) hide(primitive)
-	for (const { mesh, primitives } of world.generated) if (primitives.length) hide(mesh) // keep the floor splat (no source primitives)
-	for (const helper of world.boundsHelpers) hide(helper)
-	hide(world.front)
-	hide(placementPreview)
-
-	const w = renderer.domElement.width
-	const h = renderer.domElement.height
-	const target = new THREE.WebGLRenderTarget(w, h)
-	camera.layers.disable(GHOST_LAYER) // keep expansion outlines out of the screenshot
 	try {
-		renderer.setRenderTarget(target)
-		renderer.render(scene, camera)
-		const pixels = new Uint8Array(w * h * 4)
-		renderer.readRenderTargetPixels(target, 0, 0, w, h, pixels)
-		const blob = await pixelsToPngBlob(pixels, w, h)
-		downloadBlob(blob, `floor-${Date.now()}.png`)
-	} finally {
-		renderer.setRenderTarget(null)
-		camera.layers.enable(GHOST_LAYER)
-		target.dispose()
-		for (const obj of restored) obj.visible = true
+		const cap = await captureFloor(renderer, scene, world)
+		downloadBlob(cap.guide, `floor-${Date.now()}.png`)
+	} catch (err) {
+		setStatus("Floor screenshot failed: " + (err.message || err))
 	}
-}
-
-function pixelsToPngBlob(pixels, w, h) {
-	const canvas = document.createElement("canvas")
-	canvas.width = w
-	canvas.height = h
-	const ctx = canvas.getContext("2d")
-	const image = ctx.createImageData(w, h)
-	for (let y = 0; y < h; y++) {
-		const src = y * w * 4
-		const dst = (h - y - 1) * w * 4 // GL reads bottom-up; flip to top-down
-		image.data.set(pixels.subarray(src, src + w * 4), dst)
-	}
-	ctx.putImageData(image, 0, 0)
-	return new Promise(resolve => canvas.toBlob(resolve, "image/png"))
 }
 
 function downloadBlob(blob, filename) {
@@ -2378,7 +2825,7 @@ els.chatForm.addEventListener("submit", event => {
 	event.preventDefault()
 	if (els.generate.disabled) return
 	const prompt = els.chatPrompt.value.trim()
-	// More than one plot → expansion path (unified outpainted ground + per-plot objects).
+	// More than one plot → expansion path (per-plot floors + per-plot objects).
 	// A single plot keeps the original one-shot pipeline untouched.
 	if (world.groundTiles.length > 1) generateExpanded(prompt)
 	else generateWorld(prompt)
@@ -2392,6 +2839,7 @@ window.addEventListener("resize", () => {
 
 function animate() {
 	sky.position.copy(camera.position)
+	updateTransformGizmo()
 	renderer.render(scene, camera)
 	requestAnimationFrame(animate)
 }

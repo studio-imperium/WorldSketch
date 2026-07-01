@@ -41,7 +41,7 @@ export async function newOutput() {
 
 // Generate one subject (an object or the floor): re-texture its block-out capture and
 // reconstruct it with TripoSplat. Returns the raw .splat bytes.
-export async function generateSubject({ prompt, kind, steps, gaussians, output, name, groundColor, label, colors, image, materialImage, signal }) {
+export async function generateSubject({ prompt, kind, steps, gaussians, output, name, groundColor, label, colors, image, materialImage, skipImageEdit = false, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt ?? "")
 	form.append("kind", kind)
@@ -54,6 +54,7 @@ export async function generateSubject({ prompt, kind, steps, gaussians, output, 
 	if (output) form.append("output", output)
 	if (name) form.append("name", name)
 	if (groundColor) form.append("ground_color", groundColor)
+	if (skipImageEdit) form.append("skip_image_edit", "true")
 	form.append("image", image, `${name || "guide"}.png`)
 	if (materialImage) form.append("material_image", materialImage, `${name || "materials"}-materials.png`)
 
@@ -63,6 +64,26 @@ export async function generateSubject({ prompt, kind, steps, gaussians, output, 
 		throw new Error(message || `generation failed (${response.status})`)
 	}
 	return new Uint8Array(await response.arrayBuffer())
+}
+
+// Floor-only first stage: turn the flat top-down paint/material map into a realistic
+// top-down terrain texture. The client applies this texture to the floor, captures the
+// regular isometric guide, then sends that guide to TripoSplat without another image edit.
+export async function generateFloorTexture({ prompt, image, groundColor, colors, output, name, signal }) {
+	const form = new FormData()
+	form.append("prompt", prompt ?? "")
+	if (groundColor) form.append("ground_color", groundColor)
+	if (colors && colors.length) form.append("colors", colors.join(","))
+	if (output) form.append("output", output)
+	if (name) form.append("name", name)
+	form.append("image", image, `${name || "floor-texture"}.png`)
+
+	const response = await fetch("/api/floor-texture", { method: "POST", body: form, signal })
+	if (!response.ok) {
+		const message = await response.text()
+		throw new Error(message || `floor texture failed (${response.status})`)
+	}
+	return await response.blob()
 }
 
 // Generate the UNIFIED ground for an expanded world. The client sends one composited

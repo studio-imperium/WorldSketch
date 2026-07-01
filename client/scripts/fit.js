@@ -174,6 +174,61 @@ function nearestLab(palette, L, a, b) {
 	return best
 }
 
+export function ensureSplatEditBase(mesh) {
+	const packed = mesh.packedSplats
+	const total = packed?.numSplats ?? 0
+	const existing = mesh.userData.editBase
+	if (!total) return null
+	if (existing?.numSplats === total) return existing
+	const centers = new Float32Array(total * 3)
+	const scales = new Float32Array(total * 3)
+	const quaternions = new Float32Array(total * 4)
+	const opacities = new Float32Array(total)
+	const colors = new Float32Array(total * 3)
+	packed.forEachSplat((i, center, scale, quaternion, opacity, color) => {
+		centers[i * 3] = center.x
+		centers[i * 3 + 1] = center.y
+		centers[i * 3 + 2] = center.z
+		scales[i * 3] = scale.x
+		scales[i * 3 + 1] = scale.y
+		scales[i * 3 + 2] = scale.z
+		quaternions[i * 4] = quaternion.x
+		quaternions[i * 4 + 1] = quaternion.y
+		quaternions[i * 4 + 2] = quaternion.z
+		quaternions[i * 4 + 3] = quaternion.w
+		opacities[i] = opacity
+		colors[i * 3] = color.r
+		colors[i * 3 + 1] = color.g
+		colors[i * 3 + 2] = color.b
+	})
+	mesh.userData.editBase = { numSplats: total, centers, scales, quaternions, opacities, colors }
+	return mesh.userData.editBase
+}
+
+export function applySplatEditTransform(mesh, matrix) {
+	const packed = mesh.packedSplats
+	const base = ensureSplatEditBase(mesh)
+	if (!packed?.numSplats || !base) return
+	const linear = matrix3FromMatrix4(matrix)
+	const center = new THREE.Vector3()
+	const scales = new THREE.Vector3()
+	const quaternion = new THREE.Quaternion()
+	const color = new THREE.Color()
+	for (let i = 0; i < base.numSplats; i++) {
+		center.set(base.centers[i * 3], base.centers[i * 3 + 1], base.centers[i * 3 + 2]).applyMatrix4(matrix)
+		scales.set(base.scales[i * 3], base.scales[i * 3 + 1], base.scales[i * 3 + 2])
+		quaternion.set(base.quaternions[i * 4], base.quaternions[i * 4 + 1], base.quaternions[i * 4 + 2], base.quaternions[i * 4 + 3])
+		const transformed = transformSplatShape(scales, quaternion, linear)
+		color.setRGB(base.colors[i * 3], base.colors[i * 3 + 1], base.colors[i * 3 + 2])
+		packed.setSplat(i, center, transformed.scales, transformed.quaternion, base.opacities[i], color)
+	}
+	packed.numSplats = base.numSplats
+	packed.needsUpdate = true
+	mesh.position.set(0, 0, 0)
+	mesh.quaternion.identity()
+	mesh.scale.set(1, 1, 1)
+}
+
 export async function fitSplatToBox(source, box, opts = {}) {
 	const opacityFloor = opts.opacityFloor ?? 0.03 // drop only near-transparent haze/wisp gaussians (WS_OPACITY_FLOOR)
 	const radiusKeep = opts.radiusKeep ?? 1 // optional floater trim; 1 keeps every opacity survivor
@@ -185,6 +240,8 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const palette = opts.palette?.length ? opts.palette.map(hexToLab) : null
 	const paletteStrength = opts.paletteStrength ?? 0 // chroma blend toward the palette colour
 	const paletteLightness = opts.paletteLightness ?? 0 // lightness pull toward the palette colour
+	const exactBounds = Boolean(opts.exactBounds)
+	const clipBoxes = Array.isArray(opts.clipBoxes) ? opts.clipBoxes : null
 
 	const packed = source.packedSplats
 	const total = packed?.numSplats ?? 0
@@ -332,6 +389,11 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		sy = scale + clampK * (yFit - scale)
 		sz = scale + clampK * (effZFit - scale)
 	}
+	if (exactBounds) {
+		sx = effXFit
+		sy = yFit
+		sz = effZFit
+	}
 
 	// Compact survivors to the front of the packed buffer, baking the final fit into each
 	// gaussian center and ellipsoid. If a palette is given, recolour each kept gaussian
@@ -346,6 +408,7 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const transformMatrix = new THREE.Matrix4().compose(new THREE.Vector3(), yaw, new THREE.Vector3(sx, -sy, sz))
 	const linear = matrix3FromMatrix4(transformMatrix)
 	const transformedOffset = new THREE.Vector3()
+	const insideClip = point => !clipBoxes || clipBoxes.some(b => b.containsPoint(point))
 
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
 		if (!keep[i]) return
@@ -360,11 +423,15 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		transformedOffset
 			.set(sx * (center.x - centerX), -sy * center.y, sz * (center.z - centerZ))
 			.applyQuaternion(yaw)
+		const nextX = targetCenterX + transformedOffset.x
+		const nextY = posY + yOffset + transformedOffset.y
+		const nextZ = targetCenterZ + transformedOffset.z
 		center.set(
-			targetCenterX + transformedOffset.x,
-			posY + yOffset + transformedOffset.y,
-			targetCenterZ + transformedOffset.z,
+			exactBounds ? Math.min(box.max.x, Math.max(box.min.x, nextX)) : nextX,
+			exactBounds ? Math.min(box.max.y + yOffset, Math.max(box.min.y + yOffset, nextY)) : nextY,
+			exactBounds ? Math.min(box.max.z, Math.max(box.min.z, nextZ)) : nextZ,
 		)
+		if (!insideClip(center)) return
 		const transformedShape = transformSplatShape(scales, quaternion, linear)
 		packed.setSplat(kept, center, transformedShape.scales, transformedShape.quaternion, opacity, color)
 		kept++
@@ -387,9 +454,14 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const halfX = (quarter ? sz * spanZ : sx * spanX) / 2
 	const halfZ = (quarter ? sx * spanX : sz * spanZ) / 2
 	const floorY = box.min.y + yOffset
-	source.userData.contentBox = new THREE.Box3(
-		new THREE.Vector3(targetCenterX - halfX, floorY, targetCenterZ - halfZ),
-		new THREE.Vector3(targetCenterX + halfX, floorY + sy * spanY, targetCenterZ + halfZ),
-	)
+	source.userData.contentBox = exactBounds
+		? new THREE.Box3(
+			new THREE.Vector3(box.min.x, floorY, box.min.z),
+			new THREE.Vector3(box.max.x, box.max.y + yOffset, box.max.z),
+		)
+		: new THREE.Box3(
+			new THREE.Vector3(targetCenterX - halfX, floorY, targetCenterZ - halfZ),
+			new THREE.Vector3(targetCenterX + halfX, floorY + sy * spanY, targetCenterZ + halfZ),
+		)
 	return source
 }

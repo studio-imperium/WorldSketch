@@ -25,7 +25,7 @@ export function createPrimitive(type, id, seed = {}) {
 	return mesh
 }
 
-export function createSelectionOutline(mesh, color = 0xb8ff38) {
+export function createSelectionOutline(mesh, color = 0xffd400) {
 	const outline = new THREE.Mesh(
 		mesh.geometry.clone(),
 		new THREE.MeshBasicMaterial({

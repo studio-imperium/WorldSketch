@@ -144,7 +144,9 @@ button {
 }
 
 .status {
-	margin: 0.35rem 0.25rem 0;
+	box-sizing: border-box;
+	width: 100%;
+	margin: 0;
 	color: #69717d;
 	line-height: 1.25;
 	text-align: center;
@@ -157,8 +159,9 @@ button {
 	display: flex;
 	flex-direction: column;
 	gap: 0.3rem;
-	width: 11rem;
-	margin-top: 0.1rem;
+	width: 100%;
+	box-sizing: border-box;
+	margin-top: 0;
 }
 
 .gen-progress-track {
@@ -461,16 +464,17 @@ input[type="color"] {
 	transform: translateX(-50%);
 	display: flex;
 	flex-direction: column;
-	align-items: center;
-	gap: 0.7rem;
+	align-items: stretch;
+	gap: 0.45rem;
+	width: max-content;
 	max-width: calc(100vw - 2rem);
 }
 
 .chat-dock {
 	display: flex;
 	flex-direction: column;
-	align-items: center;
-	gap: 0.5rem;
+	align-items: stretch;
+	gap: 0.4rem;
 	width: 100%;
 }
 
@@ -478,7 +482,8 @@ input[type="color"] {
 	display: flex;
 	align-items: center;
 	gap: 0.5rem;
-	width: min(36rem, calc(100vw - 2rem));
+	width: 100%;
+	box-sizing: border-box;
 	padding: 0.5rem;
 	background: #fff;
 	border: 1px solid rgba(15, 23, 42, 0.08);
@@ -542,10 +547,13 @@ input[type="color"] {
 .tool-dock {
 	display: flex;
 	align-items: center;
+	justify-content: center;
 	gap: 0.2rem;
 	padding: 0.35rem;
 	border-radius: 0.85rem;
+	width: max-content;
 	max-width: 100%;
+	box-sizing: border-box;
 }
 
 .icon-btn,

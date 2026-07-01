@@ -32,8 +32,10 @@ export function captureObject(renderer, scene, world, object) {
 // Capture the floor: just the painted ground tile, from the SAME true isometric camera
 // as the objects (framing the full tile footprint) so its reconstructed "front" stays
 // consistent with every other subject in the scene.
-export function captureFloor(renderer, scene, world) {
-	return captureSubject(renderer, scene, world, [world.ground], isoCamera(world.floorBox()))
+export function captureFloor(renderer, scene, world, floorMeshes = null, box = null) {
+	const subject = floorMeshes ?? world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground]
+	const targetBox = box ?? world.footprintBox?.() ?? world.floorBox()
+	return captureSubject(renderer, scene, world, subject, isoCamera(targetBox))
 }
 
 // Capture the WHOLE world in context (every block-out object + the painted floor) from
@@ -50,13 +52,27 @@ export async function captureWorldContext(renderer, scene, world, objects) {
 	if (spark) spark.visible = false
 	const overlays = []
 	scene.traverse(object => {
-		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront) && object.visible) {
+		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront || object.userData.isGizmo) && object.visible) {
 			overlays.push(object)
 			object.visible = false
 		}
 	})
 
-	const subject = world.allBlockoutMeshes()
+	const floorSubject = world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground]
+	const subject = [...floorSubject, ...world.primitives]
+	const subjectSet = new Set(subject)
+	const hidden = []
+	const shown = []
+	for (const mesh of subject) {
+		if (mesh.visible) continue
+		shown.push([mesh, mesh.visible])
+		mesh.visible = true
+	}
+	for (const mesh of [...(world.groundTiles ?? []), ...(world.groundSlopePreviews ?? [])]) {
+		if (subjectSet.has(mesh)) continue
+		hidden.push([mesh, mesh.visible])
+		mesh.visible = false
+	}
 	const swaps = applyFlatMaterials(subject)
 	const prevClear = renderer.getClearColor(new THREE.Color()).clone()
 	const prevAlpha = renderer.getClearAlpha()
@@ -75,6 +91,8 @@ export async function captureWorldContext(renderer, scene, world, objects) {
 		edge.removeFromParent()
 	}
 	restoreMaterials(swaps)
+	for (const [mesh, visible] of hidden) mesh.visible = visible
+	for (const [mesh, visible] of shown) mesh.visible = visible
 	for (const object of overlays) object.visible = true
 	if (spark) spark.visible = sparkVisible
 	renderer.setClearColor(prevClear, prevAlpha)
@@ -148,7 +166,18 @@ async function captureSubject(renderer, scene, world, subject, view) {
 	const subjectSet = new Set(subject)
 
 	const hidden = []
+	const shown = []
+	for (const mesh of subject) {
+		if (mesh.visible) continue
+		shown.push([mesh, mesh.visible])
+		mesh.visible = true
+	}
 	for (const mesh of world.allBlockoutMeshes()) {
+		if (subjectSet.has(mesh)) continue
+		hidden.push([mesh, mesh.visible])
+		mesh.visible = false
+	}
+	for (const mesh of world.groundSlopePreviews ?? []) {
 		if (subjectSet.has(mesh)) continue
 		hidden.push([mesh, mesh.visible])
 		mesh.visible = false
@@ -162,7 +191,7 @@ async function captureSubject(renderer, scene, world, subject, view) {
 	// Hide the sky dome + any overlays so the background reads as pure black.
 	const overlays = []
 	scene.traverse(object => {
-		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront) && object.visible) {
+		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront || object.userData.isGizmo) && object.visible) {
 			overlays.push(object)
 			object.visible = false
 		}
@@ -184,6 +213,7 @@ async function captureSubject(renderer, scene, world, subject, view) {
 	for (const object of overlays) object.visible = true
 	if (spark) spark.visible = sparkVisible
 	for (const [mesh, visible] of hidden) mesh.visible = visible
+	for (const [mesh, visible] of shown) mesh.visible = visible
 	renderer.setClearColor(prevClear, prevAlpha)
 	target.dispose()
 	return { guide, materialMap }
@@ -221,7 +251,7 @@ function restoreMaterials(swaps) {
 function addEdges(meshes, world) {
 	const edges = []
 	for (const mesh of meshes) {
-		if (!mesh.geometry) continue
+		if (!mesh.geometry || mesh.userData.isGroundSlopePreview) continue
 		const edge = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), edgeMaterial)
 		edge.position.copy(mesh.position)
 		edge.quaternion.copy(mesh.quaternion)
