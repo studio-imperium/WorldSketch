@@ -208,7 +208,7 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 			// client). WS_PALETTE_MATCH_LIGHTNESS in [0,1] additionally pulls each pixel's
 			// lightness toward its matched flat palette colour's brightness (0 = keep the
 			// model's lightness, 1 = flat onto the palette colour). No palette = no-op.
-			matched, perr = paletteLock(edited, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
+			matched, perr = paletteLock(edited, nil, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
 		}
 		if perr != nil {
 			log.Printf("palette match skipped for %s: %v", name, perr)
@@ -288,7 +288,7 @@ func handleFloorTexture(w http.ResponseWriter, r *http.Request) {
 		case "global":
 			matched, perr = paletteMatch(image, edited, palette.Strength)
 		case "lock":
-			matched, perr = paletteLock(edited, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
+			matched, perr = paletteLock(edited, nil, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
 		}
 		if perr != nil {
 			log.Printf("floor texture palette match skipped for %s: %v", name, perr)
@@ -374,7 +374,7 @@ func handleGround(w http.ResponseWriter, r *http.Request) {
 		case "global":
 			matched, perr = paletteMatch(image, edited, palette.Strength)
 		case "lock":
-			matched, perr = paletteLock(edited, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
+			matched, perr = paletteLock(edited, mask, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
 		}
 		if perr != nil {
 			log.Printf("ground palette match skipped: %v", perr)
@@ -995,8 +995,11 @@ func parsePaletteColors(csv string) [][3]float64 {
 // `strength` in [0,1] blends chroma from the model (0) toward the locked palette colour (1).
 // `lightnessLock` in [0,1] does the same for LIGHTNESS, pulling each pixel toward its matched
 // palette colour's brightness: 0 keeps the model's shading, 1 makes the region a flat palette
-// colour. The pure-black background is left unrecoloured.
-func paletteLock(dstPNG []byte, palette [][3]float64, strength, lightnessLock float64) ([]byte, error) {
+// colour. The pure-black background is left unrecoloured. When maskPNG is given (an outpaint
+// mask: OPAQUE = preserved terrain, TRANSPARENT = repainted region), only the repainted region
+// is recoloured — the preserved terrain must keep its true colours, or the kept master image
+// would drift toward the new plot's palette on every expansion.
+func paletteLock(dstPNG, maskPNG []byte, palette [][3]float64, strength, lightnessLock float64) ([]byte, error) {
 	if len(palette) == 0 {
 		return dstPNG, nil // no palette to lock to — leave the image as-is
 	}
@@ -1009,9 +1012,27 @@ func paletteLock(dstPNG []byte, palette [][3]float64, strength, lightnessLock fl
 	if err != nil {
 		return nil, fmt.Errorf("decode target: %w", err)
 	}
+	var mask *image.RGBA
+	if len(maskPNG) > 0 {
+		if mask, err = decodeRGBA(maskPNG); err != nil {
+			return nil, fmt.Errorf("decode mask: %w", err)
+		}
+	}
 	b := dst.Bounds()
+	mb := b
+	if mask != nil {
+		mb = mask.Bounds()
+	}
 	for y := b.Min.Y; y < b.Max.Y; y++ {
 		for x := b.Min.X; x < b.Max.X; x++ {
+			if mask != nil {
+				// Map into mask space (defensive: sizes should match, but never index out of range).
+				mx := mb.Min.X + (x-b.Min.X)*mb.Dx()/b.Dx()
+				my := mb.Min.Y + (y-b.Min.Y)*mb.Dy()/b.Dy()
+				if mask.Pix[mask.PixOffset(mx, my)+3] >= 128 {
+					continue // opaque mask = preserved terrain — keep its true colours
+				}
+			}
 			i := dst.PixOffset(x, y)
 			r, g, bl := dst.Pix[i], dst.Pix[i+1], dst.Pix[i+2]
 			if isBackground(r, g, bl) {
