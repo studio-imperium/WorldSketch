@@ -14,6 +14,11 @@ const scene = new THREE.Scene()
 const camera = new THREE.PerspectiveCamera(50, window.innerWidth / window.innerHeight, 0.03, 400)
 const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false })
 const raycaster = new THREE.Raycaster()
+// Expansion ghost tiles live on their own layer so the editor camera shows them but the
+// capture cameras (capture.js, default layer 0) never bake them into generated images.
+const GHOST_LAYER = 1
+camera.layers.enable(GHOST_LAYER)
+raycaster.layers.enable(GHOST_LAYER)
 const pointer = new THREE.Vector2()
 const scratch = new THREE.Vector3()
 const localUp = new THREE.Vector3(0, 1, 0)
@@ -104,8 +109,6 @@ const els = {
 	chatPrompt: document.getElementById("chat_prompt"),
 	floorShot: document.getElementById("floor_shot_btn"),
 	addPlot: document.getElementById("add_plot_btn"),
-	plotDirs: document.getElementById("plot_dirs"),
-	plotDirButtons: [...document.querySelectorAll(".plot-dir")],
 	uploadSplats: document.getElementById("upload_splats_input"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
@@ -273,6 +276,7 @@ class World {
 		this.primitives = []
 		this.generated = [] // { mesh, primitives }
 		this.boundsHelpers = []
+		this.ghostTiles = [] // dashed "expand here" outlines around the active plot
 		this.state = "draft"
 		this.prompt = ""
 		this.baseGroundColor = baseGroundColor
@@ -745,7 +749,7 @@ function updatePlacement(event) {
 
 const orbit = {
 	target: new THREE.Vector3(0, floorSize * 0.05, 0),
-	radius: floorSize * 1.25,
+	radius: floorSize * 2.3, // open zoomed out enough to show the dashed expansion outlines on all 4 sides
 	theta: FRONT_THETA, // open the editor at the same isometric angle objects are captured from
 	phi: FRONT_PHI,
 }
@@ -963,6 +967,13 @@ function pointerDown(event) {
 		return
 	}
 
+	// A dashed ghost outline on any side → grow the world that way (works with any tool active).
+	const ghostHit = world.ghostTiles.length ? raycast(event, world.ghostTiles.map(g => g.userData.fill)) : null
+	if (ghostHit) {
+		addPlotAt(ghostHit.object.parent.userData.cell)
+		return
+	}
+
 	if (activeTool === "paint") {
 		if (raycast(event, world.raycastables())) startPaint(event)
 		else startOrbit(event)
@@ -1015,7 +1026,7 @@ renderer.domElement.addEventListener("pointermove", event => {
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "elevate") updateElevateDrag(event)
 	else if (drag && ["primitive", "scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
-	else updatePlacement(event)
+	else { updateGhostHover(event); updatePlacement(event) }
 })
 
 renderer.domElement.addEventListener("pointerup", event => {
@@ -1341,35 +1352,6 @@ function cellInDirection(dx, dz) {
 	return { ix, iz }
 }
 
-// Map the picker's on-screen slots (up/down/left/right) to the WORLD grid directions that
-// currently appear that way, by projecting the active cell's four neighbours to screen space.
-// Recomputed every time the picker opens, so the arrows always follow the camera. The two grid
-// axes project to opposite screen vectors, so we split them into the more-horizontal pair
-// (left/right) and the more-vertical pair (up/down) for a clean, unambiguous assignment.
-function screenDirsForActiveCell() {
-	const base = activeCell()
-	const cx = base.ix * floorSize, cz = base.iz * floorSize
-	const c0 = new THREE.Vector3(cx, 0, cz).project(camera)
-	const screenDelta = (dx, dz) => {
-		const p = new THREE.Vector3(cx + dx * floorSize, 0, cz + dz * floorSize).project(camera)
-		return { dx, dz, sx: p.x - c0.x, sy: p.y - c0.y } // NDC delta; +sy is up on screen
-	}
-	const xAxis = screenDelta(1, 0) // world +X
-	const zAxis = screenDelta(0, 1) // world +Z
-	// "Horizontalness" of each axis on screen: how much it runs sideways vs up/down.
-	const xHoriz = Math.abs(xAxis.sx) - Math.abs(xAxis.sy)
-	const zHoriz = Math.abs(zAxis.sx) - Math.abs(zAxis.sy)
-	const horiz = xHoriz >= zHoriz ? xAxis : zAxis // axis that maps to left/right
-	const vert = horiz === xAxis ? zAxis : xAxis    // the other → up/down
-	const along = (a, sign) => ({ dx: sign * a.dx, dz: sign * a.dz })
-	return {
-		right: along(horiz, horiz.sx >= 0 ? 1 : -1),
-		left: along(horiz, horiz.sx >= 0 ? -1 : 1),
-		up: along(vert, vert.sy >= 0 ? 1 : -1),
-		down: along(vert, vert.sy >= 0 ? -1 : 1),
-	}
-}
-
 // The bounding grid rectangle of every tile = the ground image footprint.
 function footprint() {
 	let minIx = Infinity, maxIx = -Infinity, minIz = Infinity, maxIz = -Infinity
@@ -1497,42 +1479,91 @@ function addPlotAt(cell) {
 	selectPrimitive(null)
 	frameOrbitOnCell(cell)
 	setActiveTool("box")
+	updateGhostTiles() // ghosts follow the new active plot
 	setStatus("New plot added — build on it, then Generate. The ground extends seamlessly from your existing world.")
 }
 
-// Place the (fixed-position) picker centred above the Add-plot button, clamped to the viewport.
-// Must be called while the picker is visible so its size can be measured.
-function positionPlotDirs() {
-	const br = els.addPlot.getBoundingClientRect()
-	const pr = els.plotDirs.getBoundingClientRect()
-	let left = br.left + br.width / 2 - pr.width / 2
-	left = Math.max(8, Math.min(left, window.innerWidth - pr.width - 8))
-	const top = Math.max(8, br.top - pr.height - 8)
-	els.plotDirs.style.left = `${left}px`
-	els.plotDirs.style.top = `${top}px`
+// --- Expansion ghost tiles --------------------------------------------------
+// A dashed outline sits on each of the 4 sides of the active plot; clicking one grows the world
+// that way. They live in the 3D world (on GHOST_LAYER), so the side you click IS the world
+// direction — no camera-relative mapping needed. Hidden from capture cameras via the layer.
+
+const GHOST_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]] // +X, -X, +Z, -Z
+const ghostBaseColor = 0x64748b // slate: reads against both the near-white sky and the ground
+const ghostHoverColor = accent
+let showGhosts = true
+let hoveredGhost = null
+
+// One ghost: a dashed square + a small centre "+", plus a faint fill used as the click/hover target.
+function makeGhostTile(cell) {
+	const c = floorSize / 2 - 1 // inset a little from the tile edge
+	const g = new THREE.Group()
+	g.position.set(cell.ix * floorSize, groundTopY + 0.03, cell.iz * floorSize)
+
+	const outlineGeo = new THREE.BufferGeometry()
+	outlineGeo.setAttribute("position", new THREE.Float32BufferAttribute(
+		[-c, 0, -c, c, 0, -c, c, 0, -c, c, 0, c, c, 0, c, -c, 0, c, -c, 0, c, -c, 0, -c], 3))
+	const outline = new THREE.LineSegments(outlineGeo, new THREE.LineDashedMaterial({
+		color: ghostBaseColor, transparent: true, opacity: 0.9, dashSize: 0.7, gapSize: 0.5, depthTest: false, depthWrite: false,
+	}))
+	outline.computeLineDistances()
+	outline.renderOrder = 999
+	g.add(outline)
+
+	const plusGeo = new THREE.BufferGeometry()
+	plusGeo.setAttribute("position", new THREE.Float32BufferAttribute([-1.4, 0, 0, 1.4, 0, 0, 0, 0, -1.4, 0, 0, 1.4], 3))
+	const plus = new THREE.LineSegments(plusGeo, new THREE.LineBasicMaterial({
+		color: ghostBaseColor, transparent: true, opacity: 0.9, depthTest: false, depthWrite: false,
+	}))
+	plus.renderOrder = 999
+	g.add(plus)
+
+	const fill = new THREE.Mesh(new THREE.PlaneGeometry(c * 2, c * 2), new THREE.MeshBasicMaterial({
+		color: ghostBaseColor, transparent: true, opacity: 0.07, depthTest: false, depthWrite: false, side: THREE.DoubleSide,
+	}))
+	fill.rotation.x = -Math.PI / 2
+	fill.renderOrder = 998
+	g.add(fill)
+
+	g.traverse(o => o.layers.set(GHOST_LAYER))
+	g.userData.isGhostTile = true
+	g.userData.cell = cell
+	g.userData.fill = fill
+	g.userData.parts = [outline, plus, fill]
+	return g
 }
 
-// Open/close the directional picker for the Add-plot button. On open, re-map its arrows to the
-// current camera view so "up" always grows the far side, etc., then position it over the button.
-function togglePlotDirs(open) {
-	if (!els.plotDirs) return
-	const next = open ?? els.plotDirs.classList.contains("hidden")
-	if (next && generating) return
-	if (next) {
-		const dirs = screenDirsForActiveCell()
-		for (const btn of els.plotDirButtons) {
-			const d = dirs[btn.dataset.pos]
-			if (!d) continue
-			btn.dataset.dx = String(d.dx)
-			btn.dataset.dz = String(d.dz)
-		}
-		els.plotDirs.classList.remove("hidden") // unhide first so getBoundingClientRect has a size
-		positionPlotDirs()
-	} else {
-		els.plotDirs.classList.add("hidden")
+// Rebuild the 4 ghosts around the active plot. Called on init and whenever the plot set changes.
+function updateGhostTiles() {
+	if (hoveredGhost) document.body.style.cursor = ""
+	hoveredGhost = null
+	for (const ghost of world.ghostTiles) disposeObject(ghost)
+	world.ghostTiles = []
+	if (!showGhosts) return
+	for (const [dx, dz] of GHOST_DIRS) {
+		const ghost = makeGhostTile(cellInDirection(dx, dz))
+		world.group.add(ghost)
+		world.ghostTiles.push(ghost)
 	}
-	els.addPlot?.classList.toggle("active", next)
-	els.addPlot?.setAttribute("aria-expanded", String(next))
+}
+
+function setGhostHovered(ghost, on) {
+	const color = on ? ghostHoverColor : ghostBaseColor
+	const [outline, plus, fill] = ghost.userData.parts
+	outline.material.color.setHex(color); outline.material.opacity = on ? 1 : 0.9
+	plus.material.color.setHex(color); plus.material.opacity = on ? 1 : 0.9
+	fill.material.color.setHex(color); fill.material.opacity = on ? 0.2 : 0.07
+	document.body.style.cursor = on ? "pointer" : ""
+}
+
+// Hover highlight for ghost tiles (from pointermove when nothing is being dragged/placed).
+function updateGhostHover(event) {
+	const hit = world.ghostTiles.length ? raycast(event, world.ghostTiles.map(g => g.userData.fill)) : null
+	const ghost = hit ? hit.object.parent : null
+	if (ghost === hoveredGhost) return
+	if (hoveredGhost) setGhostHovered(hoveredGhost, false)
+	hoveredGhost = ghost
+	if (hoveredGhost) setGhostHovered(hoveredGhost, true)
 }
 
 function frameOrbitOnCell(cell) {
@@ -2053,6 +2084,7 @@ async function screenshotFloor() {
 	const w = renderer.domElement.width
 	const h = renderer.domElement.height
 	const target = new THREE.WebGLRenderTarget(w, h)
+	camera.layers.disable(GHOST_LAYER) // keep expansion outlines out of the screenshot
 	try {
 		renderer.setRenderTarget(target)
 		renderer.render(scene, camera)
@@ -2062,6 +2094,7 @@ async function screenshotFloor() {
 		downloadBlob(blob, `floor-${Date.now()}.png`)
 	} finally {
 		renderer.setRenderTarget(null)
+		camera.layers.enable(GHOST_LAYER)
 		target.dispose()
 		for (const obj of restored) obj.visible = true
 	}
@@ -2109,6 +2142,7 @@ function captureThumb(maxW = 320) {
 		const w = Math.max(1, Math.round(fullW * scale))
 		const h = Math.max(1, Math.round(fullH * scale))
 		const target = new THREE.WebGLRenderTarget(w, h)
+		camera.layers.disable(GHOST_LAYER) // keep expansion outlines out of the thumbnail
 		try {
 			renderer.setRenderTarget(target)
 			renderer.render(scene, camera)
@@ -2128,6 +2162,7 @@ function captureThumb(maxW = 320) {
 			return canvas.toDataURL("image/jpeg", 0.62)
 		} finally {
 			renderer.setRenderTarget(null)
+			camera.layers.enable(GHOST_LAYER)
 			target.dispose()
 		}
 	} catch {
@@ -2273,23 +2308,12 @@ for (const swatch of els.brushSwatches) swatch.addEventListener("click", () => a
 els.addColor?.addEventListener("click", () => els.customColor?.click())
 els.customColor?.addEventListener("change", event => addPaletteColor(event.target.value))
 
-// Lift the picker out of .tool-dock (which clips overflow at <=720px) so it can open above the
-// bar at any width; it is fixed-positioned over the button in positionPlotDirs().
-if (els.plotDirs) document.body.appendChild(els.plotDirs)
-
-els.addPlot?.addEventListener("click", event => {
-	event.stopPropagation() // don't let the document handler immediately re-close it
-	togglePlotDirs()
+// The add-plot button now just toggles the dashed expansion outlines (click one to grow).
+els.addPlot?.addEventListener("click", () => {
+	showGhosts = !showGhosts
+	els.addPlot.classList.toggle("active", showGhosts)
+	updateGhostTiles()
 })
-
-for (const btn of els.plotDirButtons) {
-	btn.addEventListener("click", () => {
-		const dx = Number(btn.dataset.dx), dz = Number(btn.dataset.dz)
-		if (!Number.isFinite(dx) || !Number.isFinite(dz) || (dx === 0 && dz === 0)) return
-		addPlotAt(cellInDirection(dx, dz))
-		togglePlotDirs(false)
-	})
-}
 
 els.floorShot?.addEventListener("click", async () => {
 	try {
@@ -2335,11 +2359,10 @@ els.settingsBtn?.addEventListener("click", event => {
 
 document.addEventListener("click", event => {
 	if (!els.settingsMenu?.contains(event.target)) toggleSettings(false)
-	if (!els.plotDirs?.contains(event.target) && event.target !== els.addPlot && !els.addPlot?.contains(event.target)) togglePlotDirs(false)
 })
 
 document.addEventListener("keydown", event => {
-	if (event.key === "Escape") { toggleSettings(false); togglePlotDirs(false) }
+	if (event.key === "Escape") toggleSettings(false)
 })
 
 els.historyToggle?.addEventListener("click", () => toggleHistoryPanel())
@@ -2380,4 +2403,6 @@ updateCamera()
 syncGenerateButton()
 if (world.prompt) els.chatPrompt.value = world.prompt
 refreshHistoryPanel() // populate the count badge from any builds saved in earlier sessions
+els.addPlot?.classList.toggle("active", showGhosts)
+updateGhostTiles() // dashed "expand here" outlines around the starting plot
 requestAnimationFrame(animate)
