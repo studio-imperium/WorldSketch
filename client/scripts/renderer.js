@@ -2226,71 +2226,84 @@ async function generateAddedPlotFloor(groundPromptText, output, newTiles) {
 }
 
 // --- Seam colour blending (math, not the image model) -------------------------------
-// Each plot keeps ITS OWN colour everywhere except a narrow band along a border shared with a
-// DIFFERENT floor splat. Inside the band, both sides are lerped toward a cross-seam gradient:
-// at the border the two sides converge on the midpoint of their near-seam mean colours, fading
-// back to each plot's own colour at the band edge. Pure splat-space math — the image model is
-// never trusted to blend. Runs after floor seating; a single-splat world is a no-op.
-const SEAM_BLEND_BAND = floorSize * 0.2 // half-width of the blend band (world units) on each side
-const SEAM_BLEND_MAX = 0.9 // convergence at the border (1 = both sides meet exactly at the mid colour)
+// A GRADIENT between the two plots' colours across every shared border: each plot keeps its own
+// colour in its body, and over a wide band on each side of the border the gaussian colours ramp
+// from plot A's colour, through their exact midpoint AT the border, to plot B's colour. Pure
+// splat-space math — the image model is never trusted to blend. Runs after floor seating; a
+// single-splat world is a no-op.
+const SEAM_BLEND_BAND = floorSize * 0.4 // gradient half-width per side (0.4 → ~13u total ramp)
+const SEAM_BLEND_MAX = 0.95 // convergence at the border (1 = both sides meet exactly at the mid colour)
+
+const smooth01 = t => t * t * (3 - 2 * t) // smoothstep — soft ease instead of a linear ramp
 
 function blendFloorSeamColors() {
-	const floors = world.generated
-		.map(g => g.mesh)
-		.filter(m => m.userData.genKind === "floor" && m.userData.floorCells?.size)
+	const floors = world.generated.map(g => g.mesh).filter(m => m.userData.genKind === "floor")
 	if (floors.length < 2) return
 	const owner = new Map() // "ix,iz" → floor mesh (later meshes win: an added plot overrides stale cells)
-	for (const mesh of floors) for (const key of mesh.userData.floorCells) owner.set(key, mesh)
+	for (const mesh of floors) {
+		if (mesh.userData.floorCells) for (const key of mesh.userData.floorCells) owner.set(key, mesh)
+	}
+	// Fallback: a floor restored from an older build may not carry floorCells — give the single
+	// untagged mesh every occupied cell nobody else claims, so its seams still blend.
+	const untagged = floors.filter(m => !m.userData.floorCells?.size)
+	if (untagged.length === 1) {
+		for (const key of occupiedCells()) if (!owner.has(key)) owner.set(key, untagged[0])
+	}
 	// One seam per shared edge between cells owned by different meshes (+X/+Z only → no duplicates).
+	let seams = 0
 	for (const [key, mesh] of owner) {
 		const [ix, iz] = key.split(",").map(Number)
 		const nx = owner.get(`${ix + 1},${iz}`)
-		if (nx && nx !== mesh) blendOneSeam({ axis: "x", at: (ix + 0.5) * floorSize, lo: (iz - 0.5) * floorSize, hi: (iz + 0.5) * floorSize, a: mesh, b: nx })
+		if (nx && nx !== mesh) { blendOneSeam({ axis: "x", at: (ix + 0.5) * floorSize, lo: (iz - 0.5) * floorSize, hi: (iz + 0.5) * floorSize, a: mesh, b: nx }); seams++ }
 		const nz = owner.get(`${ix},${iz + 1}`)
-		if (nz && nz !== mesh) blendOneSeam({ axis: "z", at: (iz + 0.5) * floorSize, lo: (ix - 0.5) * floorSize, hi: (ix + 0.5) * floorSize, a: mesh, b: nz })
+		if (nz && nz !== mesh) { blendOneSeam({ axis: "z", at: (iz + 0.5) * floorSize, lo: (ix - 0.5) * floorSize, hi: (ix + 0.5) * floorSize, a: mesh, b: nz }); seams++ }
 	}
+	if (seams) console.log(`[seam] gradient-blended ${seams} plot border(s)`)
 }
 
 // Blend one 16-unit border segment at `axis`=`at` between mesh `a` (negative side) and `b`
 // (positive side), for gaussians whose along-seam coordinate is in [lo, hi].
 function blendOneSeam({ axis, at, lo, hi, a, b }) {
 	const W = SEAM_BLEND_BAND
-	const inBand = (center, side) => {
-		const d = (axis === "x" ? center.x : center.z) - at
-		const along = axis === "x" ? center.z : center.x
-		if (along < lo || along > hi || Math.abs(d) > W) return null
-		if (side === "a" ? d > 0 : d < 0) return null
-		return d
-	}
-	// 1. Mean colour of each side's gaussians inside the band.
-	const meanOf = (mesh, side) => {
+	const coordOf = c => (axis === "x" ? c.x : c.z)
+	const alongOf = c => (axis === "x" ? c.z : c.x)
+	// 1. Each side's PLOT colour = mean over its whole adjacent tile strip (stable even when the
+	// pixels right at the border already drifted), sampled per seam so multi-colour plots stay local.
+	const meanOf = (mesh, sign) => {
 		const acc = [0, 0, 0, 0]
 		mesh.packedSplats.forEachSplat((i, center, scales, quaternion, opacity, color) => {
-			if (inBand(center, side) === null) return
+			const d = coordOf(center) - at
+			const along = alongOf(center)
+			if (along < lo || along > hi) return
+			if (sign < 0 ? (d >= 0 || d < -floorSize) : (d <= 0 || d > floorSize)) return
 			acc[0] += color.r; acc[1] += color.g; acc[2] += color.b; acc[3]++
 		})
 		return acc[3] >= 16 ? [acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]] : null
 	}
-	const ma = meanOf(a, "a")
-	const mb = meanOf(b, "b")
-	if (!ma || !mb) return // one side has no coverage here — nothing to converge toward
-	// 2. Pull each in-band gaussian toward the cross-seam gradient, strongest at the border.
-	const apply = (mesh, side) => {
+	const ma = meanOf(a, -1)
+	const mb = meanOf(b, +1)
+	if (!ma || !mb) return // one side has no coverage here — nothing to blend toward
+	// 2. The gradient: ideal(t) = lerp(plotA, plotB, t) with t 0→1 across the band; each gaussian
+	// is pulled toward ideal by a smoothstep weight that peaks at the border (both sides converge
+	// on the exact mid colour) and fades to zero at the band edge (plot keeps its own colour).
+	const apply = (mesh, sign) => {
 		const packed = mesh.packedSplats
 		packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
-			const d = inBand(center, side)
-			if (d === null) return
-			const s = (d / W + 1) / 2 // 0 at a's band edge → 0.5 at the border → 1 at b's band edge
-			const w = (1 - Math.abs(d) / W) * SEAM_BLEND_MAX
-			color.r += (ma[0] + (mb[0] - ma[0]) * s - color.r) * w
-			color.g += (ma[1] + (mb[1] - ma[1]) * s - color.g) * w
-			color.b += (ma[2] + (mb[2] - ma[2]) * s - color.b) * w
+			const d = coordOf(center) - at
+			const along = alongOf(center)
+			if (along < lo || along > hi || Math.abs(d) > W) return
+			if (sign < 0 ? d > 0 : d < 0) return
+			const t = (d / W + 1) / 2 // 0 at A's band edge → 0.5 at the border → 1 at B's band edge
+			const w = smooth01(1 - Math.abs(d) / W) * SEAM_BLEND_MAX
+			color.r += (ma[0] + (mb[0] - ma[0]) * t - color.r) * w
+			color.g += (ma[1] + (mb[1] - ma[1]) * t - color.g) * w
+			color.b += (ma[2] + (mb[2] - ma[2]) * t - color.b) * w
 			packed.setSplat(i, center, scales, quaternion, opacity, color)
 		})
 		packed.needsUpdate = true
 	}
-	apply(a, "a")
-	apply(b, "b")
+	apply(a, -1)
+	apply(b, +1)
 }
 
 // Generate / extend a multi-plot world: ONE unified ground splat sliced to the occupied tiles,
