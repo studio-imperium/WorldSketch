@@ -64,3 +64,43 @@ export async function generateSubject({ prompt, kind, steps, gaussians, output, 
 	}
 	return new Uint8Array(await response.arrayBuffer())
 }
+
+// Generate the UNIFIED ground for an expanded world. The client sends one composited
+// top-down ground image spanning the whole plot footprint; when `mask` is present the
+// server OUTPAINTS — only the masked (new) region is repainted as a seamless continuation
+// of the existing terrain, the rest is preserved. The server reconstructs the whole ground
+// as ONE splat (gaussian count scaled by tile count) so there is no seam between plots.
+// Returns { splat: Uint8Array, imageBlob: Blob } — keep imageBlob as the master for the
+// NEXT expansion's outpaint context.
+export async function generateGround({ prompt, image, mask, groundColor, colors, cols, rows, imageSize, output, name, signal }) {
+	const form = new FormData()
+	form.append("prompt", prompt ?? "")
+	if (groundColor) form.append("ground_color", groundColor)
+	if (colors && colors.length) form.append("colors", colors.join(","))
+	form.append("cols", String(cols ?? 1))
+	form.append("rows", String(rows ?? 1))
+	if (imageSize) form.append("image_size", imageSize)
+	if (output) form.append("output", output)
+	form.append("name", name || "floor")
+	form.append("image", image, "ground.png")
+	if (mask) form.append("mask", mask, "ground-mask.png")
+
+	const response = await fetch("/api/ground", { method: "POST", body: form, signal })
+	if (!response.ok) {
+		const message = await response.text()
+		throw new Error(message || `ground generation failed (${response.status})`)
+	}
+	const json = await response.json()
+	if (!json.splat) throw new Error("ground generation returned no splat")
+	return {
+		splat: base64ToBytes(json.splat),
+		imageBlob: new Blob([base64ToBytes(json.image || "")], { type: "image/png" }),
+	}
+}
+
+function base64ToBytes(b64) {
+	const bin = atob(b64)
+	const out = new Uint8Array(bin.length)
+	for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+	return out
+}

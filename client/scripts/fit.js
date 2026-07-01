@@ -317,6 +317,16 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	// k=0 or fitHeight=false leaves sx=sy=sz=scale (the proven uniform fit).
 	const clampK = opts.clampK ?? 0
 	let sx = scale, sy = scale, sz = scale
+	// Ground fill (multi-tile expansion): a flat tile (fitHeight=false) gets an EXACT
+	// per-axis X/Z fit so ONE splat fills a rectangular footprint precisely. The uniform
+	// 0.5*(xFit+zFit) blend would leave a gap on the long axis of a 2×1/3×1 ground; here
+	// each axis hits its own target. Y (thickness) is the XZ average — the slab is thin so
+	// it barely matters and the bottom still seats on box.min.y.
+	if (opts.fillXZ && !opts.fitHeight) {
+		sx = effXFit
+		sz = effZFit
+		sy = 0.5 * (effXFit + effZFit)
+	}
 	if (clampK > 0 && opts.fitHeight) {
 		sx = scale + clampK * (effXFit - scale)
 		sy = scale + clampK * (yFit - scale)

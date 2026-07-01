@@ -58,6 +58,7 @@ func main() {
 	// folder once (/api/new-output) and then POSTs /api/generate per object/floor.
 	mux.HandleFunc("/api/new-output", handleNewOutput)
 	mux.HandleFunc("/api/generate", handleGenerate)
+	mux.HandleFunc("/api/ground", handleGround)
 	mux.HandleFunc("/api/identify", handleIdentify)
 	mux.HandleFunc("/api/config", handleConfig)
 	mux.Handle("/", http.FileServer(http.Dir(filepath.Join(rootDir(), "client"))))
@@ -225,6 +226,246 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s.splat"`, name))
 	_, _ = w.Write(splat)
+}
+
+// handleGround generates the UNIFIED ground for an expanded (multi-plot) world. The client
+// sends ONE composited top-down ground image covering the whole plot footprint plus a
+// `cols`×`rows` tile count. When a `mask` is present the call is an OUTPAINT: the mask's
+// opaque region is the already-generated terrain to preserve and the transparent region is
+// the newly-added tiles, which OpenAI repaints as a seamless continuation. The whole ground
+// is then reconstructed as ONE Tripo splat (gaussian count scaled by tile count), so plots
+// share a single continuous ground with no seam by construction. Returns JSON
+// {image, splat} (both base64) — the client keeps `image` as the master for the next expand.
+func handleGround(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := r.ParseMultipartForm(48 << 20); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	prompt := strings.TrimSpace(r.FormValue("prompt"))
+	groundColor := strings.TrimSpace(r.FormValue("ground_color"))
+	name := sanitizeName(r.FormValue("name"))
+	if name == "" {
+		name = "floor"
+	}
+	dir := outputSubdir(r.FormValue("output"))
+	cols := atoiDefault(r.FormValue("cols"), 1)
+	rows := atoiDefault(r.FormValue("rows"), 1)
+
+	file, _, err := r.FormFile("image")
+	if err != nil {
+		http.Error(w, "missing image", http.StatusBadRequest)
+		return
+	}
+	image, err := io.ReadAll(io.LimitReader(file, 24<<20))
+	file.Close()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	mask, err := readOptionalFormFile(r, "mask", 24<<20)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	settings := subjectImageEditSettings("floor")
+	if sz := openAIGroundSize(r.FormValue("image_size")); sz != "" {
+		settings.Size = sz
+	}
+	// Keep the floor default background (transparent → RGBA output). TripoSplat's preprocess
+	// needs an alpha channel and 500s on a flat RGB image, so DON'T force opaque here.
+	palette := subjectPaletteSettings("floor")
+	promptText := groundPrompt(prompt, groundColor, len(mask) > 0)
+
+	tImage := time.Now()
+	edited := image
+	if settings.SkipImageEdit {
+		saveGeneration(dir, name, image, nil, edited, promptText)
+	} else {
+		edited, err = openAIGround(image, mask, promptText, settings)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		var matched []byte
+		var perr error
+		switch palette.Mode {
+		case "global":
+			matched, perr = paletteMatch(image, edited, palette.Strength)
+		case "lock":
+			matched, perr = paletteLock(edited, parsePaletteColors(r.FormValue("colors")), palette.Strength, palette.Lightness)
+		}
+		if perr != nil {
+			log.Printf("ground palette match skipped: %v", perr)
+		} else if matched != nil {
+			edited = matched
+		}
+		saveGeneration(dir, name, image, mask, edited, promptText)
+	}
+	imageDur := time.Since(tImage)
+
+	tripo := subjectTripoSettings("floor", "", "")
+	tripo.Gaussians = groundGaussians(cols * rows)
+	tTripo := time.Now()
+	splat, err := tripoGenerate(edited, tripo)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	tripoDur := time.Since(tTripo)
+	log.Printf("[timing] %-8s image=%-7s tripo=%-7s total=%s tiles=%dx%d gaussians=%s", name,
+		imageDur.Round(time.Millisecond), tripoDur.Round(time.Millisecond), (imageDur + tripoDur).Round(time.Millisecond), cols, rows, tripo.Gaussians)
+	saveSplat(dir, name, splat)
+
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(map[string]string{
+		"image": base64.StdEncoding.EncodeToString(edited),
+		"splat": base64.StdEncoding.EncodeToString(splat),
+	})
+}
+
+// openAIGround re-textures / outpaints the ground via OpenAI's images/edits endpoint. Same
+// shape as openAIEdit but it takes a single image plus an optional alpha mask (transparent =
+// repaint, opaque = preserve) and never sends a material map. Masked edits keep the existing
+// terrain and continue it into the new region.
+func openAIGround(image, mask []byte, promptText string, settings imageEditSettings) ([]byte, error) {
+	key := os.Getenv("OPENAI_API_KEY")
+	if key == "" {
+		return nil, errors.New("OPENAI_API_KEY is not set (required for ground expansion)")
+	}
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	mustField(writer, "model", settings.OpenAIModel)
+	mustField(writer, "size", settings.Size)
+	mustField(writer, "prompt", promptText)
+	optField(writer, "quality", settings.Quality)
+	if strings.EqualFold(settings.OpenAIModel, "gpt-image-1") {
+		optField(writer, "input_fidelity", settings.Fidelity) // high fidelity preserves the kept terrain across the seam
+	}
+	optField(writer, "background", settings.Background)
+	optField(writer, "output_format", settings.Format)
+
+	part, err := createPNGFormFile(writer, "image", "ground.png")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := part.Write(image); err != nil {
+		return nil, err
+	}
+	if len(mask) > 0 {
+		mpart, err := createPNGFormFile(writer, "mask", "mask.png")
+		if err != nil {
+			return nil, err
+		}
+		if _, err := mpart.Write(mask); err != nil {
+			return nil, err
+		}
+	}
+	if err := writer.Close(); err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest(http.MethodPost, "https://api.openai.com/v1/images/edits", &body)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer res.Body.Close()
+	data, err := io.ReadAll(res.Body)
+	if err != nil {
+		return nil, err
+	}
+	if res.StatusCode < 200 || res.StatusCode >= 300 {
+		return nil, fmt.Errorf("openai ground edit failed: %s", string(data))
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal(data, &parsed); err != nil {
+		return nil, err
+	}
+	if b64 := findString(parsed, "b64_json", "image_base64", "base64"); b64 != "" {
+		return base64.StdEncoding.DecodeString(stripDataURL(b64))
+	}
+	if url := findString(parsed, "url"); url != "" {
+		return fetchBytes(url)
+	}
+	return nil, errors.New("openai ground edit returned no image")
+}
+
+// groundPrompt builds the re-texturing prompt for the unified ground. `extending` switches
+// it to outpaint mode: preserve the already-generated terrain exactly and make the new
+// (masked) region a seamless continuation — same materials, colour, lighting, and scale,
+// no seam, no repetition.
+func groundPrompt(scene, groundColor string, extending bool) string {
+	scene = strings.TrimSpace(scene)
+	if scene == "" {
+		scene = "a coherent stylized natural game environment"
+	}
+	ground := ""
+	if groundColor != "" {
+		ground = " The base ground colour is " + groundColor + "; keep that hue and material family (sandy/tan/brown stays sand or soil, green stays grass or moss)."
+	}
+	base := "This is a flat, top-down view of ground terrain for Gaussian-splat reconstruction. Render a high-fidelity, photorealistic, evenly-lit terrain surface that FILLS the entire canvas edge to edge with NO padding, border, frame, vignette, or margin. The ground is ONE LEVEL flat surface at a single height — NO hills, mounds, dunes, slopes, ridges, banks, cliffs, terraces, or raised landforms; only a thin textured skin of natural surface detail (grass blades, moss, scattered pebbles, dirt, small cracks, twigs, leaves) and flush flat features (paths, rivers, and ponds sit level with the surrounding ground, never carved or raised). Use fully ambient illumination: no cast shadows, no directional sunlight, no dramatic lighting. The material and colour stay UNIFORM all the way to every edge so the terrain tiles seamlessly with no rim, fade, or detail bunching."
+	cont := ""
+	if extending {
+		cont = " IMPORTANT — this is an EXTENSION: the opaque (kept) part of the image is already-generated terrain that you must preserve unchanged. Paint ONLY the masked (empty) region, and make it a perfectly seamless CONTINUATION of the existing terrain across the boundary: identical materials, colours, lighting, texture grain, and scale, flowing across with NO visible seam, line, edge, or change in tone. Do NOT copy, repeat, or mirror the existing region — grow it naturally as if the whole ground had always been one continuous piece."
+	}
+	return base + ground + cont + " No walls, no sky, no buildings, no objects, no UI, no text, no camera-angle change. Scene context: " + scene
+}
+
+// groundGaussians scales Tripo's gaussian budget with the ground's tile count so a larger
+// footprint keeps its density: base × next-power-of-two(tiles), clamped to Tripo's accepted
+// [1024, 262144] range (it honours num_gaussians up to 262144).
+func groundGaussians(tiles int) string {
+	base := 32768
+	if v := strings.TrimSpace(env("WS_FLOOR_TRIPO_GAUSSIANS", env("WS_TRIPO_GAUSSIANS", ""))); v != "" {
+		if n, e := strconv.Atoi(v); e == nil && n > 0 {
+			base = n
+		}
+	}
+	if tiles < 1 {
+		tiles = 1
+	}
+	mult := 1
+	for mult < tiles {
+		mult <<= 1
+	}
+	g := base * mult
+	if g > 262144 {
+		g = 262144
+	}
+	if g < 1024 {
+		g = 1024
+	}
+	return strconv.Itoa(g)
+}
+
+// openAIGroundSize whitelists the client-requested canvas size to OpenAI's supported edit
+// sizes; an unsupported/empty value returns "" so the caller keeps the floor default.
+func openAIGroundSize(size string) string {
+	switch strings.TrimSpace(size) {
+	case "1024x1024", "1536x1024", "1024x1536":
+		return size
+	}
+	return ""
+}
+
+func atoiDefault(s string, fallback int) int {
+	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
+		return n
+	}
+	return fallback
 }
 
 func subjectImageEditSettings(kind string) imageEditSettings {
