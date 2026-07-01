@@ -1,7 +1,7 @@
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { zip, unzip } from "fflate"
-import { getConfig, newOutput, generateSubject, generateFloorTexture, identifyObjects } from "/scripts/api.js"
+import { getConfig, newOutput, generateSubject, generateGround, identifyObjects } from "/scripts/api.js"
 import { captureObject, captureFloor, captureWorldContext, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
 import { fitSplatToBox, ensureSplatEditBase, applySplatEditTransform } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
@@ -75,6 +75,7 @@ let activeBrushScale = 1
 let selectedPrimitive = null
 let placementPreview = null
 let drag = null
+let groundDeformDirty = false // a floor lift drag is in flight; deform the ground splat once per frame
 let nextPrimitiveId = 1
 let generating = false
 
@@ -550,6 +551,7 @@ class World {
 	groundGenerated() {
 		this.floorGenerated = true
 		for (const tile of this.groundTiles) {
+			tile.userData.floorBaked = true // this tile is now covered by the generated floor splat
 			setColliderStyle(tile, false)
 			setPickableHidden(tile, true)
 		}
@@ -564,6 +566,7 @@ class World {
 		this.setBoundsVisible(false)
 		this.floorGenerated = false
 		for (const tile of this.groundTiles) {
+			tile.userData.floorBaked = false // back to an editable draft — nothing is baked anymore
 			setPickableHidden(tile, false)
 			tile.visible = true
 			setColliderStyle(tile, false)
@@ -588,7 +591,7 @@ class World {
 				setColliderStyle(tile, true)
 			} else {
 				setColliderStyle(tile, false)
-				setPickableHidden(tile, this.floorGenerated)
+				setPickableHidden(tile, this.floorGenerated && tile.userData.floorBaked)
 				tile.visible = true
 			}
 		}
@@ -793,6 +796,32 @@ function startGizmoDrag(event, handle) {
 	return true
 }
 
+// Lift a plot by dragging its ground body directly (pointer tool), so raising/lowering a plot
+// after generation is "click the plot, drag up/down" — no need to grab the thin Y gizmo arrow.
+// Selects the plot first (summoning the Y gizmo too), then arms the same floor drag the gizmo
+// uses; a press with no vertical movement just leaves the plot selected (setPlotHeight ignores
+// a ~0 delta).
+function startFloorLift(event, tile) {
+	selectPrimitive(tile)
+	if (!selectedPrimitive?.userData.isGround) return false
+	drag = {
+		mode: "gizmo",
+		pointerId: event.pointerId,
+		mesh: selectedPrimitive,
+		axis: "y",
+		axisWorld: new THREE.Vector3(0, 1, 0),
+		origin: transformGizmo.position.clone(),
+		startScalar: 0,
+		startY: event.clientY,
+		subtree: [],
+		startPositions: [selectedPrimitive.position.clone()],
+		startPlotHeight: plotHeights.get(selectedPrimitive.userData.plotId ?? 0) || 0,
+	}
+	renderer.domElement.setPointerCapture(event.pointerId)
+	renderer.domElement.classList.add("is-dragging")
+	return true
+}
+
 function bindPrimitiveTreeToCurrentPlot(mesh, subtree) {
 	const pos = mesh.getWorldPosition(tmpWorld)
 	const half = floorSize / 2
@@ -806,6 +835,7 @@ function bindPrimitiveTreeToCurrentPlot(mesh, subtree) {
 function updateGizmoDrag(event) {
 	if (drag.mesh.userData.isGround) {
 		setPlotHeight(drag.mesh.userData.plotId ?? 0, drag.startPlotHeight + (drag.startY - event.clientY) * 0.03)
+		groundDeformDirty = true // deform the generated ground splat live (coalesced per frame in animate)
 		updateTransformGizmo()
 		return
 	}
@@ -1335,6 +1365,7 @@ function pointerDown(event) {
 			return
 		}
 		if (activeTool === "scale" || activeTool === "rotate") startPrimitiveDrag(event, hit.object)
+		else if (activeTool === "pointer" && hit.object.userData.isGround) startFloorLift(event, hit.object)
 		else selectPrimitive(hit.object)
 		return
 	}
@@ -1355,6 +1386,7 @@ renderer.domElement.addEventListener("pointermove", event => {
 renderer.domElement.addEventListener("pointerup", event => {
 	if (drag?.pointerId === event.pointerId) {
 		if (drag.mode === "gizmo") finishGizmoDrag()
+		groundDeformDirty = false // finishGizmoDrag already applied the final deform
 		renderer.domElement.releasePointerCapture(event.pointerId)
 		drag = null
 		renderer.domElement.classList.remove("is-dragging")
@@ -1534,27 +1566,10 @@ async function generateWorld(prompt) {
 		// material colours + painted terrain, so the material-ID map is redundant and skipping
 		// it halves the per-call input-image cost on the cheap gpt-image-1-mini path.
 		const tCap = performance.now()
+		// Objects are captured serially against the intact block-out; the floor is generated after
+		// them via the shared unified-ground path (one splat sliced to the tile), so single-plot and
+		// multi-plot worlds share ONE terrain pipeline and set groundMaster for later "add plot" blend.
 		const subjects = []
-		if (doFloor) {
-			const tile = world.ground
-			const colors = primitiveColors([tile])
-			const groundColor = world.baseGroundColor
-			showProgress(done, total, "Texturing floor…")
-			const cap = await texturedFloorCapture(tile, {
-				prompt: groundDesc || prompt,
-				output,
-				name: "floor",
-				groundColor,
-				colors,
-				box: world.floorBox(),
-			})
-			subjects.push({
-				kind: "floor", image: cap.guide, box: world.floorBox(), name: "floor", isFloor: true, plotId: 0,
-				prompt: groundDesc || prompt, // Gemini's terrain description (falls back to the scene prompt)
-				groundColor, yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
-				primitives: null, colors, skipImageEdit: true, // Gemini already produced the texture before capture
-			})
-		}
 		for (let i = 0; i < objects.length; i++) {
 			showProgress(done, total, `Capturing object ${i + 1} of ${objects.length}…`)
 			const cap = await captureObject(renderer, scene, world, objects[i])
@@ -1585,7 +1600,6 @@ async function generateWorld(prompt) {
 				const tSeat = performance.now()
 				await seatSubject(bytes, s.box, s.name, s.primitives, { kind: s.kind, yawTurns: s.yawTurns, yawDeg: s.yawDeg, yOffset: s.yOffset, fitHeight: Boolean(s.fitHeight), colors: s.colors, plotId: s.plotId })
 				subjectTimes.push({ subject: s.name, "request(s)": +(requestMs / 1000).toFixed(2), "seat(ms)": Math.round(performance.now() - tSeat) })
-				if (s.isFloor) world.groundGenerated()
 				splatStore.set(s.name, bytes)
 			} catch (error) {
 				console.warn(`${s.name}:`, error.message)
@@ -1593,10 +1607,28 @@ async function generateWorld(prompt) {
 			done++
 			showProgress(done, total)
 		})
+
+		// Floor: ONE unified ground splat over the plot, sliced to the tile (empty cells culled).
+		// Sets groundMaster so a later "add plot" outpaints from — and blends into — this terrain.
+		if (doFloor) {
+			showProgress(done, total, "Generating terrain…")
+			try {
+				await generateUnifiedGround(groundDesc || prompt, output)
+			} catch (error) {
+				console.warn("floor:", error.message)
+				setStatus("Ground generation failed: " + (error.message || error))
+			}
+			done++
+			showProgress(done, total)
+		}
+
 		// Build subject metadata for ZIP export / re-fitting (only successfully seated subjects).
 		sessionSubjects = subjects
 			.filter(s => splatStore.has(s.name))
 			.map(s => ({ name: s.name, kind: s.kind ?? "object", plotId: s.plotId ?? null, yawTurns: s.yawTurns ?? 0, fitHeight: Boolean(s.fitHeight) }))
+		if (doFloor && splatStore.has("floor")) {
+			sessionSubjects.push({ name: "floor", kind: "floor", plotId: null, yawTurns: FLOOR_YAW_TURNS, fitHeight: false })
+		}
 
 		const totalS = ((performance.now() - genStart) / 1000).toFixed(1)
 		const genS = ((performance.now() - genStart - idMs - captureMs) / 1000).toFixed(1)
@@ -1717,10 +1749,6 @@ function orderedPlotIds() {
 	return world.groundTiles.map(t => t.userData.plotId)
 }
 
-function floorNameForTile(tile) {
-	return `floor-p${tile.userData.plotId ?? 0}`
-}
-
 function plotPrimitives(plotId) {
 	return world.primitives.filter(p => (p.userData.plotId ?? 0) === plotId)
 }
@@ -1754,36 +1782,6 @@ function blobToImage(blob) {
 		img.onerror = reject
 		img.src = URL.createObjectURL(blob)
 	})
-}
-
-async function withTemporaryFloorTexture(tile, textureBlob, fn) {
-	const surface = tile.userData.paint
-	if (!surface?.canvas) return await fn()
-	const { canvas, ctx, texture } = surface
-	const original = ctx.getImageData(0, 0, canvas.width, canvas.height)
-	const image = await blobToImage(textureBlob)
-	ctx.clearRect(0, 0, canvas.width, canvas.height)
-	ctx.drawImage(image, 0, 0, canvas.width, canvas.height)
-	texture.needsUpdate = true
-	updateGroundSlopePreview()
-	try {
-		return await fn()
-	} finally {
-		ctx.putImageData(original, 0, 0)
-		texture.needsUpdate = true
-		updateGroundSlopePreview()
-		if (image.src) URL.revokeObjectURL(image.src)
-	}
-}
-
-async function texturedFloorCapture(tile, { prompt, output, name, groundColor, colors, box }) {
-	const paint = tile.userData.paint?.canvas
-	if (!paint) return await captureFloor(renderer, scene, world, world.floorCaptureMeshesForTile(tile), box)
-	const topDown = await canvasToBlob(paint)
-	const texture = await generateFloorTexture({
-		prompt, image: topDown, groundColor, colors, output, name: `${name}-texture`,
-	})
-	return await withTemporaryFloorTexture(tile, texture, () => captureFloor(renderer, scene, world, world.floorCaptureMeshesForTile(tile), box))
 }
 
 // Average colour of an already-generated ground image, so a NEW plot's ground can be locked to
@@ -2118,15 +2116,19 @@ function updateElevationHandles() {
 			tile.visible = true
 			continue
 		}
-		if (world.floorGenerated) {
+		// Hide only tiles baked into the generated floor splat. A plot ADDED after generation is
+		// not yet baked, so it stays a visible, paintable block-out you can build on (otherwise the
+		// new plot reads as a blank "white nothing square" — the transparent tile over the sky).
+		if (world.floorGenerated && tile.userData.floorBaked) {
 			setPickableHidden(tile, true)
 			continue
 		}
+		setPickableHidden(tile, false) // restore the green paint map if this tile was ever hidden
 		tile.material.transparent = slopePreview
 		tile.material.opacity = slopePreview ? 0 : 1
 		tile.material.depthWrite = !slopePreview
 		tile.material.needsUpdate = true
-		tile.visible = !world.floorGenerated
+		tile.visible = true
 	}
 }
 
@@ -2144,8 +2146,48 @@ function setPlotHeight(pid, height) {
 	setStatus(`Plot ${pid} height ${clamped >= 0 ? "+" : ""}${clamped.toFixed(1)}`)
 }
 
-// Generate / extend a multi-plot world: each plot gets its own floor splat, then objects are
-// generated only for plots not yet built (existing object splats stay frozen).
+// Generate the whole ground as ONE splat over the footprint bounding box, then slice it to the
+// occupied tiles (floorClipBoxes drops gaussians in empty cells — the hole in a ring/U, the notch
+// of an L). Uses the top-down composite + OpenAI outpaint so an ADDED plot repaints ONLY its new
+// tiles and grows the EXISTING terrain across the seam (same colour/material/style, no jump); the
+// new region's base hue is locked to the existing terrain's real colour (sampled from the kept
+// image) so a differently-painted plot is pulled toward its neighbour instead of clashing. Keeps
+// the result as `groundMaster` for the NEXT expansion. Shared by the single-plot (generateWorld)
+// and multi-plot (generateExpanded) paths so EVERY generation blends consistently. Returns true if
+// a floor was seated. `groundPromptText` is the terrain description (Gemini's, or the scene prompt).
+async function generateUnifiedGround(groundPromptText, output) {
+	const fp = footprint()
+	const size = groundImageSize(fp.cols, fp.rows)
+	const { canvas, mask } = buildGroundComposite(fp, size)
+	const imageBlob = await canvasToBlob(canvas)
+	const maskBlob = mask ? await canvasToBlob(mask) : null
+	let groundColorHex = world.baseGroundColor
+	let groundColors = primitiveColors(world.groundTiles)
+	if (groundMaster?.imageEl) {
+		const existing = sampleImageColor(groundMaster.imageEl)
+		if (existing) {
+			groundColorHex = existing
+			groundColors = [existing, ...groundColors] // keep both hues in the palette so the seam can transition
+		}
+	}
+	const res = await generateGround({
+		prompt: groundPromptText, image: imageBlob, mask: maskBlob, groundColor: groundColorHex,
+		colors: groundColors, cols: fp.cols, rows: fp.rows, imageSize: size.label, output, name: "floor",
+	})
+	await seatSubject(res.splat, world.footprintBox(), "floor", null, {
+		kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
+		fillXZ: true, colors: groundColors, plotId: null, clipBoxes: world.floorClipBoxes(),
+	})
+	splatStore.set("floor", res.splat)
+	world.groundGenerated()
+	try {
+		groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
+	} catch { groundMaster = null }
+	return true
+}
+
+// Generate / extend a multi-plot world: ONE unified ground splat sliced to the occupied tiles,
+// then objects generated only for plots not yet built (existing object splats stay frozen).
 async function generateExpanded(prompt) {
 	if (generating) return
 	generating = true
@@ -2161,8 +2203,7 @@ async function generateExpanded(prompt) {
 	const toBuild = orderedPlotIds().filter(pid => !already.has(pid) && plotPrimitives(pid).length)
 	let totalObjects = 0
 	for (const pid of toBuild) totalObjects += computeObjects(plotPrimitives(pid)).length
-	const floorTiles = [...world.groundTiles]
-	const total = floorTiles.length + totalObjects
+	const total = 1 + totalObjects // 1 = the unified ground splat
 	let done = 0
 	showProgress(0, total, "Preparing expansion…")
 
@@ -2170,45 +2211,27 @@ async function generateExpanded(prompt) {
 		let output = null
 		try { output = (await newOutput()).index } catch {}
 
-		// 1. FLOORS — one independently bounded floor splat per plot. This prevents a generated
-		// floor from spilling into empty footprint cells and lets each plot keep its own colour.
+		// 1. UNIFIED GROUND — ONE splat spanning the whole footprint, then SLICED to the occupied
+		// tiles so empty footprint cells (e.g. the hole in a ring/U of plots) are culled. One
+		// coherent Tripo generation instead of a splat per tile removes the inter-tile terrain
+		// inconsistency; the gaussian budget scales with tile count (server groundGaussians) and
+		// the outpaint mask preserves already-generated terrain when a new plot is added.
 		world.removeGeneratedWhere(g => g.mesh.userData.genKind === "floor")
 		world.floorGenerated = false
 		updateElevationHandles()
 		for (const name of [...splatStore.keys()]) {
 			if (name === "floor" || name.startsWith("floor-p")) splatStore.delete(name)
 		}
-		let generatedFloorCount = 0
-		for (let i = 0; i < floorTiles.length; i++) {
-			const tile = floorTiles[i]
-			const plotId = tile.userData.plotId ?? 0
-			const name = floorNameForTile(tile)
-			const box = world.floorBoxForTile(tile)
-			const colors = primitiveColors([tile])
-			const groundColor = `#${tile.userData.baseColor ?? world.baseGroundColor.replace("#", "")}`
-			showProgress(done, total, `Texturing floor ${i + 1} of ${floorTiles.length}…`)
-			try {
-				const floorCap = await texturedFloorCapture(tile, { prompt, output, name, groundColor, colors, box })
-				showProgress(done, total, `Generating floor ${i + 1} of ${floorTiles.length}…`)
-				const bytes = await generateSubject({
-					prompt, kind: "floor", image: floorCap.guide, groundColor,
-					colors, output, name, skipImageEdit: true,
-				})
-				await seatSubject(bytes, box, name, null, {
-					kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
-					fillXZ: true, colors, plotId, clipBoxes: [box],
-				})
-				splatStore.set(name, bytes)
-				generatedFloorCount++
-			} catch (error) {
-				console.warn(`${name}:`, error.message)
-				setStatus(`${name} generation failed: ` + (error.message || error))
-			}
-			done++
-			showProgress(done, total)
+
+		showProgress(done, total, groundMaster ? "Extending terrain (seamless)…" : "Generating terrain…")
+		try {
+			await generateUnifiedGround(prompt, output)
+		} catch (error) {
+			console.warn("ground:", error.message)
+			setStatus("Ground generation failed: " + (error.message || error))
 		}
-		if (generatedFloorCount === floorTiles.length) world.groundGenerated()
-		groundMaster = null
+		done++
+		showProgress(done, total)
 
 		// 2. OBJECTS — only for plots that aren't built yet (frozen plots are left untouched).
 		for (const pid of toBuild) {
@@ -2825,8 +2848,8 @@ els.chatForm.addEventListener("submit", event => {
 	event.preventDefault()
 	if (els.generate.disabled) return
 	const prompt = els.chatPrompt.value.trim()
-	// More than one plot → expansion path (per-plot floors + per-plot objects).
-	// A single plot keeps the original one-shot pipeline untouched.
+	// More than one plot → expansion path (ONE unified ground splat sliced to the occupied
+	// tiles + per-plot objects). A single plot keeps the original one-shot pipeline untouched.
 	if (world.groundTiles.length > 1) generateExpanded(prompt)
 	else generateWorld(prompt)
 })
@@ -2839,6 +2862,10 @@ window.addEventListener("resize", () => {
 
 function animate() {
 	sky.position.copy(camera.position)
+	if (groundDeformDirty) { // live plot-lift feedback: reshape the ground splat at most once per frame
+		applyGroundDeform()
+		groundDeformDirty = false
+	}
 	updateTransformGizmo()
 	renderer.render(scene, camera)
 	requestAnimationFrame(animate)
