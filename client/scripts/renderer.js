@@ -2186,6 +2186,41 @@ async function generateUnifiedGround(groundPromptText, output) {
 	return true
 }
 
+// Add-plot floor: keep the already-generated floor UNTOUCHED and generate ONLY the newly-added
+// plot(s) as their own splat. The terrain DESIGN continues the neighbour (the composite outpaints
+// from the kept master, so grass stays the same grass), but the new region's colours are LOCKED to
+// the new plot's OWN paint (its colours only, not blended with the neighbour) via the floor palette
+// lock. The new splat is clipped to just the new tiles and overfit by floorSeamOverlap, so its edge
+// gaussians stretch into the neighbour and merge at the border — no seam gap, existing plots
+// unchanged. Returns true if a floor was seated.
+async function generateAddedPlotFloor(groundPromptText, output, newTiles) {
+	const fp = footprint()
+	const size = groundImageSize(fp.cols, fp.rows)
+	const { canvas, mask } = buildGroundComposite(fp, size) // mask preserves the existing terrain, outpaints the new tiles
+	const imageBlob = await canvasToBlob(canvas)
+	const maskBlob = mask ? await canvasToBlob(mask) : null
+	// ONLY the new plot's own painted colours — the palette lock restricts the new region to these,
+	// so it keeps the design of the neighbour but the colours the user gave this plot.
+	const newColors = primitiveColors(newTiles)
+	const res = await generateGround({
+		prompt: groundPromptText, image: imageBlob, mask: maskBlob,
+		groundColor: newColors[0] || world.baseGroundColor, colors: newColors,
+		cols: fp.cols, rows: fp.rows, imageSize: size.label, output, name: "floor",
+	})
+	const name = `floor-p${newTiles.map(t => t.userData.plotId ?? 0).join("-")}`
+	await seatSubject(res.splat, world.footprintBox(), name, null, {
+		kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
+		fillXZ: true, colors: newColors, plotId: null,
+		clipBoxes: newTiles.map(t => world.floorBoxForTile(t)), // seat ONLY the new tiles (existing floor kept)
+	})
+	splatStore.set(name, res.splat)
+	world.groundGenerated() // bake + hide the new tiles (existing tiles were already baked/hidden)
+	try {
+		groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
+	} catch { /* keep the previous master */ }
+	return true
+}
+
 // Generate / extend a multi-plot world: ONE unified ground splat sliced to the occupied tiles,
 // then objects generated only for plots not yet built (existing object splats stay frozen).
 async function generateExpanded(prompt) {
@@ -2211,24 +2246,36 @@ async function generateExpanded(prompt) {
 		let output = null
 		try { output = (await newOutput()).index } catch {}
 
-		// 1. UNIFIED GROUND — ONE splat spanning the whole footprint, then SLICED to the occupied
-		// tiles so empty footprint cells (e.g. the hole in a ring/U of plots) are culled. One
-		// coherent Tripo generation instead of a splat per tile removes the inter-tile terrain
-		// inconsistency; the gaussian budget scales with tile count (server groundGaussians) and
-		// the outpaint mask preserves already-generated terrain when a new plot is added.
-		world.removeGeneratedWhere(g => g.mesh.userData.genKind === "floor")
-		world.floorGenerated = false
-		updateElevationHandles()
-		for (const name of [...splatStore.keys()]) {
-			if (name === "floor" || name.startsWith("floor-p")) splatStore.delete(name)
-		}
-
-		showProgress(done, total, groundMaster ? "Extending terrain (seamless)…" : "Generating terrain…")
-		try {
-			await generateUnifiedGround(prompt, output)
-		} catch (error) {
-			console.warn("ground:", error.message)
-			setStatus("Ground generation failed: " + (error.message || error))
+		// 1. FLOOR. Two modes:
+		//  - ADD-PLOT (a floor already exists and only some tiles are new): keep the existing floor
+		//    UNTOUCHED and generate ONLY the new plot(s) — design continued from the neighbour, but
+		//    colours locked to the new plot's own paint, seam-merged at the border.
+		//  - FIRST multi-plot generation (nothing baked yet): ONE unified splat spanning the whole
+		//    footprint, sliced to the occupied tiles so empty cells (the hole in a ring/U) are culled.
+		const newFloorTiles = world.groundTiles.filter(t => !t.userData.floorBaked)
+		const hasExistingFloor = world.generated.some(g => g.mesh.userData.genKind === "floor")
+		if (hasExistingFloor && newFloorTiles.length && newFloorTiles.length < world.groundTiles.length) {
+			showProgress(done, total, "Growing into the new plot…")
+			try {
+				await generateAddedPlotFloor(prompt, output, newFloorTiles)
+			} catch (error) {
+				console.warn("added floor:", error.message)
+				setStatus("Ground generation failed: " + (error.message || error))
+			}
+		} else {
+			world.removeGeneratedWhere(g => g.mesh.userData.genKind === "floor")
+			world.floorGenerated = false
+			updateElevationHandles()
+			for (const name of [...splatStore.keys()]) {
+				if (name === "floor" || name.startsWith("floor-p")) splatStore.delete(name)
+			}
+			showProgress(done, total, groundMaster ? "Extending terrain (seamless)…" : "Generating terrain…")
+			try {
+				await generateUnifiedGround(prompt, output)
+			} catch (error) {
+				console.warn("ground:", error.message)
+				setStatus("Ground generation failed: " + (error.message || error))
+			}
 		}
 		done++
 		showProgress(done, total)
