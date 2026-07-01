@@ -53,6 +53,8 @@ type tripoSettings struct {
 var httpClient = &http.Client{Timeout: 180 * time.Second}
 
 func main() {
+	loadDotEnv() // populate the process env from the repo-root .env so the server just spins up
+
 	mux := http.NewServeMux()
 	// One world is generated object-by-object: the client allocates an output
 	// folder once (/api/new-output) and then POSTs /api/generate per object/floor.
@@ -62,7 +64,10 @@ func main() {
 	mux.HandleFunc("/api/ground", handleGround)
 	mux.HandleFunc("/api/identify", handleIdentify)
 	mux.HandleFunc("/api/config", handleConfig)
-	mux.Handle("/", http.FileServer(http.Dir(filepath.Join(rootDir(), "client"))))
+	// Serve the client with no-store so an edited renderer.js/module is never served stale from
+	// the browser cache (this is a live-edited dev app; a hard-refresh shouldn't be required).
+	fileServer := http.FileServer(http.Dir(filepath.Join(rootDir(), "client")))
+	mux.Handle("/", noCache(fileServer))
 
 	addr := env("PORT", "8067")
 	log.Printf("WorldSketch listening on http://localhost:%s", addr)
@@ -382,6 +387,7 @@ func handleGround(w http.ResponseWriter, r *http.Request) {
 
 	tripo := subjectTripoSettings("floor", "", "")
 	tripo.Gaussians = groundGaussians(cols * rows)
+	tripo.Steps = groundSteps(cols * rows)
 	tTripo := time.Now()
 	splat, err := tripoGenerate(edited, tripo)
 	if err != nil {
@@ -521,6 +527,25 @@ func groundGaussians(tiles int) string {
 		g = 1024
 	}
 	return strconv.Itoa(g)
+}
+
+// groundSteps scales Tripo's denoising steps with the ground's tile count so a larger, single
+// unified terrain gets more reconstruction compute ("spend longer on a bigger terrain"): base
+// +4 steps per doubling of tiles, clamped to [1, 64]. An explicit WS_FLOOR_TRIPO_STEPS (or
+// WS_TRIPO_STEPS) env pins the value and skips scaling.
+func groundSteps(tiles int) string {
+	if v := strings.TrimSpace(env("WS_FLOOR_TRIPO_STEPS", env("WS_TRIPO_STEPS", ""))); v != "" {
+		return clampIntString(v, "24", 1, 64)
+	}
+	base := 24
+	if tiles < 1 {
+		tiles = 1
+	}
+	extra := 0
+	for m := 1; m < tiles; m <<= 1 {
+		extra += 4
+	}
+	return strconv.Itoa(clampInt(base+extra, 1, 64))
 }
 
 // openAIGroundSize whitelists the client-requested canvas size to OpenAI's supported edit
@@ -1657,6 +1682,53 @@ func subjectEnvFloat(kind, suffix string, legacy []string, fallback float64) flo
 		}
 	}
 	return fallback
+}
+
+// loadDotEnv reads KEY=VALUE lines from the repo-root .env (WS_ENV_FILE overrides the path) and
+// sets any that aren't already in the process environment, so running the binary/`go run .` just
+// works without a wrapper that exports secrets. Real environment variables always win. Best-effort:
+// a missing .env is fine (nothing to load). Supports `export KEY=`, `# comments`, blank lines, and
+// single/double-quoted values.
+// noCache wraps a handler so every response tells the browser not to cache — the client is edited
+// live, so a stale cached module must never mask a code change.
+func noCache(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store, must-revalidate")
+		next.ServeHTTP(w, r)
+	})
+}
+
+func loadDotEnv() {
+	path := env("WS_ENV_FILE", filepath.Join(rootDir(), ".env"))
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return // no .env (or unreadable) — rely on the ambient environment
+	}
+	loaded := 0
+	for _, raw := range strings.Split(string(data), "\n") {
+		line := strings.TrimSpace(raw)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		line = strings.TrimPrefix(line, "export ")
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue
+		}
+		key := strings.TrimSpace(line[:eq])
+		val := strings.TrimSpace(line[eq+1:])
+		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
+			val = val[1 : len(val)-1] // strip matching surrounding quotes
+		}
+		if _, present := os.LookupEnv(key); present {
+			continue // a real environment variable overrides the .env file
+		}
+		os.Setenv(key, val)
+		loaded++
+	}
+	if loaded > 0 {
+		log.Printf("loaded %d vars from %s", loaded, path)
+	}
 }
 
 func rootDir() string {
