@@ -1697,7 +1697,7 @@ function floorSeamClipBoxes(boxes) {
 	return boxes?.map(floorSeamBox) ?? null
 }
 
-async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, colors = null, plotId = null, clipBoxes = null, fileName = `${name}.splat` } = {}) {
+async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, colors = null, plotId = null, clipBoxes = null, paletteStrength = null, paletteLightness = null, fileName = `${name}.splat` } = {}) {
 	const raw = new SplatMesh({ fileBytes: bytes, fileName })
 	await raw.initialized
 	const fit = fitSettingsFor(kind)
@@ -1717,8 +1717,8 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 		spanLo: fit.fitBboxPercentile,
 		spanHi: 1 - fit.fitBboxPercentile,
 		palette: fit.paletteLock && colors?.length ? colors : null,
-		paletteStrength: fit.paletteStrength,
-		paletteLightness: fit.paletteLightness,
+		paletteStrength: paletteStrength ?? fit.paletteStrength,
+		paletteLightness: paletteLightness ?? fit.paletteLightness,
 	})
 	if (!fitted) {
 		disposeObject(raw)
@@ -1733,6 +1733,7 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 	fitted.userData.seatZ = (box.min.z + box.max.z) / 2
 	fitted.userData.seatBaseY = box.min.y
 	world.addGenerated(fitted, sourcePrimitives || [])
+	return fitted
 }
 
 // --- World expansion ("Add plot") -------------------------------------------
@@ -2213,16 +2214,135 @@ async function generateUnifiedGround(groundPromptText, output) {
 		prompt: groundPromptText, image: imageBlob, mask: maskBlob, groundColor: groundColorHex,
 		colors: groundColors, cols: fp.cols, rows: fp.rows, imageSize: size.label, output, name: "floor",
 	})
-	await seatSubject(res.splat, world.footprintBox(), "floor", null, {
+	const mesh = await seatSubject(res.splat, world.footprintBox(), "floor", null, {
 		kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
 		fillXZ: true, colors: groundColors, plotId: null, clipBoxes: world.floorClipBoxes(),
 	})
+	mesh.userData.floorCells = occupiedCells() // grid cells this splat covers (for seam blending)
 	splatStore.set("floor", res.splat)
 	world.groundGenerated()
 	try {
 		groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
 	} catch { groundMaster = null }
 	return true
+}
+
+// Add-plot floor: keep the already-generated floor UNTOUCHED and generate ONLY the newly-added
+// plot(s) as their own splat. The terrain DESIGN continues the neighbour (the composite outpaints
+// from the kept master, so grass stays the same grass), but the new region's colours are LOCKED to
+// the new plot's OWN paint (its colours only, not blended with the neighbour) via the floor palette
+// lock. The new splat is clipped to just the new tiles and overfit by floorSeamOverlap, so its edge
+// gaussians stretch into the neighbour and merge at the border — no seam gap, existing plots
+// unchanged. Returns true if a floor was seated.
+async function generateAddedPlotFloor(groundPromptText, output, newTiles) {
+	const fp = footprint()
+	const size = groundImageSize(fp.cols, fp.rows)
+	const { canvas, mask } = buildGroundComposite(fp, size) // mask preserves the existing terrain, outpaints the new tiles
+	const imageBlob = await canvasToBlob(canvas)
+	const maskBlob = mask ? await canvasToBlob(mask) : null
+	// ONLY the new plot's own painted colours — the palette lock restricts the new region to these,
+	// so it keeps the design of the neighbour but the colours the user gave this plot.
+	const newColors = primitiveColors(newTiles)
+	const res = await generateGround({
+		prompt: groundPromptText, image: imageBlob, mask: maskBlob,
+		groundColor: newColors[0] || world.baseGroundColor, colors: newColors,
+		cols: fp.cols, rows: fp.rows, imageSize: size.label, output, name: "floor",
+	})
+	const name = `floor-p${newTiles.map(t => t.userData.plotId ?? 0).join("-")}`
+	const mesh = await seatSubject(res.splat, world.footprintBox(), name, null, {
+		kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
+		fillXZ: true, colors: newColors, plotId: null,
+		clipBoxes: newTiles.map(t => world.floorBoxForTile(t)), // seat ONLY the new tiles (existing floor kept)
+		paletteStrength: 1, // the plot body is EXACTLY the user's colours; the seam blend below re-introduces the neighbour
+	})
+	mesh.userData.floorCells = new Set(newTiles.map(t => { const c = cellOf(t.userData.origin); return `${c.ix},${c.iz}` }))
+	splatStore.set(name, res.splat)
+	world.groundGenerated() // bake + hide the new tiles (existing tiles were already baked/hidden)
+	try {
+		groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
+	} catch { /* keep the previous master */ }
+	return true
+}
+
+// --- Seam colour blending (math, not the image model) -------------------------------
+// A GRADIENT between the two plots' colours across every shared border: each plot keeps its own
+// colour in its body, and over a wide band on each side of the border the gaussian colours ramp
+// from plot A's colour, through their exact midpoint AT the border, to plot B's colour. Pure
+// splat-space math — the image model is never trusted to blend. Runs after floor seating; a
+// single-splat world is a no-op.
+const SEAM_BLEND_BAND = floorSize * 0.4 // gradient half-width per side (0.4 → ~13u total ramp)
+const SEAM_BLEND_MAX = 0.95 // convergence at the border (1 = both sides meet exactly at the mid colour)
+
+const smooth01 = t => t * t * (3 - 2 * t) // smoothstep — soft ease instead of a linear ramp
+
+function blendFloorSeamColors() {
+	const floors = world.generated.map(g => g.mesh).filter(m => m.userData.genKind === "floor")
+	if (floors.length < 2) return
+	const owner = new Map() // "ix,iz" → floor mesh (later meshes win: an added plot overrides stale cells)
+	for (const mesh of floors) {
+		if (mesh.userData.floorCells) for (const key of mesh.userData.floorCells) owner.set(key, mesh)
+	}
+	// Fallback: a floor restored from an older build may not carry floorCells — give the single
+	// untagged mesh every occupied cell nobody else claims, so its seams still blend.
+	const untagged = floors.filter(m => !m.userData.floorCells?.size)
+	if (untagged.length === 1) {
+		for (const key of occupiedCells()) if (!owner.has(key)) owner.set(key, untagged[0])
+	}
+	// One seam per shared edge between cells owned by different meshes (+X/+Z only → no duplicates).
+	let seams = 0
+	for (const [key, mesh] of owner) {
+		const [ix, iz] = key.split(",").map(Number)
+		const nx = owner.get(`${ix + 1},${iz}`)
+		if (nx && nx !== mesh) { blendOneSeam({ axis: "x", at: (ix + 0.5) * floorSize, lo: (iz - 0.5) * floorSize, hi: (iz + 0.5) * floorSize, a: mesh, b: nx }); seams++ }
+		const nz = owner.get(`${ix},${iz + 1}`)
+		if (nz && nz !== mesh) { blendOneSeam({ axis: "z", at: (iz + 0.5) * floorSize, lo: (ix - 0.5) * floorSize, hi: (ix + 0.5) * floorSize, a: mesh, b: nz }); seams++ }
+	}
+	if (seams) console.log(`[seam] gradient-blended ${seams} plot border(s)`)
+}
+
+// Blend one 16-unit border segment at `axis`=`at` between mesh `a` (negative side) and `b`
+// (positive side), for gaussians whose along-seam coordinate is in [lo, hi].
+function blendOneSeam({ axis, at, lo, hi, a, b }) {
+	const W = SEAM_BLEND_BAND
+	const coordOf = c => (axis === "x" ? c.x : c.z)
+	const alongOf = c => (axis === "x" ? c.z : c.x)
+	// 1. Each side's PLOT colour = mean over its whole adjacent tile strip (stable even when the
+	// pixels right at the border already drifted), sampled per seam so multi-colour plots stay local.
+	const meanOf = (mesh, sign) => {
+		const acc = [0, 0, 0, 0]
+		mesh.packedSplats.forEachSplat((i, center, scales, quaternion, opacity, color) => {
+			const d = coordOf(center) - at
+			const along = alongOf(center)
+			if (along < lo || along > hi) return
+			if (sign < 0 ? (d >= 0 || d < -floorSize) : (d <= 0 || d > floorSize)) return
+			acc[0] += color.r; acc[1] += color.g; acc[2] += color.b; acc[3]++
+		})
+		return acc[3] >= 16 ? [acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]] : null
+	}
+	const ma = meanOf(a, -1)
+	const mb = meanOf(b, +1)
+	if (!ma || !mb) return // one side has no coverage here — nothing to blend toward
+	// 2. The gradient: ideal(t) = lerp(plotA, plotB, t) with t 0→1 across the band; each gaussian
+	// is pulled toward ideal by a smoothstep weight that peaks at the border (both sides converge
+	// on the exact mid colour) and fades to zero at the band edge (plot keeps its own colour).
+	const apply = (mesh, sign) => {
+		const packed = mesh.packedSplats
+		packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
+			const d = coordOf(center) - at
+			const along = alongOf(center)
+			if (along < lo || along > hi || Math.abs(d) > W) return
+			if (sign < 0 ? d > 0 : d < 0) return
+			const t = (d / W + 1) / 2 // 0 at A's band edge → 0.5 at the border → 1 at B's band edge
+			const w = smooth01(1 - Math.abs(d) / W) * SEAM_BLEND_MAX
+			color.r += (ma[0] + (mb[0] - ma[0]) * t - color.r) * w
+			color.g += (ma[1] + (mb[1] - ma[1]) * t - color.g) * w
+			color.b += (ma[2] + (mb[2] - ma[2]) * t - color.b) * w
+			packed.setSplat(i, center, scales, quaternion, opacity, color)
+		})
+		packed.needsUpdate = true
+	}
+	apply(a, -1)
+	apply(b, +1)
 }
 
 // Generate / extend a multi-plot world: ONE unified ground splat sliced to the occupied tiles,
@@ -2250,24 +2370,37 @@ async function generateExpanded(prompt) {
 		let output = null
 		try { output = (await newOutput()).index } catch {}
 
-		// 1. UNIFIED GROUND — ONE splat spanning the whole footprint, then SLICED to the occupied
-		// tiles so empty footprint cells (e.g. the hole in a ring/U of plots) are culled. One
-		// coherent Tripo generation instead of a splat per tile removes the inter-tile terrain
-		// inconsistency; the gaussian budget scales with tile count (server groundGaussians) and
-		// the outpaint mask preserves already-generated terrain when a new plot is added.
-		world.removeGeneratedWhere(g => g.mesh.userData.genKind === "floor")
-		world.floorGenerated = false
-		updateElevationHandles()
-		for (const name of [...splatStore.keys()]) {
-			if (name === "floor" || name.startsWith("floor-p")) splatStore.delete(name)
-		}
-
-		showProgress(done, total, groundMaster ? "Extending terrain (seamless)…" : "Generating terrain…")
-		try {
-			await generateUnifiedGround(prompt, output)
-		} catch (error) {
-			console.warn("ground:", error.message)
-			setStatus("Ground generation failed: " + (error.message || error))
+		// 1. FLOOR. Two modes:
+		//  - ADD-PLOT (a floor already exists and only some tiles are new): keep the existing floor
+		//    UNTOUCHED and generate ONLY the new plot(s) — design continued from the neighbour, but
+		//    colours locked to the new plot's own paint, seam-merged at the border.
+		//  - FIRST multi-plot generation (nothing baked yet): ONE unified splat spanning the whole
+		//    footprint, sliced to the occupied tiles so empty cells (the hole in a ring/U) are culled.
+		const newFloorTiles = world.groundTiles.filter(t => !t.userData.floorBaked)
+		const hasExistingFloor = world.generated.some(g => g.mesh.userData.genKind === "floor")
+		if (hasExistingFloor && newFloorTiles.length && newFloorTiles.length < world.groundTiles.length) {
+			showProgress(done, total, "Growing into the new plot…")
+			try {
+				await generateAddedPlotFloor(prompt, output, newFloorTiles)
+				blendFloorSeamColors() // math-blend the touching sides; the plot body keeps its own colours
+			} catch (error) {
+				console.warn("added floor:", error.message)
+				setStatus("Ground generation failed: " + (error.message || error))
+			}
+		} else {
+			world.removeGeneratedWhere(g => g.mesh.userData.genKind === "floor")
+			world.floorGenerated = false
+			updateElevationHandles()
+			for (const name of [...splatStore.keys()]) {
+				if (name === "floor" || name.startsWith("floor-p")) splatStore.delete(name)
+			}
+			showProgress(done, total, groundMaster ? "Extending terrain (seamless)…" : "Generating terrain…")
+			try {
+				await generateUnifiedGround(prompt, output)
+			} catch (error) {
+				console.warn("ground:", error.message)
+				setStatus("Ground generation failed: " + (error.message || error))
+			}
 		}
 		done++
 		showProgress(done, total)
@@ -2504,19 +2637,35 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 		const splatBytes = getSplat(s.name)
 		if (!splatBytes) { console.warn(`missing splat ${s.name}`); done++; showProgress(done, total); continue }
 
-		let box, sourcePrimitives, colors, plotId = null, clipBoxes = null
+		let box, sourcePrimitives, colors, plotId = null, clipBoxes = null, floorCells = null
 		if (s.kind === "floor") {
-			const legacyUnifiedFloor = s.plotId == null && s.name === "floor"
-			if (legacyUnifiedFloor) {
+			// Three floor shapes: the unified "floor" (footprint splat sliced to all tiles), an
+			// added-plot "floor-p<ids>" with no plotId (footprint splat sliced to just those plots'
+			// tiles), and the legacy per-plot floor (plotId set, one splat fitted to its own tile).
+			const addedPlotIds = s.plotId == null && /^floor-p[\d-]+$/.test(s.name)
+				? s.name.slice("floor-p".length).split("-").map(Number)
+				: null
+			const addedTiles = addedPlotIds
+				? world.groundTiles.filter(t => addedPlotIds.includes(t.userData.plotId ?? 0))
+				: []
+			if (s.plotId == null && s.name === "floor") {
 				box = world.footprintBox?.() ?? world.floorBox()
 				colors = primitiveColors(world.groundTiles)
 				clipBoxes = world.floorClipBoxes()
+				floorCells = occupiedCells()
+			} else if (addedTiles.length) {
+				box = world.footprintBox()
+				colors = primitiveColors(addedTiles)
+				clipBoxes = addedTiles.map(t => world.floorBoxForTile(t))
+				floorCells = new Set(addedTiles.map(t => { const c = cellOf(t.userData.origin); return `${c.ix},${c.iz}` }))
 			} else {
 				plotId = s.plotId ?? world.groundTiles[floorIdx]?.userData.plotId ?? 0
 				const tile = world.groundTiles.find(t => t.userData.plotId === plotId) ?? world.groundTiles[floorIdx] ?? world.ground
 				box = world.floorBoxForTile(tile)
 				colors = primitiveColors([tile])
 				clipBoxes = [box]
+				const c = cellOf(tile.userData.origin)
+				floorCells = new Set([`${c.ix},${c.iz}`])
 			}
 			floorIdx++
 			sourcePrimitives = null
@@ -2530,7 +2679,7 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 
 		const fit = fitSettingsFor(s.kind)
 		try {
-			await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
+			const seated = await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
 				kind: s.kind,
 				yawTurns: s.yawTurns ?? 0,
 				yawDeg: fit.yawDeg,
@@ -2540,6 +2689,7 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 				plotId,
 				clipBoxes,
 			})
+			if (floorCells) seated.userData.floorCells = floorCells
 			splatStore.set(s.name, splatBytes)
 			sessionSubjects.push({ ...s, plotId: s.kind === "floor" ? plotId : (sourcePrimitives?.[0]?.userData?.plotId ?? s.plotId ?? null) })
 		} catch (err) {
@@ -2550,6 +2700,7 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 	}
 
 	if (sessionSubjects.some(s => s.kind === "floor")) world.groundGenerated()
+	blendFloorSeamColors() // re-apply the math seam blend across restored floor splats
 	applyAllPlotHeights()
 	world.state = "generated"
 	applyOverlayVisibility()
