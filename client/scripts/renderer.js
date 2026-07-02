@@ -41,6 +41,7 @@ const gizmoPlaneNormal = new THREE.Vector3()
 const backgroundColor = new THREE.Color(0xfcfcfc)
 
 const shapeTools = new Set(["box", "sphere", "cylinder", "cone"])
+const selectionTools = new Set(["pointer", "move"]) // both select; move also shows the translate widget
 const floorSize = 16 // the single world's ground tile (bigger now that it is its own splat)
 const groundThickness = 0.05
 const groundTopY = groundThickness // plot-local Y of the ground's top surface
@@ -113,7 +114,6 @@ const els = {
 	chatForm: document.getElementById("chat_form"),
 	chatPrompt: document.getElementById("chat_prompt"),
 	floorShot: document.getElementById("floor_shot_btn"),
-	addPlot: document.getElementById("add_plot_btn"),
 	uploadSplats: document.getElementById("upload_splats_input"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
@@ -279,30 +279,6 @@ function clipToAtlasCell(ctx, canvas, uv) {
 	ctx.clip()
 }
 
-// A faint ground arrow marking the scene "front": the side every subject is captured
-// from, so it gets the crisp detail (build doors / faces toward it).
-function createFrontIndicator(size) {
-	const dir = new THREE.Vector3().setFromSpherical(new THREE.Spherical(1, Math.PI / 2, FRONT_THETA))
-	dir.y = 0
-	dir.normalize()
-	const len = size * 0.07
-	const shape = new THREE.Shape()
-	shape.moveTo(0, len)
-	shape.lineTo(-len * 0.62, -len * 0.5)
-	shape.lineTo(len * 0.62, -len * 0.5)
-	shape.closePath()
-	const geometry = new THREE.ShapeGeometry(shape)
-	geometry.rotateX(-Math.PI / 2) // lay flat, tip toward +Z
-	const material = new THREE.MeshBasicMaterial({ color: 0x1f2328, transparent: true, opacity: 0.22, side: THREE.DoubleSide, depthWrite: false })
-	const arrow = new THREE.Mesh(geometry, material)
-	arrow.userData.isFront = true
-	arrow.renderOrder = 5
-	const reach = size / 2 - len * 1.6
-	arrow.position.set(dir.x * reach, 0.06, dir.z * reach)
-	arrow.rotation.y = Math.atan2(dir.x, dir.z) // align +Z to the front direction
-	return arrow
-}
-
 // The single world: a paintable ground tile, the block-out primitives placed on it,
 // and the gaussian splats generated from them. There is exactly one (the legacy
 // multi-plot grid is gone).
@@ -314,7 +290,7 @@ class World {
 		this.primitives = []
 		this.generated = [] // { mesh, primitives }
 		this.boundsHelpers = []
-		this.ghostTiles = [] // dashed "expand here" outlines around the active plot
+		this.ghostTiles = [] // dashed "expand here" outlines around every open footprint edge
 		this.groundSlopePreviews = []
 		this.state = "draft"
 		this.prompt = ""
@@ -341,8 +317,6 @@ class World {
 		// appends adjacent tiles (see addGroundTile / addPlotAt).
 		this.groundTiles = [this.ground]
 
-		this.front = createFrontIndicator(floorSize)
-		this.group.add(this.front)
 	}
 
 	allBlockoutMeshes() {
@@ -350,22 +324,32 @@ class World {
 	}
 
 	floorCaptureMeshes() {
-		const previews = this.groundSlopePreviews.filter(mesh => mesh.visible)
+		const previews = this.groundSlopePreviews.filter(mesh => mesh.visible && !mesh.userData.isColliderOnly)
 		return previews.length ? previews : this.groundTiles
 	}
 
 	floorCaptureMeshesForTile(tile) {
 		const plotId = tile.userData.plotId
-		const preview = this.groundSlopePreviews.find(mesh => mesh.visible && mesh.userData.plotId === plotId)
+		const preview = this.groundSlopePreviews.find(mesh => mesh.visible && !mesh.userData.isColliderOnly && mesh.userData.plotId === plotId)
 		return [preview ?? tile]
 	}
 
+	// The meshes a pointer ray should treat as "the ground": a tile's curved slope mesh when
+	// it has one (it follows the real surface), else its flat tile — post-generation, plots
+	// added later have no curved mesh and stay flat block-outs.
+	groundHitMeshes() {
+		const curved = this.groundSlopePreviews.filter(mesh => mesh.visible)
+		if (!curved.length) return this.groundTiles
+		const covered = new Set(curved.map(mesh => mesh.userData.plotId))
+		return [...curved, ...this.groundTiles.filter(tile => !covered.has(tile.userData.plotId))]
+	}
+
 	raycastables() {
-		return [...this.groundTiles, ...this.primitives.filter(mesh => mesh.visible)].filter(mesh => mesh.visible)
+		return [...this.groundHitMeshes(), ...this.primitives.filter(mesh => mesh.visible)].filter(mesh => mesh.visible)
 	}
 
 	selectables() {
-		return [...this.groundTiles, ...this.primitives].filter(mesh => mesh.visible)
+		return [...this.groundHitMeshes(), ...this.primitives].filter(mesh => mesh.visible)
 	}
 
 	// Set the base ground colour for the WHOLE world — every plot's ground tile, so all floors
@@ -519,8 +503,10 @@ class World {
 		if (!surface) return
 		// Remember each colour painted onto a primitive (or the ground), so it joins that
 		// subject's palette for the hue lock — e.g. red berry spots become an available
-		// colour, and a painted blue river joins the floor's palette.
-		;(hit.object.userData.paintedColors ??= new Set()).add(activeColor)
+		// colour, and a painted blue river joins the floor's palette. Record on the tile,
+		// not a transient curved-surface mesh (those are rebuilt on every height change).
+		const paintTarget = hit.object.userData.tile ?? hit.object
+		;(paintTarget.userData.paintedColors ??= new Set()).add(activeColor)
 		const { canvas, ctx, texture } = surface
 		const px = uv.x * canvas.width
 		const py = (1 - uv.y) * canvas.height
@@ -556,7 +542,6 @@ class World {
 			setPickableHidden(tile, true)
 		}
 		updateElevationHandles()
-		this.front.visible = false
 	}
 
 	// Tear down a previous generation: drop the splats, restore the editable block-out.
@@ -571,7 +556,6 @@ class World {
 			tile.visible = true
 			setColliderStyle(tile, false)
 		}
-		this.front.visible = true
 		for (const primitive of this.primitives) {
 			setPickableHidden(primitive, false)
 			primitive.visible = true
@@ -634,6 +618,7 @@ function generatedForPrimitive(mesh) {
 }
 
 function editablePrimitiveFor(mesh) {
+	if (mesh.userData.tile) mesh = mesh.userData.tile // curved ground surface → its flat tile
 	if (world.state !== "generated" || mesh.userData.isGround) return mesh
 	const record = generatedForPrimitive(mesh)
 	return record?.primitives?.[0] ?? mesh
@@ -678,7 +663,7 @@ function syncGeneratedForPrimitives(meshes) {
 
 const gizmoAxes = [
 	{ name: "x", color: 0xe44b4b, dir: new THREE.Vector3(1, 0, 0) },
-	{ name: "y", color: 0xf4d03f, dir: new THREE.Vector3(0, 1, 0) },
+	{ name: "y", color: 0x4caf50, dir: new THREE.Vector3(0, 1, 0) }, // standard axis colours: X red, Y green, Z blue
 	{ name: "z", color: 0x3b82f6, dir: new THREE.Vector3(0, 0, 1) },
 ]
 
@@ -726,12 +711,12 @@ function selectedGizmoPosition(out = new THREE.Vector3()) {
 	selectedPrimitive.updateWorldMatrix(true, false)
 	const box = selectedPrimitive.geometry.boundingBox.clone().applyMatrix4(selectedPrimitive.matrixWorld)
 	box.getCenter(out)
-	if (selectedPrimitive.userData.isGround) out.y = box.max.y + 0.25
+	if (selectedPrimitive.userData.isGround) out.y = heightAt(out.x, out.z) + groundTopY + 0.25 // sit on the curved surface
 	return out
 }
 
 function updateTransformGizmo() {
-	const show = Boolean(selectedPrimitive) && activeTool === "pointer" && !generating
+	const show = Boolean(selectedPrimitive) && activeTool === "move" && !generating
 	transformGizmo.visible = show
 	if (!show) return
 	selectedGizmoPosition(transformGizmo.position)
@@ -796,7 +781,7 @@ function startGizmoDrag(event, handle) {
 	return true
 }
 
-// Lift a plot by dragging its ground body directly (pointer tool), so raising/lowering a plot
+// Lift a plot by dragging its ground body directly (move tool), so raising/lowering a plot
 // after generation is "click the plot, drag up/down" — no need to grab the thin Y gizmo arrow.
 // Selects the plot first (summoning the Y gizmo too), then arms the same floor drag the gizmo
 // uses; a press with no vertical movement just leaves the plot selected (setPlotHeight ignores
@@ -856,17 +841,20 @@ function finishGizmoDrag() {
 	else {
 		bindPrimitiveTreeToCurrentPlot(drag.mesh, drag.subtree)
 		syncGeneratedForPrimitive(drag.mesh)
+		focusPlot(drag.mesh.userData.plotId ?? 0) // dragging a block onto another plot focuses it
 	}
 }
 
 // --- Tools / palette --------------------------------------------------------
 
 function setActiveTool(tool) {
-	const changed = activeTool !== tool
+	const previous = activeTool
 	activeTool = tool
-	if (changed) selectPrimitive(null)
+	// Keep the selection when hopping between the two selection tools (pointer ↔ move).
+	if (previous !== tool && !(selectionTools.has(previous) && selectionTools.has(tool))) selectPrimitive(null)
 	for (const button of els.toolButtons) button.classList.toggle("active", button.dataset.tool === tool)
 	renderer.domElement.classList.toggle("is-pointer", tool === "pointer")
+	renderer.domElement.classList.toggle("is-move", tool === "move")
 	renderer.domElement.classList.toggle("is-eraser", tool === "eraser")
 	renderer.domElement.classList.toggle("is-placing", shapeTools.has(tool))
 	renderer.domElement.classList.toggle("is-painting", tool === "paint")
@@ -897,12 +885,45 @@ function syncPlacementPreview() {
 function selectPrimitive(mesh) {
 	mesh = mesh ? editablePrimitiveFor(mesh) : null
 	if (selectedPrimitive) clearSelectionOutline(selectedPrimitive)
+	clearGroundSelectionHighlight()
 	selectedPrimitive = mesh
 	if (mesh) {
-		createSelectionOutline(mesh)
+		applySelectionOutline(mesh)
 		syncActiveColorFromSelection(mesh)
 	}
 	updateTransformGizmo()
+}
+
+// An elevated floor's flat collider box would show a flat outline floating over the curved
+// terrain — highlight the true (curved) surface instead. Flat floors keep the box shell.
+let groundSelectionHighlight = null
+
+function clearGroundSelectionHighlight() {
+	if (!groundSelectionHighlight) return
+	disposeObject(groundSelectionHighlight)
+	groundSelectionHighlight = null
+}
+
+function applySelectionOutline(mesh) {
+	if (mesh.userData.isGround && hasPlotElevation()) {
+		groundSelectionHighlight = new THREE.Mesh(buildCurvedTileGeometry(mesh, 0.06), new THREE.MeshBasicMaterial({
+			color: 0xffd400, transparent: true, opacity: 0.35, depthWrite: false, side: THREE.DoubleSide,
+		}))
+		groundSelectionHighlight.userData.isSelectionOutline = true
+		groundSelectionHighlight.renderOrder = 4
+		world.group.add(groundSelectionHighlight)
+		return
+	}
+	createSelectionOutline(mesh)
+}
+
+// Rebuild the selected floor's highlight so it tracks the height field while it changes
+// (e.g. during a Y-widget drag that raises/lowers the plot).
+function refreshGroundSelectionHighlight() {
+	if (!selectedPrimitive?.userData.isGround) return
+	clearSelectionOutline(selectedPrimitive)
+	clearGroundSelectionHighlight()
+	applySelectionOutline(selectedPrimitive)
 }
 
 function setActiveColorOnly(color) {
@@ -1047,6 +1068,15 @@ function alignMeshToNormal(mesh, normal) {
 	mesh.quaternion.setFromUnitVectors(localUp, normal)
 }
 
+// Focus (activate) a plot: new primitives join it and the expansion ghosts surround it.
+// Focus follows interaction — building/painting/selecting on a plot — never plot creation.
+function focusPlot(plotId) {
+	if (plotId == null || plotId === activePlotId) return
+	if (!world.groundTiles.some(t => t.userData.plotId === plotId)) return
+	activePlotId = plotId
+	updateGhostTiles()
+}
+
 function plotIdFromHit(hit, fallback = activePlotId) {
 	const pid = hit?.object?.userData?.plotId
 	return Number.isInteger(pid) ? pid : fallback
@@ -1156,7 +1186,7 @@ function startPrimitiveDrag(event, mesh) {
 	mesh = editablePrimitiveFor(mesh)
 	selectPrimitive(mesh)
 	if (mesh.userData.isGround || mesh.userData.locked) return
-	if (activeTool === "pointer") return
+	if (selectionTools.has(activeTool)) return
 	const worldPosition = mesh.getWorldPosition(new THREE.Vector3())
 	drag = {
 		mode: activeTool === "rotate" ? "roll" : "scale",
@@ -1318,7 +1348,9 @@ function startPaint(event) {
 
 function paintAtEvent(event) {
 	const hit = raycast(event, world.raycastables())
-	if (hit) world.paintAt(hit)
+	if (!hit) return
+	world.paintAt(hit)
+	focusPlot(plotIdFromHit(hit))
 }
 
 // --- Pointer routing --------------------------------------------------------
@@ -1348,14 +1380,15 @@ function pointerDown(event) {
 
 	if (shapeTools.has(activeTool)) {
 		const hit = surfaceHit(event)
-		if (hit) world.addPrimitive(activeTool, hit)
+		if (hit) focusPlot(world.addPrimitive(activeTool, hit).userData.plotId)
 		else startOrbit(event)
 		return
 	}
 
-	// pointer / scale / rotate / eraser act on a selectable block-out mesh under the cursor.
+	// pointer / move / scale / rotate / eraser act on a selectable block-out mesh under the cursor.
 	const hit = raycast(event, world.selectables())
 	if (hit?.object) {
+		focusPlot(hit.object.userData.plotId ?? 0)
 		if (activeTool === "eraser") {
 			if (hit.object.userData.isGround || hit.object.userData.locked) {
 				selectPrimitive(hit.object)
@@ -1365,11 +1398,11 @@ function pointerDown(event) {
 			return
 		}
 		if (activeTool === "scale" || activeTool === "rotate") startPrimitiveDrag(event, hit.object)
-		else if (activeTool === "pointer" && hit.object.userData.isGround) startFloorLift(event, hit.object)
+		else if (activeTool === "move" && hit.object.userData.isGround) startFloorLift(event, hit.object)
 		else selectPrimitive(hit.object)
 		return
 	}
-	if (activeTool === "pointer") selectPrimitive(null)
+	if (selectionTools.has(activeTool)) selectPrimitive(null)
 	startOrbit(event)
 }
 
@@ -1719,21 +1752,6 @@ function occupiedCells() {
 	return set
 }
 
-function activeCell() {
-	const tile = world.groundTiles.find(t => t.userData.plotId === activePlotId) ?? world.groundTiles[0]
-	return cellOf(tile.userData.origin)
-}
-
-// First free grid cell from the active plot along a chosen grid direction (dx, dz ∈ {-1,0,1}):
-// step outward until an empty cell is found, so a side already occupied grows past its tiles.
-function cellInDirection(dx, dz) {
-	const occ = occupiedCells()
-	const base = activeCell()
-	let ix = base.ix + dx, iz = base.iz + dz
-	while (occ.has(`${ix},${iz}`)) { ix += dx; iz += dz }
-	return { ix, iz }
-}
-
 // The bounding grid rectangle of every tile = the ground image footprint.
 function footprint() {
 	let minIx = Infinity, maxIx = -Infinity, minIz = Infinity, maxIz = -Infinity
@@ -1851,30 +1869,39 @@ function buildGroundComposite(fp, size) {
 	return { canvas, mask }
 }
 
-// Drop an adjacent plot at a specific grid cell, made active so new objects join it. Build on
-// it, then Generate extends the ground into it seamlessly.
+// Drop an adjacent plot at a specific grid cell. The new plot is NOT focused — focus follows
+// interaction (building/painting/selecting on it), see focusPlot.
 function addPlotAt(cell) {
 	if (generating) return
 	const plotId = ++plotSeq
 	world.addGroundTile(cell.ix, cell.iz, plotId)
-	activePlotId = plotId
-	selectPrimitive(null)
-	frameOrbitOnCell(cell)
-	setActiveTool("box")
-	updateGhostTiles() // ghosts follow the new active plot
-	setStatus("New plot added — build on it, then Generate. The ground extends seamlessly from your existing world.")
+	updateGhostTiles() // the ghost on that side steps outward past the new tile
 }
 
 // --- Expansion ghost tiles --------------------------------------------------
-// A dashed outline sits on each of the 4 sides of the active plot; clicking one grows the world
-// that way. They live in the 3D world (on GHOST_LAYER), so the side you click IS the world
-// direction — no camera-relative mapping needed. Hidden from capture cameras via the layer.
+// Dashed outlines sit on every empty cell adjacent to the current floor footprint. Clicking one
+// grows the world there. They live in the 3D world (on GHOST_LAYER), so capture cameras never
+// bake them into generated images.
 
 const GHOST_DIRS = [[1, 0], [-1, 0], [0, 1], [0, -1]] // +X, -X, +Z, -Z
 const ghostBaseColor = 0x64748b // slate: reads against both the near-white sky and the ground
 const ghostHoverColor = accent
-let showGhosts = true
 let hoveredGhost = null
+
+function availableGhostCells() {
+	const occupied = occupiedCells()
+	const cells = new Map()
+	for (const tile of world.groundTiles) {
+		const base = cellOf(tile.userData.origin)
+		for (const [dx, dz] of GHOST_DIRS) {
+			const cell = { ix: base.ix + dx, iz: base.iz + dz }
+			const key = `${cell.ix},${cell.iz}`
+			if (occupied.has(key)) continue
+			cells.set(key, cell)
+		}
+	}
+	return [...cells.values()].sort((a, b) => a.iz - b.iz || a.ix - b.ix)
+}
 
 // One ghost: a dashed square + a small centre "+", plus a faint fill used as the click/hover target.
 function makeGhostTile(cell) {
@@ -1915,15 +1942,14 @@ function makeGhostTile(cell) {
 	return g
 }
 
-// Rebuild the 4 ghosts around the active plot. Called on init and whenever the plot set changes.
+// Rebuild all empty perimeter ghosts around the current plot footprint.
 function updateGhostTiles() {
 	if (hoveredGhost) document.body.style.cursor = ""
 	hoveredGhost = null
 	for (const ghost of world.ghostTiles) disposeObject(ghost)
 	world.ghostTiles = []
-	if (!showGhosts) return
-	for (const [dx, dz] of GHOST_DIRS) {
-		const ghost = makeGhostTile(cellInDirection(dx, dz))
+	for (const cell of availableGhostCells()) {
+		const ghost = makeGhostTile(cell)
 		world.group.add(ghost)
 		world.ghostTiles.push(ghost)
 	}
@@ -1946,12 +1972,6 @@ function updateGhostHover(event) {
 	if (hoveredGhost) setGhostHovered(hoveredGhost, false)
 	hoveredGhost = ghost
 	if (hoveredGhost) setGhostHovered(hoveredGhost, true)
-}
-
-function frameOrbitOnCell(cell) {
-	orbit.target.set(cell.ix * floorSize, floorSize * 0.05, cell.iz * floorSize)
-	orbit.radius = Math.max(orbit.radius, floorSize * 1.4)
-	updateCamera()
 }
 
 // --- Plot elevation (hills) -------------------------------------------------
@@ -1988,7 +2008,9 @@ function hasPlotElevation() {
 	return false
 }
 
-function makeGroundSlopePreview(tile) {
+// A tile-sized grid displaced by the height field — the tile's true (curved) surface.
+// Used by the slope preview and by the ground selection highlight.
+function buildCurvedTileGeometry(tile, lift) {
 	const segments = 24
 	const half = floorSize / 2
 	const origin = tile.userData.origin
@@ -2001,7 +2023,7 @@ function makeGroundSlopePreview(tile) {
 			const v = z / segments
 			const wx = origin.x - half + u * floorSize
 			const wz = origin.z - half + v * floorSize
-			positions.push(wx, heightAt(wx, wz) + groundTopY + 0.035, wz)
+			positions.push(wx, heightAt(wx, wz) + groundTopY + lift, wz)
 			uvs.push(u, 1 - v)
 		}
 	}
@@ -2019,6 +2041,11 @@ function makeGroundSlopePreview(tile) {
 	geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2))
 	geometry.setIndex(indices)
 	geometry.computeVertexNormals()
+	return geometry
+}
+
+function makeGroundSlopePreview(tile) {
+	const geometry = buildCurvedTileGeometry(tile, 0.035)
 	const material = new THREE.MeshBasicMaterial({
 		color: 0xffffff,
 		map: tile.userData.paint?.texture ?? null,
@@ -2028,6 +2055,7 @@ function makeGroundSlopePreview(tile) {
 	const mesh = new THREE.Mesh(geometry, material)
 	mesh.userData.isGroundSlopePreview = true
 	mesh.userData.isGround = true
+	mesh.userData.tile = tile // hits on the curved surface resolve back to the editable flat tile
 	mesh.userData.plotId = tile.userData.plotId
 	mesh.userData.origin = tile.userData.origin
 	mesh.userData.paint = tile.userData.paint
@@ -2038,11 +2066,22 @@ function makeGroundSlopePreview(tile) {
 function updateGroundSlopePreview() {
 	for (const mesh of world.groundSlopePreviews) disposeObject(mesh)
 	world.groundSlopePreviews = []
-	const show = hasPlotElevation() && !world.floorGenerated
-	if (!show) return
+	if (!hasPlotElevation()) return
+	// Once a tile is baked into the generated floor splat, its curved mesh stays on as an
+	// INVISIBLE raycast collider: clicks must intersect the true curved surface, not the flat
+	// tile underneath, or placement/painting lands offset from the cursor on slopes. A plot
+	// added AFTER generation is drawn as a flat block-out tile, so it gets no curved mesh —
+	// its flat tile stays the click target (see groundHitMeshes).
 	for (const tile of world.groundTiles) {
+		const colliderOnly = world.floorGenerated && tile.userData.floorBaked
+		if (world.floorGenerated && !tile.userData.floorBaked) continue
 		const preview = makeGroundSlopePreview(tile)
-		preview.visible = true
+		if (colliderOnly) {
+			preview.userData.isColliderOnly = true
+			preview.material.transparent = true
+			preview.material.opacity = 0
+			preview.material.depthWrite = false
+		}
 		world.group.add(preview)
 		world.groundSlopePreviews.push(preview)
 	}
@@ -2109,6 +2148,7 @@ function applyAllPlotHeights() {
 function updateElevationHandles() {
 	const slopePreview = hasPlotElevation() && !world.floorGenerated
 	updateGroundSlopePreview()
+	refreshGroundSelectionHighlight()
 	for (const tile of world.groundTiles) {
 		tile.position.y = groundThickness / 2 + (plotHeights.get(tile.userData.plotId) || 0)
 		if (showColliders) {
@@ -2143,7 +2183,6 @@ function setPlotHeight(pid, height) {
 	for (const g of world.generated) if (g.mesh.userData.genKind !== "floor") seatObjectOnGround(g.mesh)
 	for (const p of world.primitives) if ((p.userData.plotId ?? 0) === pid) p.position.y += delta
 	updateElevationHandles()
-	setStatus(`Plot ${pid} height ${clamped >= 0 ? "+" : ""}${clamped.toFixed(1)}`)
 }
 
 // Generate the whole ground as ONE splat over the footprint bounding box, then slice it to the
@@ -2301,7 +2340,6 @@ async function uploadSplats(files) {
 	try {
 		world.resetGenerated()
 		for (const primitive of world.primitives) primitive.visible = false
-		world.front.visible = false
 
 		const cols = Math.ceil(Math.sqrt(list.length))
 		const rows = Math.ceil(list.length / cols)
@@ -2778,13 +2816,6 @@ for (const swatch of els.brushSwatches) swatch.addEventListener("click", () => a
 els.addColor?.addEventListener("click", () => els.customColor?.click())
 els.customColor?.addEventListener("change", event => addPaletteColor(event.target.value))
 
-// The add-plot button now just toggles the dashed expansion outlines (click one to grow).
-els.addPlot?.addEventListener("click", () => {
-	showGhosts = !showGhosts
-	els.addPlot.classList.toggle("active", showGhosts)
-	updateGhostTiles()
-})
-
 els.floorShot?.addEventListener("click", async () => {
 	try {
 		await screenshotFloor()
@@ -2878,6 +2909,5 @@ updateCamera()
 syncGenerateButton()
 if (world.prompt) els.chatPrompt.value = world.prompt
 refreshHistoryPanel() // populate the count badge from any builds saved in earlier sessions
-els.addPlot?.classList.toggle("active", showGhosts)
 updateGhostTiles() // dashed "expand here" outlines around the starting plot
 requestAnimationFrame(animate)

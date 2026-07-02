@@ -35,6 +35,10 @@ button {
 	cursor: default;
 }
 
+#canvas canvas.is-move {
+	cursor: move;
+}
+
 #canvas canvas.is-eraser {
 	cursor: cell;
 }
@@ -144,6 +148,7 @@ button {
 }
 
 .status {
+	order: 3;
 	box-sizing: border-box;
 	width: 100%;
 	margin: 0;
@@ -156,6 +161,7 @@ button {
    one notch per generated subject (floor + each object) since a full world now
    takes a while. */
 .gen-progress {
+	order: 2;
 	display: flex;
 	flex-direction: column;
 	gap: 0.3rem;
@@ -455,8 +461,7 @@ input[type="color"] {
 }
 
 /* The chat prompt bar + primitive toolbar live together, stacked and centred at
-   the bottom of the screen — type a scene description in the chat bar and hit the
-   sparkle to generate, with progress/status surfacing right above it. */
+   the bottom of the screen. Generation progress sits below the prompt. */
 .bottom-dock {
 	position: absolute;
 	left: 50%;
@@ -479,6 +484,7 @@ input[type="color"] {
 }
 
 .chat-bar {
+	order: 1;
 	display: flex;
 	align-items: center;
 	gap: 0.5rem;
