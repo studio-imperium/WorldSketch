@@ -162,6 +162,18 @@ func handleGenerate(w http.ResponseWriter, r *http.Request) {
 
 	promptText := imagePromptFor(kind, prompt, groundColor, strings.TrimSpace(r.FormValue("label")))
 	imageSettings := subjectImageEditSettings(kind)
+<<<<<<< Updated upstream
+=======
+	if parseBoolDefault(r.FormValue("skip_image_edit"), false) {
+		imageSettings.SkipImageEdit = true
+	}
+	// GEMINI_GENERATE flips OBJECT retexturing from OpenAI to Gemini flash image (a fast trial).
+	// Objects only — the floor's unified-ground path (/api/ground) stays on OpenAI because its
+	// seam-preserving expansion relies on OpenAI's masked-edit endpoint.
+	if kind == "object" && envBool("GEMINI_GENERATE", false) {
+		imageSettings.Provider = "gemini"
+	}
+>>>>>>> Stashed changes
 	palette := subjectPaletteSettings(kind)
 
 	tImage := time.Now()
