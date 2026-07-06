@@ -8,6 +8,7 @@ import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject } from "/scripts/primitives.js"
 import { addBuild, listBuilds, getBuildSplats, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { createSky } from "/scripts/sky.js"
+import { createPlayer } from "/scripts/player.js"
 
 const root = document.getElementById("canvas")
 const scene = new THREE.Scene()
@@ -111,6 +112,10 @@ const els = {
 	historyClear: document.getElementById("history_clear_btn"),
 	historyClose: document.getElementById("history_close_btn"),
 	historyEmpty: document.getElementById("history_empty"),
+	playBtn: document.getElementById("play_btn"),
+	bodyChip: document.getElementById("body_chip"),
+	playHint: document.getElementById("play_hint"),
+	exitPlay: document.getElementById("exit_play_btn"),
 }
 
 renderer.setSize(window.innerWidth, window.innerHeight)
@@ -437,6 +442,58 @@ class World {
 }
 
 const world = new World()
+
+// --- Play mode --------------------------------------------------------------
+// "off" = editing; "placing" = dragging the body onto the ground; "playing" = walking it.
+const player = createPlayer({ camera, world, groundTopY })
+let playMode = "off"
+
+function setPlayMode(mode) {
+	playMode = mode
+	document.body.classList.toggle("is-placing", mode === "placing")
+	document.body.classList.toggle("is-playing", mode === "playing")
+}
+
+// syncPlayButton shows Play only once a world has been generated (walk the real splats).
+function syncPlayButton() {
+	if (!els.playBtn) return
+	els.playBtn.classList.toggle("hidden", world.state !== "generated" || playMode !== "off")
+}
+
+function startPlacing() {
+	if (world.state !== "generated") return
+	selectPrimitive(null)
+	drag = null
+	setPlayMode("placing")
+	syncPlayButton()
+}
+
+function exitPlay() {
+	player.hide()
+	player.detach()
+	setPlayMode("off")
+	setRenderQuality(false)
+	resetPlayHint()
+	updateCamera() // restore the orbit view
+	syncPlayButton()
+}
+
+function spawnPlayerAt(point) {
+	player.spawn(point)
+	player.attach()
+	setPlayMode("playing")
+	setRenderQuality(true) // the camera now moves every frame; lighten the splat fill cost
+	resetPlayHint()
+	syncPlayButton()
+}
+
+// Gaussian splats re-draw every frame while walking (in edit mode the camera is static when
+// idle, so the cost is hidden). Rendering at 1x instead of 2x during play cuts fill cost ~4x
+// on a Retina display; restored on exit.
+function setRenderQuality(playing) {
+	renderer.setPixelRatio(playing ? 1 : Math.min(window.devicePixelRatio, 2))
+	renderer.setSize(window.innerWidth, window.innerHeight)
+}
 
 // --- Tools / palette --------------------------------------------------------
 
@@ -879,6 +936,16 @@ function paintAtEvent(event) {
 
 function pointerDown(event) {
 	if (event.button !== 0) return
+	if (playMode === "playing") {
+		// Click-drag rotates the third-person camera around the character (no pointer lock).
+		drag = { mode: "look", pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+		renderer.domElement.setPointerCapture(event.pointerId)
+		return
+	}
+	if (playMode === "placing") {
+		startOrbit(event) // orbit to look around before dropping the body
+		return
+	}
 	if (generating) {
 		startOrbit(event) // only camera movement while generating
 		return
@@ -918,6 +985,16 @@ function pointerDown(event) {
 renderer.domElement.addEventListener("pointerdown", pointerDown)
 
 renderer.domElement.addEventListener("pointermove", event => {
+	if (drag?.mode === "look") {
+		player.addLook(event.clientX - drag.x, event.clientY - drag.y)
+		drag.x = event.clientX
+		drag.y = event.clientY
+		return
+	}
+	if (playMode !== "off") {
+		if (drag?.mode === "orbit") updateOrbit(event) // placing: allow orbit, skip editor placement preview
+		return
+	}
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag && ["primitive", "scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
@@ -933,6 +1010,10 @@ renderer.domElement.addEventListener("pointerup", event => {
 
 renderer.domElement.addEventListener("wheel", event => {
 	event.preventDefault()
+	if (playMode === "playing") {
+		player.zoom(event.deltaY) // dolly the third-person camera in/out
+		return
+	}
 	orbit.radius *= event.deltaY > 0 ? 1.08 : 0.92
 	updateCamera()
 }, { passive: false })
@@ -1758,8 +1839,56 @@ document.addEventListener("click", event => {
 })
 
 document.addEventListener("keydown", event => {
-	if (event.key === "Escape") toggleSettings(false)
+	if (event.key === "Escape") {
+		const settingsWereOpen = !els.settingsPopover.classList.contains("hidden")
+		toggleSettings(false)
+		// Esc also leaves play (the Exit button is the primary way out), but a first Esc
+		// with the settings popover open only closes the popover.
+		if (!settingsWereOpen && playMode !== "off") exitPlay()
+	}
 })
+
+// --- Play mode wiring -------------------------------------------------------
+els.playBtn?.addEventListener("click", startPlacing)
+els.exitPlay?.addEventListener("click", exitPlay)
+
+// Drag the placeholder body from the chip onto the ground to spawn + start playing. The
+// ground is raycast as a math plane (the generated floor mesh is hidden, so it can't be hit).
+;(() => {
+	const chip = els.bodyChip
+	if (!chip) return
+	const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), -groundTopY)
+	const hitGround = event => {
+		pointerFromEvent(event)
+		raycaster.setFromCamera(pointer, camera)
+		const p = new THREE.Vector3()
+		if (!raycaster.ray.intersectPlane(groundPlane, p)) return null
+		const half = world.size / 2 - 0.4
+		p.x = Math.max(-half, Math.min(half, p.x))
+		p.z = Math.max(-half, Math.min(half, p.z))
+		return p
+	}
+	chip.addEventListener("pointerdown", event => {
+		if (playMode !== "placing") return
+		event.preventDefault()
+		chip.setPointerCapture(event.pointerId)
+		const move = ev => {
+			const p = hitGround(ev)
+			if (!p) return
+			player.body.position.set(p.x, groundTopY, p.z) // live preview follows the cursor
+			player.body.visible = true
+		}
+		const up = ev => {
+			window.removeEventListener("pointermove", move)
+			window.removeEventListener("pointerup", up)
+			const p = playMode === "placing" ? hitGround(ev) : null // Esc mid-drag cancels
+			if (p) spawnPlayerAt(p)
+			else player.body.visible = false
+		}
+		window.addEventListener("pointermove", move)
+		window.addEventListener("pointerup", up)
+	})
+})()
 
 els.historyToggle?.addEventListener("click", () => toggleHistoryPanel())
 
@@ -1782,7 +1911,31 @@ window.addEventListener("resize", () => {
 	renderer.setSize(window.innerWidth, window.innerHeight)
 })
 
+const playClock = new THREE.Clock()
+const baseHint = els.playHint?.textContent ?? ""
+let fpsAccum = 0
+let fpsFrames = 0
+
+// resetPlayHint drops any stale fps readout so a new play session starts clean.
+function resetPlayHint() {
+	fpsAccum = 0
+	fpsFrames = 0
+	if (els.playHint) els.playHint.textContent = baseHint
+}
+
 function animate() {
+	const dt = playClock.getDelta()
+	if (playMode === "playing") {
+		player.update(dt)
+		fpsAccum += dt
+		fpsFrames++
+		if (fpsAccum >= 0.5 && els.playHint) {
+			els.playHint.textContent = `${baseHint} · ${Math.round(fpsFrames / fpsAccum)} fps`
+			fpsAccum = 0
+			fpsFrames = 0
+		}
+	}
+	syncPlayButton() // cheap; keeps the Play button in sync with world.state every frame
 	sky.position.copy(camera.position)
 	renderer.render(scene, camera)
 	requestAnimationFrame(animate)

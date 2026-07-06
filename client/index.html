@@ -163,6 +163,20 @@
 			</nav>
 		</div>
 	</div>
+	<div class="play-ui">
+		<button class="play-btn btn hidden" id="play_btn" type="button" title="Walk around inside your generated world">
+			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg>
+			<span>Play</span>
+		</button>
+		<button class="exit-play-btn btn btn-square" id="exit_play_btn" type="button" aria-label="Exit play mode" title="Back to editing">
+			<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6l-12 12"></path><path d="M6 6l12 12"></path></svg>
+		</button>
+		<div class="body-chip" id="body_chip" title="Drag me onto the ground to start playing">
+			<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="6" r="3"></circle><path d="M12 9v7"></path><path d="M9 12h6"></path><path d="M9 20l3 -4l3 4"></path></svg>
+			<span>Drag me in</span>
+		</div>
+		<div class="play-hint" id="play_hint">Drag to look &middot; WASD move &middot; Space jump &middot; Shift sprint</div>
+	</div>
 	<script type="module" src="/scripts/renderer.js"></script>
 </body>
 </html>

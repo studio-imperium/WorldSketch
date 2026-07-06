@@ -842,3 +842,176 @@ input[type="color"] {
 .settings-item.active {
 	background: color-mix(in srgb, #b8ff38 22%, #fff);
 }
+
+/* --- Play mode ------------------------------------------------------------- */
+
+.play-ui {
+	position: fixed;
+	inset: 0;
+	pointer-events: none;
+	z-index: 40;
+}
+
+.play-ui > * {
+	pointer-events: auto;
+}
+
+/* Hide the editor chrome while placing the body or playing. */
+body.is-placing .palette-stack,
+body.is-playing .palette-stack,
+body.is-placing .bottom-dock,
+body.is-playing .bottom-dock,
+body.is-placing .history-panel,
+body.is-playing .history-panel {
+	display: none;
+}
+
+/* Settings gear: hidden while placing, but kept during play so the Colliders (hitbox) and
+   Bounds overlays stay reachable. The editing/import/export items inside it are hidden. */
+body.is-placing .settings-menu {
+	display: none;
+}
+
+body.is-playing #floor_shot_btn,
+body.is-playing #upload_splats_label,
+body.is-playing #download_prims_btn,
+body.is-playing #upload_prims_label,
+body.is-playing #download_zip_btn,
+body.is-playing #upload_zip_label,
+body.is-playing #history_toggle_btn,
+body.is-playing #settings_popover .settings-divider {
+	display: none;
+}
+
+/* Play button: top-centre, shown only while editing a generated world (JS toggles .hidden). */
+.play-btn {
+	position: fixed;
+	top: 1rem;
+	left: 50%;
+	transform: translateX(-50%);
+	display: inline-flex;
+	align-items: center;
+	gap: 0.4rem;
+	padding: 0.5rem 1.1rem;
+	background: #232323;
+	color: #fff;
+	border: 0;
+	border-radius: 999px;
+	box-shadow: 0 0.4rem 1.2rem rgba(15, 23, 42, 0.22);
+	cursor: pointer;
+}
+
+.play-btn:hover {
+	background: #000;
+}
+
+.play-btn svg {
+	width: 1.05rem;
+	height: 1.05rem;
+	fill: currentColor;
+	stroke: none;
+}
+
+.play-btn.hidden,
+body.is-placing .play-btn,
+body.is-playing .play-btn {
+	display: none;
+}
+
+/* Exit button: top-right, only during placing/playing. */
+.exit-play-btn {
+	position: fixed;
+	top: 1rem;
+	right: 1rem;
+	display: none;
+	place-items: center;
+	width: 2.4rem;
+	height: 2.4rem;
+	background: rgba(20, 20, 20, 0.72);
+	color: #fff;
+	border: 0;
+	border-radius: 0.7rem;
+	cursor: pointer;
+}
+
+.exit-play-btn:hover {
+	background: rgba(0, 0, 0, 0.85);
+}
+
+.exit-play-btn svg {
+	width: 1.3rem;
+	height: 1.3rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 2;
+	stroke-linecap: round;
+}
+
+body.is-placing .exit-play-btn,
+body.is-playing .exit-play-btn {
+	display: grid;
+}
+
+/* Body chip: draggable figure, only while placing. */
+.body-chip {
+	position: fixed;
+	bottom: 2.2rem;
+	left: 50%;
+	transform: translateX(-50%);
+	display: none;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.2rem;
+	padding: 0.9rem 1.3rem;
+	background: #fff;
+	border: 2px dashed #232323;
+	border-radius: 1rem;
+	box-shadow: 0 0.5rem 1.4rem rgba(15, 23, 42, 0.2);
+	cursor: grab;
+	touch-action: none;
+	user-select: none;
+}
+
+.body-chip:active {
+	cursor: grabbing;
+}
+
+.body-chip svg {
+	width: 2.2rem;
+	height: 2.2rem;
+	fill: none;
+	stroke: #4f9dff;
+	stroke-width: 1.6;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.body-chip span {
+	font-size: 0.78rem;
+	color: #69717d;
+}
+
+body.is-placing .body-chip {
+	display: flex;
+}
+
+/* Controls hint: bottom-centre, only while playing. Purely informational, so it never
+   swallows look-drag clicks that start over it. */
+.play-hint {
+	position: fixed;
+	bottom: 1.2rem;
+	left: 50%;
+	transform: translateX(-50%);
+	display: none;
+	pointer-events: none;
+	padding: 0.4rem 0.9rem;
+	background: rgba(20, 20, 20, 0.6);
+	color: #fff;
+	font-size: 0.8rem;
+	border-radius: 999px;
+	white-space: nowrap;
+}
+
+body.is-playing .play-hint {
+	display: block;
+}
