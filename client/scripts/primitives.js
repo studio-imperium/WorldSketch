@@ -2,30 +2,69 @@ import * as THREE from "three"
 
 const colors = {
 	box: "#9b9b9b",
-	sphere: "#8b8175",
-	cylinder: "#7d684d",
-	cone: "#8e826a",
 }
 
 export function createPrimitive(type, id, seed = {}) {
+	type = "box"
 	const baseColor = seed.color ?? colors[type]
 	const material = new THREE.MeshStandardMaterial({
 		color: baseColor,
 		roughness: 0.86,
 		metalness: 0,
+		// Push the faces a hair deeper in the depth buffer so the edge outlines (plain lines,
+		// unaffected by polygon offset) always render crisply on top instead of stippling.
+		polygonOffset: true,
+		polygonOffsetFactor: 1,
+		polygonOffsetUnits: 1,
 	})
-	const mesh = new THREE.Mesh(geometryFor(type), material)
+	const mesh = new THREE.Mesh(geometryFor(), material)
 	mesh.userData = { id, type, locked: Boolean(seed.locked), baseColor: material.color.getHexString() }
 	mesh.position.fromArray(seed.position ?? [0, 0.5, 0])
 	mesh.rotation.fromArray(seed.rotation ?? [0, 0, 0])
-	// `scaleFactor` uniformly scales the type's default scale, so it preserves
-	// per-type aspect ratios (e.g. the cylinder's 1:2:1). An explicit `seed.scale`
-	// still wins outright — it's used when reloading saved primitives.
-	mesh.scale.fromArray(seed.scale ?? defaultScale(type).map((v) => v * (seed.scaleFactor ?? 1)))
+	// An explicit `seed.scale` wins outright; it is used when reloading saved primitives.
+	mesh.scale.fromArray(seed.scale ?? defaultScale().map((v) => v * (seed.scaleFactor ?? 1)))
+	addEdgeOutline(mesh, baseColor)
 	return mesh
 }
 
-export function createSelectionOutline(mesh, color = 0xffd400) {
+// --- Edge outlines ------------------------------------------------------------
+// Every block-out mesh carries a line outline on its edges, tinted to the mesh's own
+// base colour at 70% brightness, so blocks and floor tiles read as distinct volumes.
+// The outline is a child of its mesh (it follows moves/scales/rolls for free) and is
+// flagged with userData.isEdgeOutline so captures and hide-paths can switch it off.
+
+const EDGE_DARKEN = 0.7 // "30% darker" than the base colour
+
+export function edgeOutlineColor(baseColor) {
+	const color = new THREE.Color(baseColor)
+	color.convertLinearToSRGB() // darken in display space so the 30% matches what the eye sees
+	color.multiplyScalar(EDGE_DARKEN)
+	color.convertSRGBToLinear()
+	return color
+}
+
+export function addEdgeOutline(mesh, baseColor, { threshold = 1 } = {}) {
+	const edges = new THREE.LineSegments(
+		new THREE.EdgesGeometry(mesh.geometry, threshold),
+		new THREE.LineBasicMaterial({ color: edgeOutlineColor(baseColor) }),
+	)
+	edges.name = "edge_outline"
+	edges.userData.isEdgeOutline = true
+	mesh.add(edges)
+	return edges
+}
+
+export function updateEdgeOutlineColor(mesh, baseColor) {
+	const edges = mesh?.children.find(child => child.userData.isEdgeOutline)
+	if (edges) edges.material.color.copy(edgeOutlineColor(baseColor))
+}
+
+export function setEdgeOutlineVisible(mesh, visible) {
+	const edges = mesh?.children.find(child => child.userData.isEdgeOutline)
+	if (edges) edges.visible = visible
+}
+
+export function createSelectionOutline(mesh, color = 0x5b6ee1) { // project accent (see renderer.js / styles.css)
 	const outline = new THREE.Mesh(
 		mesh.geometry.clone(),
 		new THREE.MeshBasicMaterial({
@@ -58,14 +97,10 @@ export function disposeObject(object) {
 	object.removeFromParent()
 }
 
-function geometryFor(type) {
-	if (type === "sphere") return new THREE.SphereGeometry(0.5, 32, 16)
-	if (type === "cylinder") return new THREE.CylinderGeometry(0.5, 0.5, 1, 32)
-	if (type === "cone") return new THREE.ConeGeometry(0.5, 1, 32)
+function geometryFor() {
 	return new THREE.BoxGeometry(1, 1, 1)
 }
 
-function defaultScale(type) {
-	if (type === "cylinder") return [1, 2, 1]
+function defaultScale() {
 	return [1, 1, 1]
 }

@@ -75,6 +75,255 @@ button {
 	display: none !important;
 }
 
+/* Build / View tabs: Build shows the editable block-out, View shows the generated
+   splats. The editing tools only exist in Build (see body.tab-view below). */
+.view-tabs {
+	position: absolute;
+	top: 1rem;
+	left: 50%;
+	transform: translateX(-50%);
+	display: flex;
+	gap: 0.2rem;
+	padding: 0.3rem;
+	background: #fff;
+	border: 1px solid rgba(15, 23, 42, 0.08);
+	border-radius: 0.85rem;
+	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
+}
+
+.view-tab {
+	border: 0;
+	background: transparent;
+	padding: 0.42rem 1.15rem;
+	border-radius: 0.6rem;
+	color: #69717d;
+	font-weight: 500;
+	cursor: pointer;
+}
+
+.view-tab:hover {
+	background: #f1f3f5;
+	color: #1f2328;
+}
+
+.view-tab.active {
+	background: #5b6ee1; /* THE project accent — single colour for every accent, also in renderer.js */
+	color: #fff;
+}
+
+.view-tab:disabled {
+	cursor: default;
+}
+
+.view-tab:disabled:not(.is-loading) {
+	opacity: 0.35; /* stage not unlocked yet */
+}
+
+/* In Draw, the prompt bar only appears once something has been sketched. */
+body.tab-draw.sketch-empty .chat-dock {
+	display: none;
+}
+
+/* Splat generation in flight: the View tab shows a spinner and can't be clicked. */
+.view-tab.is-loading {
+	position: relative;
+	color: transparent;
+}
+
+.view-tab.is-loading::after {
+	content: "";
+	position: absolute;
+	inset: 0;
+	margin: auto;
+	width: 1rem;
+	height: 1rem;
+	border-radius: 50%;
+	border: 2px solid rgba(91, 110, 225, 0.3);
+	border-top-color: #5b6ee1;
+	animation: view-tab-spin 0.8s linear infinite;
+}
+
+@keyframes view-tab-spin {
+	to { transform: rotate(360deg); }
+}
+
+/* View tab shows ONLY the tabs — no editing tools, no prompt bar. */
+body.tab-view .palette-stack,
+body.tab-view .tool-dock,
+body.tab-view .bottom-dock {
+	display: none;
+}
+
+/* Draw tab: a full-screen, pannable sketch canvas — the faint grid marks 16x16 plots.
+   Pen / eraser / grabber live in their own dock; colour + brush palettes are shared.
+   Enter (or the send arrow) generates the geometry. */
+body.tab-draw .tool-dock {
+	display: none;
+}
+
+.draw-dock {
+	display: none;
+	align-items: center;
+	justify-content: center;
+	gap: 0.2rem;
+	padding: 0.35rem;
+	border-radius: 0.85rem;
+	width: max-content;
+	max-width: 100%;
+	box-sizing: border-box;
+	margin: 0 auto;
+}
+
+body.tab-draw .draw-dock {
+	display: flex;
+}
+
+.draw-overlay {
+	position: fixed;
+	inset: 0;
+	display: none;
+	background: #fcfcfc;
+}
+
+body.tab-draw .draw-overlay {
+	display: block;
+}
+
+#draw_canvas {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	cursor: crosshair;
+	touch-action: none;
+	/* White paper + plot grid live in CSS (background-position pans with the canvas),
+	   so the bitmap holds only ink and the eraser can never cut into the paper. */
+	background-color: #ffffff;
+	background-image:
+		linear-gradient(rgba(91, 110, 225, 0.08) 1px, transparent 1px),
+		linear-gradient(90deg, rgba(91, 110, 225, 0.08) 1px, transparent 1px);
+}
+
+#draw_canvas.is-pan {
+	cursor: grab;
+}
+
+#draw_canvas.is-pan.is-dragging {
+	cursor: grabbing;
+}
+
+#draw_canvas.is-bucket {
+	cursor: cell;
+}
+
+/* No inline notifications/progress under the prompt bar — the disabled buttons and
+   the View tab's spinner carry the in-flight signal. */
+.gen-progress,
+.status {
+	display: none !important;
+}
+
+/* Frames: each tab keeps its own list of independent frames (sketches / builds /
+   splat worlds) on the left. Pipeline steps create frames instead of overwriting. */
+.frames-panel {
+	position: absolute;
+	left: 1rem;
+	top: 1rem;
+	width: 10.5rem;
+	padding: 0.45rem;
+	background: #fff;
+	border: 1px solid rgba(15, 23, 42, 0.08);
+	border-radius: 0.85rem;
+	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
+	display: flex;
+	flex-direction: column;
+	gap: 0.3rem;
+}
+
+.frames-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 0.1rem 0.3rem 0 0.45rem;
+	color: #69717d;
+	font-size: 0.78rem;
+	font-weight: 600;
+	text-transform: uppercase;
+	letter-spacing: 0.04em;
+}
+
+.frames-add {
+	border: 0;
+	background: transparent;
+	color: #69717d;
+	font-size: 1.1rem;
+	line-height: 1;
+	width: 1.6rem;
+	height: 1.6rem;
+	border-radius: 0.45rem;
+	cursor: pointer;
+}
+
+.frames-add:hover {
+	background: color-mix(in srgb, #5b6ee1 14%, #fff);
+	color: #1f2328;
+}
+
+.frames-list {
+	display: flex;
+	flex-direction: column;
+	gap: 0.15rem;
+	max-height: 50vh;
+	overflow-y: auto;
+}
+
+.frame-row {
+	display: flex;
+	align-items: center;
+	gap: 0.3rem;
+	border: 0;
+	background: transparent;
+	border-radius: 0.55rem;
+	padding: 0.38rem 0.45rem;
+	color: #2f3337;
+	cursor: pointer;
+	text-align: left;
+}
+
+.frame-row:hover {
+	background: #f1f3f5;
+}
+
+.frame-row.active {
+	background: color-mix(in srgb, #5b6ee1 16%, #fff);
+	color: #1f2328;
+	font-weight: 600;
+}
+
+.frame-row .frame-name {
+	flex: 1;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+.frame-row .frame-del {
+	border: 0;
+	background: transparent;
+	color: #9aa1ab;
+	border-radius: 0.35rem;
+	width: 1.25rem;
+	height: 1.25rem;
+	line-height: 1;
+	cursor: pointer;
+	flex: none;
+}
+
+.frame-row .frame-del:hover {
+	background: rgba(15, 23, 42, 0.08);
+	color: #1f2328;
+}
+
 .ui {
 	position: fixed;
 	inset: 0;
@@ -132,14 +381,14 @@ button {
 }
 
 .viewer-ui .btn.primary {
-	background: #b8ff38;
-	color: #1f2328;
+	background: #5b6ee1;
+	color: #fff;
 	font-weight: 700;
 	text-transform: uppercase;
 }
 
 .viewer-ui .btn.primary:hover {
-	background: #a8ee2d;
+	background: #4a5cd0;
 }
 
 .viewer-ui .btn:disabled {
@@ -230,7 +479,7 @@ button {
 
 .brush-swatch:hover,
 .brush-swatch.active {
-	background: color-mix(in srgb, #b8ff38 28%, transparent) !important;
+	background: color-mix(in srgb, #5b6ee1 22%, transparent) !important;
 }
 
 .brush-swatch span {
@@ -245,6 +494,11 @@ button {
 	position: absolute;
 	left: 1rem;
 	top: 1rem;
+	display: none;
+}
+
+body.dev-controls-visible .settings-menu {
+	display: block;
 }
 
 .settings-btn {
@@ -356,7 +610,7 @@ button {
 .color-swatch:hover,
 .color-swatch.active,
 .add-color-swatch:hover {
-	background: color-mix(in srgb, #b8ff38 28%, transparent) !important;
+	background: color-mix(in srgb, #5b6ee1 22%, transparent) !important;
 }
 
 .color-swatch span {
@@ -587,7 +841,7 @@ input[type="color"] {
 }
 
 .tool-btn.active {
-	background: #e1e4e8 !important;
+	background: color-mix(in srgb, #5b6ee1 16%, #fff) !important;
 	color: #1f2328 !important;
 }
 
@@ -725,7 +979,7 @@ input[type="color"] {
 	align-items: center;
 	justify-content: center;
 	border-radius: 999px;
-	background: color-mix(in srgb, #b8ff38 38%, #fff);
+	background: color-mix(in srgb, #5b6ee1 30%, #fff);
 	color: #2f3337;
 	font-size: 0.7rem;
 	font-weight: 700;
@@ -854,5 +1108,5 @@ input[type="color"] {
 }
 
 .settings-item.active {
-	background: color-mix(in srgb, #b8ff38 22%, #fff);
+	background: color-mix(in srgb, #5b6ee1 18%, #fff);
 }

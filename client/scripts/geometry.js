@@ -2,8 +2,8 @@ import * as THREE from "three"
 
 // Object grouping + sizing for modular world generation.
 //
-// Blocks are snapped face-to-face, so a cluster of touching primitives is one
-// logical object (a whole house = walls + roof + door, all touching). We recover
+// A cluster of connected primitives is one logical object (a whole house = walls +
+// roof + door), where "connected" is general: face-snapped, touching, OR overlapping. We recover
 // those groups at generation time as connected components of the primitives whose
 // (slightly expanded) axis-aligned boxes overlap. The ground is NOT in this graph —
 // it is generated separately as the floor — so objects that merely rest on the

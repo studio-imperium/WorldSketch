@@ -31,6 +31,39 @@ export async function identifyObjects({ image, scene, count, output, signal }) {
 	}
 }
 
+// Scene planning: the server has Gemini turn a scene description — and optionally the
+// user's top-down sketch from the Draw tab — into a block-out plan the editor applies
+// directly. Returns { plots: [{ix,iz,height}], ground: "#hex", blocks: [{x,z,y,sx,sy,
+// sz,yaw,color}] }. Throws on failure — the caller surfaces it.
+export async function planScene({ prompt, image, signal }) {
+	const form = new FormData()
+	form.append("prompt", prompt ?? "")
+	if (image) form.append("image", image, "sketch.png")
+	const response = await fetch("/api/plan", { method: "POST", body: form, signal })
+	if (!response.ok) {
+		const message = await response.text()
+		throw new Error(message || `scene planning failed (${response.status})`)
+	}
+	return response.json()
+}
+
+// Deterministic sketch planning: the client numbers each stroke-object on the sketch;
+// Gemini designs each number's geometry in a LOCAL frame and the client places the
+// designs at the exact drawn positions. Returns { ground, objects: { "1": { label,
+// blocks: [{x,z,y,sx,sy,sz,yaw,color}] } } }.
+export async function planSketchObjects({ prompt, image, footprints, signal }) {
+	const form = new FormData()
+	form.append("prompt", prompt ?? "")
+	form.append("footprints", footprints ?? "")
+	form.append("image", image, "sketch.png")
+	const response = await fetch("/api/plan-objects", { method: "POST", body: form, signal })
+	if (!response.ok) {
+		const message = await response.text()
+		throw new Error(message || `sketch planning failed (${response.status})`)
+	}
+	return response.json()
+}
+
 // Allocate the outputs/NNNN folder for one world generation; every object + the
 // floor of that world are saved under it server-side.
 export async function newOutput() {

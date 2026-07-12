@@ -52,7 +52,7 @@ export async function captureWorldContext(renderer, scene, world, objects) {
 	if (spark) spark.visible = false
 	const overlays = []
 	scene.traverse(object => {
-		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront || object.userData.isGizmo) && object.visible) {
+		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isEdgeOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront || object.userData.isGizmo) && object.visible) {
 			overlays.push(object)
 			object.visible = false
 		}
@@ -191,7 +191,7 @@ async function captureSubject(renderer, scene, world, subject, view) {
 	// Hide the sky dome + any overlays so the background reads as pure black.
 	const overlays = []
 	scene.traverse(object => {
-		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront || object.userData.isGizmo) && object.visible) {
+		if ((object.userData.sky || object.userData.isSelectionOutline || object.userData.isEdgeOutline || object.userData.isDebugHelper || object.userData.isPreview || object.userData.isFront || object.userData.isGizmo) && object.visible) {
 			overlays.push(object)
 			object.visible = false
 		}
