@@ -56,6 +56,7 @@ func Config(w http.ResponseWriter, r *http.Request) {
 		"genConcurrency": config.EnvFloat("WS_GEN_CONCURRENCY", 4),
 		"object":         subjectClientConfig("object"),
 		"floor":          subjectClientConfig("floor"),
+		"scene":          subjectClientConfig("scene"),
 	})
 }
 
@@ -75,6 +76,7 @@ func subjectClientConfig(kind string) map[string]any {
 		"fitClampK":         config.SubjectEnvFloat(kind, "FIT_CLAMP_K", []string{"WS_FIT_CLAMP_K"}, 0),
 		"fitBboxPercentile": config.SubjectEnvFloat(kind, "FIT_BBOX_PERCENTILE", []string{"WS_FIT_BBOX_PERCENTILE"}, 0),
 		"fillOverscale":     config.SubjectEnvFloat(kind, "FILL_OVERSCALE", nil, 1.08),
+		"reliefDip":         config.SubjectEnvFloat(kind, "RELIEF_DIP", nil, 0.35),
 	}
 }
 
@@ -90,7 +92,7 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 
 	prompt := strings.TrimSpace(r.FormValue("prompt"))
 	kind := strings.ToLower(strings.TrimSpace(r.FormValue("kind")))
-	if kind != "floor" {
+	if kind != "floor" && kind != "scene" {
 		kind = "object"
 	}
 	groundColor := strings.TrimSpace(r.FormValue("ground_color"))
@@ -189,7 +191,7 @@ func FloorTexture(w http.ResponseWriter, r *http.Request) {
 	}
 
 	settings := config.SubjectImageEditSettings("floor")
-	promptText := prompts.FloorTexture(prompt, groundColor)
+	promptText := prompts.FloorTexture(prompt, groundColor, false)
 
 	tImage := time.Now()
 	edited := image
@@ -250,7 +252,13 @@ func Ground(w http.ResponseWriter, r *http.Request) {
 	if size := config.OpenAIGroundSize(r.FormValue("image_size")); size != "" {
 		settings.Size = size
 	}
+	// texture_only: generate the cohesive TOP-DOWN terrain texture and stop — no splat
+	// step. The client slices it per tile and reconstructs each slice separately.
+	textureOnly := config.ParseBoolDefault(r.FormValue("texture_only"), false)
 	promptText := prompts.Ground(prompt, groundColor, len(mask) > 0)
+	if textureOnly {
+		promptText = prompts.FloorTexture(prompt, groundColor, len(mask) > 0)
+	}
 
 	tImage := time.Now()
 	edited := image
@@ -266,6 +274,15 @@ func Ground(w http.ResponseWriter, r *http.Request) {
 		storage.SaveGeneration(dir, name, image, mask, edited, promptText)
 	}
 	imageDur := time.Since(tImage)
+
+	if textureOnly {
+		log.Printf("[timing] %-8s texture=%-7s tiles=%dx%d", name, imageDur.Round(time.Millisecond), cols, rows)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"image": base64.StdEncoding.EncodeToString(edited),
+		})
+		return
+	}
 
 	tripoSettings := config.SubjectTripoSettings("floor", "", "")
 	tripoSettings.Gaussians = config.GroundGaussians(cols * rows)

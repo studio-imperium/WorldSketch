@@ -1,8 +1,7 @@
 import * as THREE from "three"
 
-// Per-subject capture for modular world generation. Each object (and the floor) is
-// photographed ALONE on a pure-black background from a fixed pose, so TripoSplat lands
-// it in a consistent orientation and the client can seat it by bounding box alone.
+// Canonical isometric captures for TripoSplat. The current app path captures the whole
+// scene in one shot; the object/floor helpers remain for loading older saved sessions.
 
 const captureSize = 1024
 const background = new THREE.Color(0x000000)
@@ -36,6 +35,14 @@ export function captureFloor(renderer, scene, world, floorMeshes = null, box = n
 	const subject = floorMeshes ?? world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground]
 	const targetBox = box ?? world.footprintBox?.() ?? world.floorBox()
 	return captureSubject(renderer, scene, world, subject, isoCamera(targetBox))
+}
+
+// Capture the complete block-out — floor and every primitive — in ONE render. Unlike
+// the legacy per-subject helpers this deliberately skips the second material-map pass:
+// the returned guide is the sole image used by the scene-wide texture edit.
+export function captureWorld(renderer, scene, world, box) {
+	const floor = world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground]
+	return captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box), false)
 }
 
 // Capture the WHOLE world in context (every block-out object + the painted floor) from
@@ -229,7 +236,7 @@ export function unprojectGroundIso(source, cols, rows, dstW, dstH) {
 // black background, with the dedicated `view` camera. Everything else — other block-out
 // meshes, all splats, the sky dome, outlines, helpers, the placement preview — is hidden
 // so Tripo only sees the subject on black. The shared scene camera is never touched.
-async function captureSubject(renderer, scene, world, subject, view) {
+async function captureSubject(renderer, scene, world, subject, view, includeMaterialMap = true) {
 	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
 	const subjectSet = new Set(subject)
 
@@ -275,7 +282,7 @@ async function captureSubject(renderer, scene, world, subject, view) {
 		edge.geometry.dispose()
 		edge.removeFromParent()
 	}
-	const materialMap = await captureTarget(renderer, scene, view, target)
+	const materialMap = includeMaterialMap ? await captureTarget(renderer, scene, view, target) : null
 
 	restoreMaterials(swaps)
 	for (const object of overlays) object.visible = true
@@ -303,6 +310,10 @@ function applyFlatMaterials(meshes) {
 			side: THREE.DoubleSide,
 			depthTest: true,
 			depthWrite: true,
+			// The drawable ground sheet clips its undrawn (transparent) texels — carry the
+			// alpha test so the capture shows the painted silhouette on pure black, not a
+			// giant opaque square.
+			alphaTest: source?.alphaTest ?? 0,
 		})
 		swaps.push([mesh, original, mesh.material])
 	}

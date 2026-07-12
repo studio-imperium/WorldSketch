@@ -35,6 +35,19 @@ type TripoSettings struct {
 }
 
 func SubjectImageEditSettings(kind string) ImageEditSettings {
+	if kind == "scene" {
+		return ImageEditSettings{
+			Provider:      SubjectEnv(kind, "IMAGE_PROVIDER", []string{"WS_IMAGE_PROVIDER"}, "openai"),
+			GeminiModel:   SubjectEnv(kind, "GEMINI_IMAGE_MODEL", []string{"WS_GEMINI_IMAGE_MODEL"}, "gemini-2.5-flash-image"),
+			OpenAIModel:   SubjectEnv(kind, "IMAGE_MODEL", []string{"WS_IMAGE_MODEL"}, "gpt-image-1"),
+			Size:          SubjectEnv(kind, "IMAGE_SIZE", []string{"WS_IMAGE_SIZE"}, "1024x1024"),
+			Quality:       SubjectEnv(kind, "IMAGE_QUALITY", []string{"WS_IMAGE_QUALITY"}, "medium"),
+			Fidelity:      SubjectEnv(kind, "IMAGE_FIDELITY", []string{"WS_IMAGE_FIDELITY"}, "high"),
+			Background:    SubjectEnv(kind, "IMAGE_BACKGROUND", []string{"WS_IMAGE_BACKGROUND"}, "opaque"),
+			Format:        SubjectEnv(kind, "IMAGE_FORMAT", []string{"WS_IMAGE_FORMAT"}, "png"),
+			SkipImageEdit: SubjectSkipImageEdit(kind),
+		}
+	}
 	if kind == "floor" {
 		return ImageEditSettings{
 			Provider:      SubjectEnv(kind, "IMAGE_PROVIDER", []string{"WS_IMAGE_PROVIDER"}, "openai"),
@@ -76,6 +89,7 @@ func SubjectPaletteSettings(kind string) PaletteSettings {
 
 func SubjectTripoSettings(kind, stepsField, gaussiansField string) TripoSettings {
 	stepsDefault := "24"
+	gaussiansDefault := "32768"
 	stepsLegacy := []string{"WS_TRIPO_STEPS"}
 	guidanceDefault := "7"
 	guidanceLegacy := []string{"WS_TRIPO_GUIDANCE"}
@@ -84,11 +98,15 @@ func SubjectTripoSettings(kind, stepsField, gaussiansField string) TripoSettings
 		stepsLegacy = []string{"OBJECT_STEPS", "WS_TRIPO_STEPS"}
 		guidanceDefault = "3"
 		guidanceLegacy = []string{"OBJECT_GUIDANCE", "WS_TRIPO_GUIDANCE"}
+	} else if kind == "scene" {
+		// One reconstruction now carries the entire 16x16 world, so give it the full
+		// Gaussian budget that was previously spread across many subject calls.
+		gaussiansDefault = "262144"
 	}
 	return TripoSettings{
 		Steps:     ClampIntString(SubjectEnv(kind, "TRIPO_STEPS", stepsLegacy, stepsField), stepsDefault, 1, 64),
 		Guidance:  SubjectEnv(kind, "TRIPO_GUIDANCE", guidanceLegacy, guidanceDefault),
-		Gaussians: ClampIntString(SubjectEnv(kind, "TRIPO_GAUSSIANS", []string{"WS_TRIPO_GAUSSIANS"}, gaussiansField), "32768", 1024, 262144),
+		Gaussians: ClampIntString(SubjectEnv(kind, "TRIPO_GAUSSIANS", []string{"WS_TRIPO_GAUSSIANS"}, gaussiansField), gaussiansDefault, 1024, 262144),
 		Format:    SubjectEnv(kind, "TRIPO_FORMAT", []string{"WS_TRIPO_FORMAT"}, "splat"),
 	}
 }
@@ -229,6 +247,9 @@ func EnvMaybe(name string) (string, bool) {
 func SubjectPrefix(kind string) string {
 	if kind == "floor" {
 		return "WS_FLOOR_"
+	}
+	if kind == "scene" {
+		return "WS_SCENE_"
 	}
 	return "WS_OBJECT_"
 }

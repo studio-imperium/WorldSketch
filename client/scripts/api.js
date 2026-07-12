@@ -72,8 +72,8 @@ export async function newOutput() {
 	return response.json() // { index }
 }
 
-// Generate one subject (an object or the floor): re-texture its block-out capture and
-// reconstruct it with TripoSplat. Returns the raw .splat bytes.
+// Texture and reconstruct one capture (legacy object/floor or the current whole scene).
+// The whole-scene path performs one image edit followed by one TripoSplat call.
 export async function generateSubject({ prompt, kind, steps, gaussians, output, name, groundColor, label, colors, image, materialImage, skipImageEdit = false, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt ?? "")
@@ -150,6 +150,32 @@ export async function generateGround({ prompt, image, mask, groundColor, colors,
 		splat: base64ToBytes(json.splat),
 		imageBlob: new Blob([base64ToBytes(json.image || "")], { type: "image/png" }),
 	}
+}
+
+// ONE cohesive terrain TEXTURE for the whole footprint — no splat step. The client
+// slices the returned image per tile and reconstructs each slice as its own splat.
+export async function generateGroundTexture({ prompt, image, mask, groundColor, colors, cols, rows, imageSize, output, name, signal }) {
+	const form = new FormData()
+	form.append("prompt", prompt ?? "")
+	form.append("texture_only", "1")
+	if (groundColor) form.append("ground_color", groundColor)
+	if (colors && colors.length) form.append("colors", colors.join(","))
+	form.append("cols", String(cols ?? 1))
+	form.append("rows", String(rows ?? 1))
+	if (imageSize) form.append("image_size", imageSize)
+	if (output) form.append("output", output)
+	form.append("name", name || "floor")
+	form.append("image", image, "ground.png")
+	if (mask) form.append("mask", mask, "ground-mask.png")
+
+	const response = await fetch("/api/ground", { method: "POST", body: form, signal })
+	if (!response.ok) {
+		const message = await response.text()
+		throw new Error(message || `ground texture failed (${response.status})`)
+	}
+	const json = await response.json()
+	if (!json.image) throw new Error("ground texture returned no image")
+	return { imageBlob: new Blob([base64ToBytes(json.image)], { type: "image/png" }) }
 }
 
 function base64ToBytes(b64) {

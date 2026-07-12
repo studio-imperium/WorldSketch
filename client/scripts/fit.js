@@ -419,6 +419,9 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const targetCenterZ = (box.min.z + box.max.z) / 2
 	const posY = box.min.y + sy * seatStoredY
 	const yOffset = opts.yOffset ?? 0
+	// How far surface relief may dip BELOW the seated sheet before it counts as
+	// underground reconstruction noise (worn paths sit lower than the grass around them).
+	const reliefDip = Math.max(0.05, opts.reliefDip ?? 0.35)
 	const yaw = yawDeg ? new THREE.Quaternion().setFromAxisAngle(UP, (yawDeg * Math.PI) / 180) : IDENTITY_QUAT
 	const transformMatrix = new THREE.Matrix4().compose(new THREE.Vector3(), yaw, new THREE.Vector3(sx, -sy, sz))
 	const linear = matrix3FromMatrix4(transformMatrix)
@@ -442,8 +445,10 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		const nextY = posY + yOffset + transformedOffset.y
 		const nextZ = targetCenterZ + transformedOffset.z
 		// Floors: anything below floor level is underground and can never be visible —
-		// cull it outright. Above floor level Y is FREE (no clamp, no compression).
-		if (exactBounds && nextY < box.min.y + yOffset - 0.05) return
+		// cull it outright. `reliefDip` leaves headroom for SHALLOW surface relief (worn
+		// paths, ruts) that dips under the seated sheet without being underground junk.
+		// Above floor level Y is FREE (no clamp, no compression).
+		if (exactBounds && nextY < box.min.y + yOffset - reliefDip) return
 		// With clip boxes the fill-overscale overhang is CULLED (insideClip below), keeping
 		// interior gaussians at their true positions; clamping is only the fallback when
 		// there is nothing to cull against (edge strays pile onto the border instead).
