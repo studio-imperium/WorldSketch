@@ -7,21 +7,17 @@ import (
 )
 
 func Ground(scene, groundColor string, extending bool) string {
-	scene = strings.TrimSpace(scene)
-	if scene == "" {
-		scene = "a coherent stylized natural game environment"
-	}
-	ground := ""
-	if groundColor != "" {
-		ground = " The base ground colour is " + groundColor + "; keep that hue and material family (sandy/tan/brown stays sand or soil, green stays grass or moss)."
-	}
-	layout := " The painted floor design is a HARD LAYOUT CONSTRAINT, not a suggestion: preserve the exact positions, silhouettes, topology, curvature, width, and connectivity of all painted regions. Do not straighten, reroute, simplify, merge, split, rotate, resize, or invent terrain markings. A circular or looping river must remain circular/looping in the same place; a winding path must keep the same bends; islands, ponds, crossings, and branches must keep their exact relative layout. Only replace flat colours with matching terrain materials inside those same shapes."
-	base := "This is a flat, top-down view of ground terrain for Gaussian-splat reconstruction. Render a high-fidelity, photorealistic, evenly-lit terrain surface that FILLS the entire canvas edge to edge with NO padding, border, frame, vignette, or margin. The ground is ONE LEVEL flat surface at a single height — NO hills, mounds, dunes, slopes, ridges, banks, cliffs, terraces, or raised landforms; only a thin textured skin of natural surface detail (grass blades, moss, scattered pebbles, dirt, small cracks, twigs, leaves) and flush flat features (paths, rivers, and ponds sit level with the surrounding ground, never carved or raised)." + layout + " Use fully ambient illumination: no cast shadows, no directional sunlight, no dramatic lighting. The material and colour stay UNIFORM all the way to every edge so the terrain tiles seamlessly with no rim, fade, or detail bunching."
-	cont := ""
-	if extending {
-		cont = " IMPORTANT — this is an EXTENSION: the opaque (kept) part of the image is already-generated terrain that you must preserve unchanged. Paint ONLY the masked (empty) region, and make it a perfectly seamless CONTINUATION of the existing terrain across the boundary: identical materials, colours, lighting, texture grain, and scale, flowing across with NO visible seam, line, edge, or change in tone. Do NOT copy, repeat, or mirror the existing region — grow it naturally as if the whole ground had always been one continuous piece."
-	}
-	return base + ground + cont + " No walls, no sky, no buildings, no objects, no UI, no text, no camera-angle change. Scene context: " + scene
+	// scene = strings.TrimSpace(scene)
+	// if scene == "" {
+	// 	scene = "a coherent stylized natural game environment"
+	// }
+	// layout := " The painted floor design is a HARD LAYOUT CONSTRAINT, not a suggestion: preserve the exact positions, silhouettes, topology, curvature, width, and connectivity of all painted regions. Do not straighten, reroute, simplify, merge, split, rotate, resize, or invent terrain markings. A circular or looping river must remain circular/looping in the same place; a winding path must keep the same bends; islands, ponds, crossings, and branches must keep their exact relative layout. Only replace flat colours with matching terrain materials inside those same shapes."
+	// base := "This is a flat, top-down view of ground terrain for Gaussian-splat reconstruction. Render a high-fidelity, photorealistic, evenly-lit terrain surface that FILLS the entire canvas edge to edge with NO padding, border, frame, vignette, or margin. The ground is ONE LEVEL flat surface at a single height — NO hills, mounds, dunes, slopes, ridges, banks, cliffs, terraces, or raised landforms; only a thin textured skin of natural surface detail (grass blades, moss, scattered pebbles, dirt, small cracks, twigs, leaves) and flush flat features (paths, rivers, and ponds sit level with the surrounding ground, never carved or raised)." + layout + " Use fully ambient illumination: no cast shadows, no directional sunlight, no dramatic lighting. The material and colour stay UNIFORM all the way to every edge so the terrain tiles seamlessly with no rim, fade, or detail bunching."
+	// cont := ""
+	// if extending {
+	// 	cont = " IMPORTANT — this is an EXTENSION: the opaque (kept) part of the image is already-generated terrain that you must preserve unchanged. Paint ONLY the masked (empty) region, and make it a perfectly seamless CONTINUATION of the existing terrain across the boundary: identical materials, colours, lighting, texture grain, and scale, flowing across with NO visible seam, line, edge, or change in tone. Do NOT copy, repeat, or mirror the existing region — grow it naturally as if the whole ground had always been one continuous piece."
+	// }
+	return "interpret this colored plot as a floor terrain plot, should be a square plot from isometric view. Keep the EXACT same isometric camera angle and the plot's exact position, size, and diamond silhouette in frame as the input image — repaint only the plot's surface, in place. No large details like trees or anything, just small things like grass and pebbles are allowed. in a polished hand-painted stylized isometric game-art style — semi-realistic yet clearly stylized, richly detailed, with soft warm painted lighting, clean readable silhouettes, saturated natural colors, and crisp storybook charm, like a high-quality cozy fantasy builder/RPG game asset. The plot surface is a seamless ground TEXTURE: every pixel within the plot must be painted terrain — absolutely no white background, empty margins, or grass clumps floating on white — with the ground continuing uniformly to the plot's four edges. The area outside the plot stays pure black."
 }
 
 // Plan asks the model to act as a level designer: turn a scene description — and
@@ -57,7 +53,7 @@ func Plan(scene string, hasSketch bool) string {
 func PlanObjects(scene, footprints string) string {
 	return "You are designing block-out geometry for a 3D world editor; y is UP. The attached image is the user's TOP-DOWN SKETCH map; the faint grey grid squares are 16x16-unit plots. Each distinct drawn object is tagged with a numbered pink circle just above it.\n" +
 		"The user describes the sketch as: \"" + scene + "\".\n" +
-		"For EACH numbered object: identify the concrete thing it depicts (judge by its drawn shape, its ink colours, and the description), then design it as 1 to 8 axis-aligned boxes forming ONE connected structure (boxes must touch or overlap so they read as a single asset: a tree = trunk box + canopy boxes, a cabin = walls + overhanging roof + door slab).\n" +
+		"For EACH numbered object: identify the concrete thing it depicts (judge by its drawn shape, its ink colours, and the description), then design it as 6 to 12 axis-aligned boxes forming ONE connected structure — AT LEAST 6 boxes per object, never a minimal 1-2 box blob; use the extra boxes for real form and silhouette (a tree = trunk + several stacked/offset canopy boxes; a cabin = walls + overhanging roof slabs + door + chimney; a well = ring + posts + crossbeam + roof). Boxes must touch or overlap so they read as a single asset.\n" +
 		"Coordinates are LOCAL to that object: x,z are the offsets of each box's CENTER from the object's footprint centre (0,0 is the object's middle). y is the box BOTTOM's height above the ground: 0 rests on the ground; to stack, y = sum of the sy of the boxes below. sx,sy,sz are sizes in units. yaw is degrees around vertical, usually 0.\n" +
 		"Drawn footprint sizes to roughly match: " + footprints + ". Heights should be sensible for the thing (a tree 3-6 tall, a hut 3-5).\n" +
 		"color: hex like \"#8f563b\", prefer this palette: #222034 #45283c #663931 #8f563b #df7126 #d9a066 #eec39a #fbf236 #99e550 #6abe30 #37946e #4b692f #524b24 #323c39 #3f3f74 #306082 #5b6ee1 #639bff #5fcde4 #cbdbfc #ffffff #9badb7 #847e87 #696a6a #595652 #76428a #ac3232 #d95763 #d77bba #8f974a #8a6f30.\n" +
@@ -124,7 +120,7 @@ func Object(scene, label string) string {
 	if label != "" {
 		subject = "a single " + label
 	}
-	return "Using the same structure and colors as Image 1, transform the structure into " + subject + ", photorealistic. The object must appear completely alone — no floor, no ground plane, no shadow beneath it, no background scenery — just the isolated object on a pure black background."
+	return "Using the same proportions and colors as Image 1, transform the geometric structure into " + subject + ", in a polished hand-painted stylized isometric game-art style — semi-realistic yet clearly stylized, richly detailed, with soft warm painted lighting, clean readable silhouettes, saturated natural colors, and crisp storybook charm, like a high-quality cozy fantasy builder/RPG game asset. Keep in mind input structure will be made of cubes, output should be interpreted into an actual object without the cube structure. The object must appear completely alone — no floor, no ground plane, no shadow beneath it, no background scenery — just the isolated object on a pure black background."
 }
 
 func Floor(scene, groundColor string) string {

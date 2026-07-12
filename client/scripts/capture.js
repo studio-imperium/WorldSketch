@@ -157,6 +157,74 @@ function worldCamera(world, objects) {
 	return camera
 }
 
+// --- Isometric ground projection ---------------------------------------------------
+// The generated ground texture is a TOP-DOWN image, but TripoSplat reconstructs far more
+// reliably from the same isometric pose the objects are captured from. An orthographic
+// iso view of a flat ground plane is a plain 2D affine map, so the top-down image (and
+// its outpaint mask) can be projected into the iso pose — and the model's iso result
+// un-projected back to top-down for the outpaint master — without touching the 3D scene.
+
+// Affine [a,b,c,d,e,f] mapping top-down image pixels (srcW x srcH covering a cols x rows
+// plot footprint; world +X = image right, +Z = image down) onto iso-view canvas pixels.
+function groundIsoMatrix(cols, rows, srcW, srcH, dstW, dstH) {
+	const eye = new THREE.Vector3().setFromSpherical(new THREE.Spherical(1, ISO_PHI, ISO_THETA))
+	if (MIRROR_CAPTURE_X) eye.x = -eye.x // the same mirror every subject capture uses
+	const right = new THREE.Vector3(0, 1, 0).cross(eye).normalize() // camera X in world space
+	const up = new THREE.Vector3().crossVectors(eye, right) // camera Y (screen up) in world space
+	const kx = cols / srcW // world-units-per-pixel; only the cols:rows aspect matters
+	const kz = rows / srcH
+	// Projected extents of the footprint rectangle -> scale that fits it with a small margin.
+	const uExt = Math.abs(cols * right.x) + Math.abs(rows * right.z)
+	const vExt = Math.abs(cols * up.x) + Math.abs(rows * up.z)
+	const k = 0.96 * Math.min(dstW / uExt, dstH / vExt)
+	const a = k * right.x * kx
+	const b = -k * up.x * kx // canvas Y grows down, screen-up grows up
+	const c = k * right.z * kz
+	const d = -k * up.z * kz
+	return [a, b, c, d, dstW / 2 - (a * srcW + c * srcH) / 2, dstH / 2 - (b * srcW + d * srcH) / 2]
+}
+
+// Top-down ground image -> iso view on a pure black background (the pose Tripo expects).
+export function projectGroundIso(source, cols, rows, dstW, dstH) {
+	const canvas = document.createElement("canvas")
+	canvas.width = dstW
+	canvas.height = dstH
+	const ctx = canvas.getContext("2d")
+	ctx.fillStyle = "#000"
+	ctx.fillRect(0, 0, dstW, dstH)
+	ctx.setTransform(...groundIsoMatrix(cols, rows, source.width, source.height, dstW, dstH))
+	ctx.drawImage(source, 0, 0)
+	return canvas
+}
+
+// Outpaint mask, same projection. Mask semantics: OPAQUE = preserve, TRANSPARENT = repaint.
+// Everything OUTSIDE the projected plot stays opaque so the model leaves the black
+// surround alone; inside, the source mask's keep/repaint regions map through unchanged.
+export function projectGroundMaskIso(mask, cols, rows, dstW, dstH) {
+	const canvas = document.createElement("canvas")
+	canvas.width = dstW
+	canvas.height = dstH
+	const ctx = canvas.getContext("2d")
+	ctx.fillStyle = "#fff"
+	ctx.fillRect(0, 0, dstW, dstH)
+	ctx.setTransform(...groundIsoMatrix(cols, rows, mask.width, mask.height, dstW, dstH))
+	ctx.clearRect(0, 0, mask.width, mask.height) // punch out the plot, then let the mask fill it back
+	ctx.drawImage(mask, 0, 0)
+	return canvas
+}
+
+// Iso ground image -> top-down (the inverse affine), for the outpaint master composite.
+export function unprojectGroundIso(source, cols, rows, dstW, dstH) {
+	const canvas = document.createElement("canvas")
+	canvas.width = dstW
+	canvas.height = dstH
+	const ctx = canvas.getContext("2d")
+	const m = groundIsoMatrix(cols, rows, dstW, dstH, source.width, source.height)
+	ctx.setTransform(new DOMMatrix(m).inverse())
+	ctx.drawImage(source, 0, 0)
+	return canvas
+}
+
 // Render a guide (with edge lines) + a flat material-ID map of `subject` alone, on a
 // black background, with the dedicated `view` camera. Everything else — other block-out
 // meshes, all splats, the sky dome, outlines, helpers, the placement preview — is hidden

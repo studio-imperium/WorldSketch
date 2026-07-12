@@ -2,7 +2,7 @@ import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { zip, unzip } from "fflate"
 import { getConfig, newOutput, generateSubject, generateGround, identifyObjects, planScene, planSketchObjects } from "/scripts/api.js"
-import { captureObject, captureFloor, captureWorldContext, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
+import { captureObject, captureFloor, captureWorldContext, projectGroundIso, projectGroundMaskIso, unprojectGroundIso, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
 import { fitSplatToBox, ensureSplatEditBase, applySplatEditTransform } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { addEdgeOutline, clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
@@ -91,6 +91,8 @@ let selectedPrimitive = null
 let placementPreview = null
 let drag = null
 let groundDeformDirty = false // a floor lift drag is in flight; deform the ground splat once per frame
+let pendingPlotHeight = null // latest floor-lift target { pid, height }; applied once per frame in animate
+let elevationDirty = false // curved-terrain previews need a refresh; coalesced per frame in animate
 let nextPrimitiveId = 1
 let generating = false
 let splatting = false // a SPLAT generation is in flight (drives the View tab's disabled+spinner gate)
@@ -441,6 +443,7 @@ class World {
 		if (!surface) return
 		const prev = tile.userData.baseColor ?? next
 		tile.userData.baseColor = next
+		tile.userData.paintVersion = (tile.userData.paintVersion || 0) + 1 // recolour redraws the paint canvas
 		updateEdgeOutlineColor(tile, `#${next}`)
 		const from = new THREE.Color(`#${prev}`)
 		const to = new THREE.Color(`#${next}`)
@@ -586,6 +589,7 @@ class World {
 		// not a transient curved-surface mesh (those are rebuilt on every height change).
 		const paintTarget = hit.object.userData.tile ?? hit.object
 		;(paintTarget.userData.paintedColors ??= new Set()).add(activeColor)
+		paintTarget.userData.paintVersion = (paintTarget.userData.paintVersion || 0) + 1 // invalidate the snapshot paint cache
 		const { canvas, ctx, texture } = surface
 		const px = uv.x * canvas.width
 		const py = (1 - uv.y) * canvas.height
@@ -851,6 +855,7 @@ function startGizmoDrag(event, handle) {
 		startScalar = gizmoRayPoint.clone().sub(transformGizmo.position).dot(gizmoAxisWorld)
 	}
 	const subtree = floorDrag ? [] : objectClusterOf(selectedPrimitive)
+	beginBuildAction() // undo checkpoint: gizmo move / floor lift (popped again if nothing moves)
 	drag = {
 		mode: "gizmo",
 		pointerId: event.pointerId,
@@ -863,6 +868,7 @@ function startGizmoDrag(event, handle) {
 		subtree,
 		startPositions: [selectedPrimitive, ...subtree].map(mesh => mesh.position.clone()),
 		startPlotHeight: floorDrag ? (plotHeights.get(selectedPrimitive.userData.plotId) || 0) : 0,
+		actionPushed: true,
 	}
 	renderer.domElement.setPointerCapture(event.pointerId)
 	renderer.domElement.classList.add("is-dragging")
@@ -877,8 +883,10 @@ function startGizmoDrag(event, handle) {
 function startFloorLift(event, tile) {
 	selectPrimitive(tile)
 	if (!selectedPrimitive?.userData.isGround) return false
+	beginBuildAction() // undo checkpoint: floor lift (popped again if nothing moves)
 	drag = {
 		mode: "gizmo",
+		actionPushed: true,
 		pointerId: event.pointerId,
 		mesh: selectedPrimitive,
 		axis: "y",
@@ -906,10 +914,12 @@ function bindPrimitiveTreeToCurrentPlot(mesh, subtree) {
 }
 
 function updateGizmoDrag(event) {
+	drag.mutated = true // the checkpoint pushed at drag start is now earned
 	if (drag.mesh.userData.isGround) {
-		setPlotHeight(drag.mesh.userData.plotId ?? 0, drag.startPlotHeight + (drag.startY - event.clientY) * 0.03)
+		// Only the LATEST target matters — pointer events fire far above frame rate, so
+		// the height change (cluster reseat + terrain refresh) applies once per frame.
+		pendingPlotHeight = { pid: drag.mesh.userData.plotId ?? 0, height: drag.startPlotHeight + (drag.startY - event.clientY) * 0.03 }
 		groundDeformDirty = true // deform the generated ground splat live (coalesced per frame in animate)
-		updateTransformGizmo()
 		return
 	}
 	if (!intersectGizmoPlane(event, gizmoRayPoint)) return
@@ -925,7 +935,14 @@ function updateGizmoDrag(event) {
 
 function finishGizmoDrag() {
 	if (!drag || drag.mode !== "gizmo") return
-	if (drag.mesh.userData.isGround) applyGroundDeform()
+	if (drag.mesh.userData.isGround) {
+		if (pendingPlotHeight) { // flush the last coalesced height before the final deform
+			const p = pendingPlotHeight
+			pendingPlotHeight = null
+			setPlotHeight(p.pid, p.height)
+		}
+		applyGroundDeform()
+	}
 	else {
 		bindPrimitiveTreeToCurrentPlot(drag.mesh, drag.subtree)
 		syncGeneratedForPrimitive(drag.mesh)
@@ -1040,6 +1057,8 @@ function syncActiveColorFromSelection(mesh) {
 function applyColor(color) {
 	setActiveColorOnly(color)
 	if (selectedPrimitive) {
+		const current = `#${selectedPrimitive.userData.baseColor ?? selectedPrimitive.material.color.getHexString()}`
+		if (current.toLowerCase() !== color.toLowerCase()) beginBuildAction() // undo checkpoint: recolour
 		if (selectedPrimitive.userData.isGround) world.setGroundTileColor(selectedPrimitive, color)
 		else {
 			selectedPrimitive.material.color.set(color)
@@ -1356,8 +1375,10 @@ function startPrimitiveDrag(event, mesh, hit = null) {
 	if (mesh.userData.isGround || mesh.userData.locked) return
 	if (selectionTools.has(activeTool)) return
 	const worldPosition = mesh.getWorldPosition(new THREE.Vector3())
+	beginBuildAction() // undo checkpoint: scale / rotate (popped again if nothing moves)
 	drag = {
 		mode: activeTool === "rotate" ? "roll" : "scale",
+		actionPushed: true,
 		pointerId: event.pointerId,
 		mesh,
 		startX: event.clientX,
@@ -1434,6 +1455,7 @@ function setupScaleDrag(mesh, hit = null) {
 }
 
 function updatePrimitiveDrag(event) {
+	drag.mutated = true // the checkpoint pushed at drag start is now earned
 	if (drag.mode === "scale") {
 		updateScaleDrag(event)
 		return
@@ -1516,7 +1538,8 @@ function pointerScreenAngle(event, center) {
 // --- Paint ------------------------------------------------------------------
 
 function startPaint(event) {
-	drag = { mode: "paint", pointerId: event.pointerId }
+	beginBuildAction() // undo checkpoint: one paint stroke
+	drag = { mode: "paint", pointerId: event.pointerId, actionPushed: true, mutated: true }
 	renderer.domElement.setPointerCapture(event.pointerId)
 	paintAtEvent(event)
 }
@@ -1572,8 +1595,10 @@ function pointerDown(event) {
 
 	if (shapeTools.has(activeTool)) {
 		const hit = surfaceHit(event)
-		if (hit) focusPlot(world.addPrimitive(activeTool, hit).userData.plotId)
-		else startOrbit(event)
+		if (hit) {
+			beginBuildAction() // undo checkpoint: block placement
+			focusPlot(world.addPrimitive(activeTool, hit).userData.plotId)
+		} else startOrbit(event)
 		return
 	}
 
@@ -1586,6 +1611,7 @@ function pointerDown(event) {
 				selectPrimitive(hit.object)
 				return
 			}
+			beginBuildAction() // undo checkpoint: block removal
 			world.removePrimitive(hit.object)
 			return
 		}
@@ -1605,7 +1631,7 @@ renderer.domElement.addEventListener("pointermove", event => {
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
 	else if (drag && ["scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
-	else if (uiTab === "build") { updateGhostHover(event); updatePlacement(event) }
+	else if (uiTab === "build" && !generating) { updateGhostHover(event); updatePlacement(event) }
 })
 
 renderer.domElement.addEventListener("pointerup", event => {
@@ -1614,6 +1640,7 @@ renderer.domElement.addEventListener("pointerup", event => {
 		if (drag.mode === "orbit" && drag.pendingCell && Math.hypot(event.clientX - drag.downX, event.clientY - drag.downY) < 5) {
 			addPlotAt(drag.pendingCell) // a clean click on an empty cell → new plot
 		}
+		if (drag.actionPushed && !drag.mutated) activeBuildHistory()?.undo.pop() // drag never moved — drop its checkpoint
 		groundDeformDirty = false // finishGizmoDrag already applied the final deform
 		renderer.domElement.releasePointerCapture(event.pointerId)
 		drag = null
@@ -1791,6 +1818,52 @@ function sketchCellKey(p) {
 	return `${Math.floor(p.x / SKETCH_CELL)},${Math.floor(p.y / SKETCH_CELL)}`
 }
 
+// --- Draw undo/redo (per draw frame) --------------------------------------------
+// Command stack: each action knows how to undo and redo itself. The stack lives on
+// the ACTIVE draw frame, so history is localized per sketch (and per tab).
+
+function activeDrawHistory() {
+	const frame = frames.draw.find(f => f.id === activeFrameId.draw)
+	return frame ? (frame.history ??= { undo: [], redo: [] }) : null
+}
+
+function pushDrawAction(action) {
+	const h = activeDrawHistory()
+	if (!h) return
+	h.undo.push(action)
+	if (h.undo.length > 50) h.undo.shift()
+	h.redo.length = 0
+}
+
+function undoDraw() {
+	const h = activeDrawHistory()
+	if (!h?.undo.length) return
+	const action = h.undo.pop()
+	action.undo()
+	h.redo.push(action)
+	lassoSel = null
+	redrawSketch()
+}
+
+function redoDraw() {
+	const h = activeDrawHistory()
+	if (!h?.redo.length) return
+	const action = h.redo.pop()
+	action.redo()
+	h.undo.push(action)
+	lassoSel = null
+	redrawSketch()
+}
+
+function shiftStrokes(list, dx, dy) {
+	for (const s of list) {
+		for (const pt of s.pts) {
+			pt.x += dx
+			pt.y += dy
+		}
+	}
+}
+
 function pointInPolygon(p, poly) {
 	let inside = false
 	for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
@@ -1846,7 +1919,10 @@ function renderSketchInk(ctx, tx, ty, scale) {
 	ctx.globalCompositeOperation = "source-over"
 }
 
-function redrawSketch() {
+// Compositing is split from ink rendering so pointer-moves stay cheap: the ink layer
+// only re-renders every stroke when it actually must (pan, lasso move, undo-ish ops);
+// an in-flight pen stroke just appends its newest segment to the layer.
+function compositeSketch() {
 	if (!drawCtx) return
 	const w = els.drawCanvas.width
 	const h = els.drawCanvas.height
@@ -1859,10 +1935,6 @@ function redrawSketch() {
 		drawCtx.fillStyle = color
 		drawCtx.fillRect((cx * SKETCH_CELL + sketchPan.x) * sketchDpr, (cz * SKETCH_CELL + sketchPan.y) * sketchDpr, SKETCH_CELL * sketchDpr, SKETCH_CELL * sketchDpr)
 	}
-	inkCtx.setTransform(1, 0, 0, 1, 0, 0)
-	inkCtx.globalCompositeOperation = "source-over"
-	inkCtx.clearRect(0, 0, w, h)
-	renderSketchInk(inkCtx, sketchPan.x * sketchDpr, sketchPan.y * sketchDpr, sketchDpr)
 	drawCtx.drawImage(inkLayer, 0, 0)
 	// Lasso overlay (screen only — exports never include it).
 	const lassoPath = drawStroke?.mode === "lasso-draw" ? drawStroke.path : lassoSel?.path
@@ -1884,6 +1956,61 @@ function redrawSketch() {
 	document.body.classList.toggle("sketch-empty", sketchStrokes.length === 0 && sketchFills.size === 0)
 }
 
+function repaintInk() {
+	inkCtx.setTransform(1, 0, 0, 1, 0, 0)
+	inkCtx.globalCompositeOperation = "source-over"
+	inkCtx.clearRect(0, 0, inkLayer.width, inkLayer.height)
+	renderSketchInk(inkCtx, sketchPan.x * sketchDpr, sketchPan.y * sketchDpr, sketchDpr)
+}
+
+// Synchronous full redraw — for rare events (init, resize, frame switch, clear).
+function redrawSketch() {
+	if (!drawCtx) return
+	repaintInk()
+	compositeSketch()
+}
+
+// Pointer events fire at 120-250Hz; redraws coalesce to at most one per display frame.
+let sketchRafPending = false
+let sketchFullPending = false
+
+function scheduleSketch(full) {
+	if (full) sketchFullPending = true
+	if (sketchRafPending) return
+	sketchRafPending = true
+	requestAnimationFrame(() => {
+		sketchRafPending = false
+		if (sketchFullPending) {
+			sketchFullPending = false
+			repaintInk()
+		}
+		compositeSketch()
+	})
+}
+
+// Append just the newest piece of the in-flight stroke to the ink layer.
+function drawInkSegment(stroke, from, to) {
+	inkCtx.save()
+	inkCtx.setTransform(sketchDpr, 0, 0, sketchDpr, sketchPan.x * sketchDpr, sketchPan.y * sketchDpr)
+	inkCtx.globalCompositeOperation = stroke.tool === "eraser" ? "destination-out" : "source-over"
+	inkCtx.strokeStyle = stroke.color
+	inkCtx.fillStyle = stroke.color
+	inkCtx.lineWidth = stroke.width
+	inkCtx.lineCap = "round"
+	inkCtx.lineJoin = "round"
+	if (!to) {
+		inkCtx.beginPath()
+		inkCtx.arc(from.x, from.y, stroke.width / 2, 0, Math.PI * 2)
+		inkCtx.fill() // a tap leaves a dot
+	} else {
+		inkCtx.beginPath()
+		inkCtx.moveTo(from.x, from.y)
+		inkCtx.lineTo(to.x, to.y)
+		inkCtx.stroke()
+	}
+	inkCtx.restore()
+}
+
 function sketchWorldPoint(event) {
 	const rect = els.drawCanvas.getBoundingClientRect()
 	return { x: event.clientX - rect.left - sketchPan.x, y: event.clientY - rect.top - sketchPan.y }
@@ -1896,23 +2023,35 @@ els.drawCanvas?.addEventListener("pointerdown", event => {
 		els.drawCanvas.classList.add("is-dragging")
 	} else if (drawTool === "bucket") {
 		// Fill the clicked cell's background (drives that plot's floor colour on generate).
-		sketchFills.set(sketchCellKey(sketchWorldPoint(event)), activeColor)
-		redrawSketch()
+		const key = sketchCellKey(sketchWorldPoint(event))
+		const prev = sketchFills.get(key)
+		const next = activeColor
+		if (prev !== next) {
+			sketchFills.set(key, next)
+			pushDrawAction({
+				undo: () => (prev === undefined ? sketchFills.delete(key) : sketchFills.set(key, prev)),
+				redo: () => sketchFills.set(key, next),
+			})
+		}
+		scheduleSketch(false) // fills live in the composite pass, no ink repaint needed
 		return
 	} else if (drawTool === "lasso") {
 		const p = sketchWorldPoint(event)
 		if (lassoSel && pointInPolygon(p, lassoSel.path)) {
-			drawStroke = { mode: "lasso-move", pointerId: event.pointerId, last: p } // drag the captured ink
+			drawStroke = { mode: "lasso-move", pointerId: event.pointerId, last: p, origin: { x: p.x, y: p.y } } // drag the captured ink
 		} else {
 			lassoSel = null
 			drawStroke = { mode: "lasso-draw", pointerId: event.pointerId, path: [p] }
 		}
-		redrawSketch()
+		scheduleSketch(false)
 	} else {
 		const width = activeBrushScale * 18 * (drawTool === "eraser" ? 2.2 : 1)
-		drawStroke = { mode: "ink", pointerId: event.pointerId }
-		sketchStrokes.push({ tool: drawTool, color: activeColor, width, pts: [sketchWorldPoint(event)] })
-		redrawSketch()
+		const p = sketchWorldPoint(event)
+		const stroke = { tool: drawTool, color: activeColor, width, pts: [p] }
+		drawStroke = { mode: "ink", pointerId: event.pointerId, stroke }
+		sketchStrokes.push(stroke)
+		drawInkSegment(stroke, p, null) // incremental: only the dot, never a full repaint
+		scheduleSketch(false)
 	}
 	try {
 		els.drawCanvas.setPointerCapture(event.pointerId)
@@ -1924,8 +2063,10 @@ els.drawCanvas?.addEventListener("pointermove", event => {
 	if (drawStroke.mode === "pan") {
 		sketchPan.x = drawStroke.panX + (event.clientX - drawStroke.startX)
 		sketchPan.y = drawStroke.panY + (event.clientY - drawStroke.startY)
+		scheduleSketch(true) // the whole ink layer shifts with the pan
 	} else if (drawStroke.mode === "lasso-draw") {
 		drawStroke.path.push(sketchWorldPoint(event))
+		scheduleSketch(false) // overlay only — the ink is untouched
 	} else if (drawStroke.mode === "lasso-move") {
 		const p = sketchWorldPoint(event)
 		const dx = p.x - drawStroke.last.x
@@ -1941,14 +2082,37 @@ els.drawCanvas?.addEventListener("pointermove", event => {
 			pt.x += dx
 			pt.y += dy
 		}
+		scheduleSketch(true)
 	} else {
-		sketchStrokes.at(-1).pts.push(sketchWorldPoint(event))
+		const p = sketchWorldPoint(event)
+		drawInkSegment(drawStroke.stroke, drawStroke.stroke.pts.at(-1), p) // append only the new segment
+		drawStroke.stroke.pts.push(p)
+		scheduleSketch(false)
 	}
-	redrawSketch()
 })
 
 const endSketchStroke = event => {
 	if (!drawStroke || event.pointerId !== drawStroke.pointerId) return
+	if (drawStroke.mode === "ink") {
+		const stroke = drawStroke.stroke
+		pushDrawAction({
+			undo: () => {
+				const i = sketchStrokes.indexOf(stroke)
+				if (i >= 0) sketchStrokes.splice(i, 1)
+			},
+			redo: () => sketchStrokes.push(stroke),
+		})
+	} else if (drawStroke.mode === "lasso-move" && lassoSel) {
+		const dx = drawStroke.last.x - drawStroke.origin.x
+		const dy = drawStroke.last.y - drawStroke.origin.y
+		if (Math.abs(dx) + Math.abs(dy) > 0.01) {
+			const moved = [...lassoSel.strokes]
+			pushDrawAction({
+				undo: () => shiftStrokes(moved, -dx, -dy),
+				redo: () => shiftStrokes(moved, dx, dy),
+			})
+		}
+	}
 	if (drawStroke.mode === "lasso-draw" && drawStroke.path.length > 2) {
 		// Capture: a pen stroke joins the selection when most of it lies inside the loop.
 		const path = drawStroke.path
@@ -1963,7 +2127,7 @@ const endSketchStroke = event => {
 	}
 	drawStroke = null
 	els.drawCanvas.classList.remove("is-dragging")
-	redrawSketch()
+	scheduleSketch(true) // settle with one canonical full repaint
 }
 els.drawCanvas?.addEventListener("pointerup", endSketchStroke)
 els.drawCanvas?.addEventListener("pointercancel", endSketchStroke)
@@ -1971,6 +2135,20 @@ els.drawCanvas?.addEventListener("pointercancel", endSketchStroke)
 for (const button of els.drawToolButtons) button.addEventListener("click", () => setDrawTool(button.dataset.drawTool))
 
 els.drawClear?.addEventListener("click", () => {
+	if (sketchStrokes.length || sketchFills.size) {
+		const savedStrokes = [...sketchStrokes]
+		const savedFills = new Map(sketchFills)
+		pushDrawAction({
+			undo: () => {
+				sketchStrokes.push(...savedStrokes)
+				for (const [k, v] of savedFills) sketchFills.set(k, v)
+			},
+			redo: () => {
+				sketchStrokes.length = 0
+				sketchFills.clear()
+			},
+		})
+	}
 	sketchStrokes.length = 0
 	sketchFills.clear()
 	lassoSel = null
@@ -2295,17 +2473,71 @@ function snapshotBuildWorld() {
 		prims: serializePrimitives(),
 		tiles: world.groundTiles.map(tile => {
 			const c = cellOf(tile.userData.origin)
+			// Paint encodes are the expensive part of a snapshot — cache the dataURL per
+			// tile and only re-encode when the paint actually changed (paintVersion bumps).
+			const version = tile.userData.paintVersion || 0
+			if (tile.userData.paintCache?.version !== version) {
+				tile.userData.paintCache = { version, url: tile.userData.paint?.canvas.toDataURL("image/png") ?? null }
+			}
 			return {
 				ix: c.ix,
 				iz: c.iz,
 				plotId: tile.userData.plotId,
 				height: plotHeights.get(tile.userData.plotId) || 0,
 				baseColor: tile.userData.baseColor,
-				paint: tile.userData.paint?.canvas.toDataURL("image/png") ?? null,
+				paint: tile.userData.paintCache.url,
 			}
 		}),
 		baseGroundColor: world.baseGroundColor,
 		prompt: world.prompt,
+	}
+}
+
+// --- Build undo/redo (per build frame) ------------------------------------------
+// Snapshot-based: every mutating interaction checkpoints the whole block-out first
+// (cheap thanks to the paint cache); undo/redo swap whole snapshots. The stacks live
+// on the ACTIVE build frame, so history is localized per build (and per tab).
+
+let buildHistoryBusy = false
+
+function activeBuildHistory() {
+	const frame = frames.build.find(f => f.id === activeFrameId.build)
+	return frame ? (frame.history ??= { undo: [], redo: [] }) : null
+}
+
+// Checkpoint the current state before a mutation. Drags call this on pointer-down and
+// pop it again if nothing actually moved (see the pointerup handler).
+function beginBuildAction() {
+	const h = activeBuildHistory()
+	if (!h) return
+	h.undo.push(snapshotBuildWorld())
+	if (h.undo.length > 30) h.undo.shift()
+	h.redo.length = 0
+}
+
+async function undoBuild() {
+	const h = activeBuildHistory()
+	if (!h?.undo.length || buildHistoryBusy) return
+	buildHistoryBusy = true
+	try {
+		const snap = h.undo.pop()
+		h.redo.push(snapshotBuildWorld())
+		await applyBuildSnapshot(snap)
+	} finally {
+		buildHistoryBusy = false
+	}
+}
+
+async function redoBuild() {
+	const h = activeBuildHistory()
+	if (!h?.redo.length || buildHistoryBusy) return
+	buildHistoryBusy = true
+	try {
+		const snap = h.redo.pop()
+		h.undo.push(snapshotBuildWorld())
+		await applyBuildSnapshot(snap)
+	} finally {
+		buildHistoryBusy = false
 	}
 }
 
@@ -2340,6 +2572,10 @@ async function applyBuildSnapshot(snap) {
 				img.src = t.paint
 			})
 		}
+		// Seed the paint cache with the URL we already have — snapshots of an untouched
+		// restored tile never re-encode.
+		tile.userData.paintVersion = 1
+		tile.userData.paintCache = { version: 1, url: t.paint ?? null }
 	}
 	world.ground = world.groundTiles[0]
 	world.paint = world.ground.userData.paint
@@ -2492,6 +2728,13 @@ function hideProgress() {
 function syncGenerateButton() {
 	els.generate.disabled = generating
 	els.generate.classList.toggle("is-disabled", generating)
+	// Make the frozen state visible: not-allowed cursor over both canvases, and no
+	// "clickable" affordances left glowing (plot-grid hover, pointer cursor).
+	document.body.classList.toggle("is-generating", generating)
+	if (generating) {
+		clearGhostHover()
+		if (placementPreview) placementPreview.visible = false // no frozen ghost block mid-air
+	}
 	syncViewGate()
 }
 
@@ -2822,8 +3065,19 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 	await raw.initialized
 	const fit = fitSettingsFor(kind)
 	const isFloor = kind === "floor"
+	// Floors keep their natural height — no vertical compression. fit.js seats the ground
+	// sheet at floor level and culls everything below it, so the boxes here only bound
+	// X/Z; Y gets effectively unlimited headroom so the world-space clip cull never chops
+	// standing relief.
+	const FLOOR_HEADROOM = 1000
 	const fitBox = isFloor ? floorSeamBox(box) : box
-	const fitClipBoxes = isFloor ? floorSeamClipBoxes(clipBoxes ?? [box]) : null
+	if (isFloor) fitBox.max.y = fitBox.min.y + FLOOR_HEADROOM
+	const fitClipBoxes = isFloor
+		? floorSeamClipBoxes(clipBoxes ?? [box]).map(b => {
+			b.max.y = b.min.y + FLOOR_HEADROOM
+			return b
+		})
+		: null
 	const fitted = await fitSplatToBox(raw, fitBox, {
 		yawTurns,
 		yawDeg,
@@ -2994,6 +3248,7 @@ function buildGroundComposite(fp, size) {
 // interaction (building/painting/selecting on it), see focusPlot.
 function addPlotAt(cell) {
 	if (generating) return
+	beginBuildAction() // undo checkpoint: new plot
 	const plotId = ++plotSeq
 	world.addGroundTile(cell.ix, cell.iz, plotId)
 	updateGhostTiles() // the ghost on that side steps outward past the new tile
@@ -3085,6 +3340,10 @@ function updateGhostTiles() {
 
 // Hover highlight on the empty cell under the cursor.
 function updateGhostHover(event) {
+	if (generating) { // input is frozen — nothing should look clickable
+		clearGhostHover()
+		return
+	}
 	if (!plotGrid.plane) return
 	const hit = raycast(event, [plotGrid.plane])
 	const cell = hit ? gridCellAt(hit.point) : null
@@ -3162,7 +3421,7 @@ function buildCurvedTileGeometry(tile, lift) {
 	geometry.setAttribute("position", new THREE.Float32BufferAttribute(positions, 3))
 	geometry.setAttribute("uv", new THREE.Float32BufferAttribute(uvs, 2))
 	geometry.setIndex(indices)
-	geometry.computeVertexNormals()
+	// No normals: every consumer (slope preview, selection highlight) is unlit MeshBasic.
 	return geometry
 }
 
@@ -3190,14 +3449,39 @@ function makeGroundSlopePreview(tile) {
 }
 
 function updateGroundSlopePreview() {
-	for (const mesh of world.groundSlopePreviews) disposeObject(mesh)
+	if (!hasPlotElevation()) {
+		for (const mesh of world.groundSlopePreviews) disposeObject(mesh)
+		world.groundSlopePreviews = []
+		return
+	}
+	// Fast path (height drags): the tile set is unchanged, so update the existing
+	// geometries' heights IN PLACE instead of disposing and reallocating every mesh —
+	// this runs once per frame during a plot lift.
+	const previews = world.groundSlopePreviews
+	if (previews.length === world.groundTiles.length && previews.every((p, i) => p.userData.tile === world.groundTiles[i])) {
+		for (const preview of previews) {
+			const pos = preview.geometry.attributes.position
+			for (let i = 0; i < pos.count; i++) {
+				pos.setY(i, heightAt(pos.getX(i), pos.getZ(i)) + groundTopY + 0.035)
+			}
+			pos.needsUpdate = true
+			preview.geometry.computeBoundingSphere() // ground raycasts rely on it
+			const edges = preview.children.find(child => child.userData.isEdgeOutline)
+			if (edges) { // the plot-border outline follows the new heights
+				edges.geometry.dispose()
+				edges.geometry = new THREE.EdgesGeometry(preview.geometry, 15)
+			}
+			preview.visible = uiTab === "build"
+		}
+		return
+	}
+	// Slow path: the tile set changed — rebuild. EVERY tile gets its curved surface
+	// whenever any plot is elevated — including after the floor splat is baked. Build
+	// must always show the plots smoothly connected; the View tab hides these previews
+	// and shows the deformed floor splat instead. The curved mesh doubles as the ground
+	// raycast target so clicks land on the true surface.
+	for (const mesh of previews) disposeObject(mesh)
 	world.groundSlopePreviews = []
-	if (!hasPlotElevation()) return
-	// EVERY tile gets its curved surface whenever any plot is elevated — including after
-	// the floor splat is baked. Build must always show the plots smoothly connected (flat
-	// tiles at stepped heights read as broken, gap-riddled ground); the View tab hides
-	// these previews entirely and shows the deformed floor splat instead. The curved mesh
-	// doubles as the ground raycast target so clicks land on the true surface.
 	for (const tile of world.groundTiles) {
 		const preview = makeGroundSlopePreview(tile)
 		preview.visible = uiTab === "build" // View renders splats only
@@ -3317,7 +3601,7 @@ function setPlotHeight(pid, height) {
 		}
 	}
 	for (const g of world.generated) if (g.mesh.userData.genKind !== "floor") seatObjectOnGround(g.mesh)
-	updateElevationHandles()
+	elevationDirty = true // terrain preview refresh is coalesced to once per frame (animate)
 }
 
 // Generate the whole ground as ONE splat over the footprint bounding box, then slice it to the
@@ -3349,7 +3633,9 @@ async function generateRepeatedGround(groundPromptText, output) {
 		const fp = { minIx: c0.ix, maxIx: c0.ix, minIz: c0.iz, maxIz: c0.iz, cols: 1, rows: 1 }
 		const size = groundImageSize(1, 1)
 		const { canvas } = buildGroundComposite(fp, size)
-		const imageBlob = await canvasToBlob(canvas)
+		// Tripo gets the same isometric pose as every object capture (top-down sheets
+		// reconstruct unreliably); the composite itself stays top-down internally.
+		const imageBlob = await canvasToBlob(projectGroundIso(canvas, 1, 1, size.w, size.h))
 		const res = await generateGround({
 			prompt: groundPromptText, image: imageBlob, mask: null, groundColor: world.baseGroundColor,
 			colors: primitiveColors([tile0]), cols: 1, rows: 1, imageSize: size.label, output, name: "floor",
@@ -3368,7 +3654,9 @@ async function generateRepeatedGround(groundPromptText, output) {
 		}
 		world.groundGenerated()
 		try {
-			groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: 1, rows: 1, minIx: c0.ix, minIz: c0.iz }
+			// The result comes back in iso pose — un-project so the outpaint master stays top-down.
+			const topDown = unprojectGroundIso(await blobToImage(res.imageBlob), 1, 1, size.w, size.h)
+			groundMaster = { imageEl: topDown, cols: 1, rows: 1, minIx: c0.ix, minIz: c0.iz }
 		} catch { groundMaster = null }
 		return true
 	} catch (error) {
@@ -3381,8 +3669,8 @@ async function generateUnifiedGround(groundPromptText, output) {
 	const fp = footprint()
 	const size = groundImageSize(fp.cols, fp.rows)
 	const { canvas, mask } = buildGroundComposite(fp, size)
-	const imageBlob = await canvasToBlob(canvas)
-	const maskBlob = mask ? await canvasToBlob(mask) : null
+	const imageBlob = await canvasToBlob(projectGroundIso(canvas, fp.cols, fp.rows, size.w, size.h))
+	const maskBlob = mask ? await canvasToBlob(projectGroundMaskIso(mask, fp.cols, fp.rows, size.w, size.h)) : null
 	let groundColorHex = world.baseGroundColor
 	let groundColors = primitiveColors(world.groundTiles)
 	if (groundMaster?.imageEl) {
@@ -3404,7 +3692,8 @@ async function generateUnifiedGround(groundPromptText, output) {
 	splatStore.set("floor", res.splat)
 	world.groundGenerated()
 	try {
-		groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
+		const topDown = unprojectGroundIso(await blobToImage(res.imageBlob), fp.cols, fp.rows, size.w, size.h)
+		groundMaster = { imageEl: topDown, cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
 	} catch { groundMaster = null }
 	return true
 }
@@ -3420,8 +3709,8 @@ async function generateAddedPlotFloor(groundPromptText, output, newTiles) {
 	const fp = footprint()
 	const size = groundImageSize(fp.cols, fp.rows)
 	const { canvas, mask } = buildGroundComposite(fp, size) // mask preserves the existing terrain, outpaints the new tiles
-	const imageBlob = await canvasToBlob(canvas)
-	const maskBlob = mask ? await canvasToBlob(mask) : null
+	const imageBlob = await canvasToBlob(projectGroundIso(canvas, fp.cols, fp.rows, size.w, size.h))
+	const maskBlob = mask ? await canvasToBlob(projectGroundMaskIso(mask, fp.cols, fp.rows, size.w, size.h)) : null
 	// ONLY the new plot's own painted colours — the palette lock restricts the new region to these,
 	// so it keeps the design of the neighbour but the colours the user gave this plot.
 	const newColors = primitiveColors(newTiles)
@@ -3441,7 +3730,8 @@ async function generateAddedPlotFloor(groundPromptText, output, newTiles) {
 	splatStore.set(name, res.splat)
 	world.groundGenerated() // bake + hide the new tiles (existing tiles were already baked/hidden)
 	try {
-		groundMaster = { imageEl: await blobToImage(res.imageBlob), cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
+		const topDown = unprojectGroundIso(await blobToImage(res.imageBlob), fp.cols, fp.rows, size.w, size.h)
+		groundMaster = { imageEl: topDown, cols: fp.cols, rows: fp.rows, minIx: fp.minIx, minIz: fp.minIz }
 	} catch { /* keep the previous master */ }
 	return true
 }
@@ -3675,8 +3965,8 @@ function clearRawSplatPreview() {
 	}
 }
 
-// Point the camera at the exact stored center bounds. This does not alter, filter, cull,
-// rotate, translate, or scale the uploaded SplatMesh; it only makes native-scale files visible.
+// Point the camera at the exact stored center bounds (the upright flip is baked into
+// the gaussians before this runs, so the bounds are already right-side-up).
 function frameRawSplat(mesh) {
 	const bounds = new THREE.Box3()
 	let count = 0
@@ -3715,6 +4005,20 @@ async function viewRawSplat(file) {
 			theta: orbit.theta,
 			phi: orbit.phi,
 		}
+		// Turn the upload upright: stored splat files are Y-inverted vs the world. Bake a
+		// 180° X-rotation into the gaussians (a rotation, not a mirror — handedness kept),
+		// the same in-place mutation pattern the ground deformation uses.
+		{
+			const flip = new THREE.Quaternion(1, 0, 0, 0) // 180° about X
+			const packed = raw.packedSplats
+			packed?.forEachSplat((i, center, scales, quaternion, opacity, color) => {
+				center.set(center.x, -center.y, -center.z)
+				quaternion.premultiply(flip)
+				packed.setSplat(i, center, scales, quaternion, opacity, color)
+			})
+			if (packed) packed.needsUpdate = true
+		}
+
 		rawSplatPreview = raw
 		raw = null
 		world.group.visible = false
@@ -4384,6 +4688,18 @@ document.addEventListener("click", event => {
 })
 
 document.addEventListener("keydown", event => {
+	// Ctrl/Cmd+Z undoes, Ctrl+Y (or Ctrl/Cmd+Shift+Z) redoes — history is per tab (and
+	// per frame). Text inputs keep their native undo; View has nothing to undo.
+	const key = event.key.toLowerCase()
+	if ((event.ctrlKey || event.metaKey) && (key === "z" || key === "y")) {
+		if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return
+		event.preventDefault()
+		if (generating || drawStroke || drag) return
+		const isRedo = key === "y" || event.shiftKey
+		if (uiTab === "draw") isRedo ? redoDraw() : undoDraw()
+		else if (uiTab === "build") isRedo ? redoBuild() : undoBuild()
+		return
+	}
 	if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && (event.code === "Backquote" || event.key === "~")) {
 		event.preventDefault()
 		toggleDevControls()
@@ -4434,13 +4750,26 @@ window.addEventListener("resize", () => {
 })
 
 function animate() {
-	sky.position.copy(camera.position)
-	if (groundDeformDirty) { // live plot-lift feedback: reshape the ground splat at most once per frame
-		applyGroundDeform()
-		groundDeformDirty = false
+	// The Draw overlay covers the 3D viewport completely — skip all GPU work there
+	// (Spark otherwise re-sorts and draws every splat each frame for nothing).
+	if (uiTab !== "draw") {
+		sky.position.copy(camera.position)
+		if (pendingPlotHeight) { // floor-lift drags coalesce to one height change per frame
+			const p = pendingPlotHeight
+			pendingPlotHeight = null
+			setPlotHeight(p.pid, p.height)
+		}
+		if (elevationDirty) { // curved-terrain refresh, at most once per frame
+			elevationDirty = false
+			updateElevationHandles()
+		}
+		if (groundDeformDirty) { // live plot-lift feedback: reshape the ground splat at most once per frame
+			applyGroundDeform()
+			groundDeformDirty = false
+		}
+		updateTransformGizmo()
+		renderer.render(scene, camera)
 	}
-	updateTransformGizmo()
-	renderer.render(scene, camera)
 	requestAnimationFrame(animate)
 }
 

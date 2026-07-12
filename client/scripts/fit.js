@@ -391,9 +391,19 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	}
 	if (exactBounds) {
 		sx = effXFit
-		sy = yFit
 		sz = effZFit
+		// NO vertical compression for floors: Y keeps the reconstruction's natural
+		// (XZ-proportional) scale. Vertical bounding is handled by seating the ground
+		// SHEET at floor level and CULLING everything that lands below it (see the
+		// bake loop) — underground gaussians could never be visible anyway.
+		sy = 0.5 * (effXFit + effZFit)
 	}
+
+	// Floors seat the SHEET at floor level rather than the absolute lowest gaussian:
+	// stored Y is world-inverted, so the ~15% of content with storedY above this
+	// percentile is BELOW the sheet (underground reconstruction noise) and gets culled
+	// after the transform.
+	const seatStoredY = exactBounds ? percentile(keptY, 0.85) : bottomStoredY
 
 	// Compact survivors to the front of the packed buffer, baking the final fit into each
 	// gaussian center and ellipsoid. If a palette is given, recolour each kept gaussian
@@ -402,7 +412,7 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	let kept = 0
 	const targetCenterX = (box.min.x + box.max.x) / 2
 	const targetCenterZ = (box.min.z + box.max.z) / 2
-	const posY = box.min.y + sy * bottomStoredY
+	const posY = box.min.y + sy * seatStoredY
 	const yOffset = opts.yOffset ?? 0
 	const yaw = yawDeg ? new THREE.Quaternion().setFromAxisAngle(UP, (yawDeg * Math.PI) / 180) : IDENTITY_QUAT
 	const transformMatrix = new THREE.Matrix4().compose(new THREE.Vector3(), yaw, new THREE.Vector3(sx, -sy, sz))
@@ -426,9 +436,12 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		const nextX = targetCenterX + transformedOffset.x
 		const nextY = posY + yOffset + transformedOffset.y
 		const nextZ = targetCenterZ + transformedOffset.z
+		// Floors: anything below floor level is underground and can never be visible —
+		// cull it outright. Above floor level Y is FREE (no clamp, no compression).
+		if (exactBounds && nextY < box.min.y + yOffset - 0.05) return
 		center.set(
 			exactBounds ? Math.min(box.max.x, Math.max(box.min.x, nextX)) : nextX,
-			exactBounds ? Math.min(box.max.y + yOffset, Math.max(box.min.y + yOffset, nextY)) : nextY,
+			nextY,
 			exactBounds ? Math.min(box.max.z, Math.max(box.min.z, nextZ)) : nextZ,
 		)
 		if (!insideClip(center)) return

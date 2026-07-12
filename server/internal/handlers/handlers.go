@@ -476,8 +476,8 @@ func parseSketchObjectsPlan(raw string) (sketchObjectsPlan, error) {
 	total := 0
 	for n, obj := range plan.Objects {
 		blocks := obj.Blocks
-		if len(blocks) > 10 {
-			blocks = blocks[:10]
+		if len(blocks) > 12 { // prompt asks for 6-12 boxes per object
+			blocks = blocks[:12]
 		}
 		kept := blocks[:0]
 		for _, b := range blocks {

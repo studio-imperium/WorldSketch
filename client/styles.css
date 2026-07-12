@@ -75,6 +75,13 @@ button {
 	display: none !important;
 }
 
+/* While a generation is in flight the canvases take no input — say so with the cursor
+   (overrides every per-tool cursor variant). */
+body.is-generating #canvas canvas,
+body.is-generating #draw_canvas {
+	cursor: not-allowed !important;
+}
+
 /* Build / View tabs: Build shows the editable block-out, View shows the generated
    splats. The editing tools only exist in Build (see body.tab-view below). */
 .view-tabs {
@@ -164,14 +171,16 @@ body.tab-draw .tool-dock {
 .draw-dock {
 	display: none;
 	align-items: center;
-	justify-content: center;
 	gap: 0.2rem;
 	padding: 0.35rem;
 	border-radius: 0.85rem;
-	width: max-content;
-	max-width: 100%;
+	width: 100%; /* always exactly as wide as the prompt bar above it */
 	box-sizing: border-box;
-	margin: 0 auto;
+}
+
+/* Tools sit left, clear sits right — the flexible gap keeps the dock full-width. */
+.draw-dock .dock-divider {
+	margin-left: auto;
 }
 
 body.tab-draw .draw-dock {
