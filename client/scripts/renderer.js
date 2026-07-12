@@ -402,15 +402,6 @@ class World {
 
 	}
 
-	// Is there drawn ground under this UV of the sheet? (Alpha-gate for placement rays.)
-	groundInkAt(uv) {
-		if (!uv) return false
-		const { canvas, ctx } = this.paint
-		const px = Math.min(canvas.width - 1, Math.max(0, Math.floor(uv.x * canvas.width)))
-		const py = Math.min(canvas.height - 1, Math.max(0, Math.floor((1 - uv.y) * canvas.height)))
-		return ctx.getImageData(px, py, 1, 1).data[3] > 32
-	}
-
 	// World-space bounds of the DRAWN ground (null when nothing is drawn yet). Sampled
 	// from a downscaled alpha scan so it stays exact after erasing, and cheap enough to
 	// call per generation. Canvas x → world +X, canvas y → world +Z (top-down mapping).
@@ -1253,9 +1244,6 @@ function surfaceHit(event, exclude = null) {
 	const objects = world.raycastables().filter(mesh => !(skip?.has(mesh)) && !mesh.userData.isSelectionOutline)
 	const hit = raycast(event, objects)
 	if (!hit) return null
-	// The ground sheet only counts where ground has actually been DRAWN — the transparent
-	// void around the painting is not a surface (nothing can be placed on nothing).
-	if (hit.object.userData.isGroundSheet && !world.groundInkAt(hit.uv)) return null
 	const normal = hit.face?.normal ? hit.face.normal.clone() : new THREE.Vector3(0, 1, 0)
 	normalMatrix.getNormalMatrix(hit.object.matrixWorld)
 	normal.applyMatrix3(normalMatrix).normalize()
@@ -3112,6 +3100,9 @@ function segmentSceneSplat() {
 	const SKIN_FLATNESS = 0.45 // pancake test: thinnest axis under this fraction of the median axis
 	const SKIN_UPRIGHT = 0.75 // ...and lying flat (|vertical component of thin axis| above this) → ground skin, stays behind
 	const SKIN_BAND_PAD = 0.4 // how far above FLOOR_BAND the skin cull still applies
+	const BRIDGE_MIN_NEIGHBORS = 4 // bridge cutting: voxels with fewer in-blob neighbours are peelable skin/wisps; raise to cut thicker bridges, lower if single objects split apart
+	const BRIDGE_MIN_DENSITY = 8 // ...and voxels with fewer gaussians than this are peelable too: object surfaces pack tens per voxel, wispy grass bridges only a few
+	const CORE_MIN_VOXELS = 25 // a peeled component must be at least this many voxels to count as a separate object core
 
 	// Pass 1: positions + XZ bounds.
 	const n = packed.numSplats
@@ -3217,6 +3208,106 @@ function segmentSceneSplat() {
 			}
 		}
 	}
+	// Bridge cutting: two SEPARATE objects often flood-fill into one blob through a thin
+	// bridge — a chain of grass tufts between them, a contact seam, one diagonal voxel
+	// kiss. Bridge voxels have few in-blob neighbours; real surfaces are dense sheets.
+	// Peel the low-neighbour skin, find the fat CORES that remain, and if a blob holds
+	// two or more cores, grow them back over the peeled voxels (multi-source BFS) and
+	// split the blob along that watershed. Peeled remnants that reach no core rejoin
+	// whichever side claims them; sub-blobs that end up tiny fold into the ground later.
+	const blobVoxKeys = new Map() // blob id -> its voxel keys
+	for (const [key, v] of voxels) {
+		let arr = blobVoxKeys.get(v.blob)
+		if (!arr) blobVoxKeys.set(v.blob, arr = [])
+		arr.push(key)
+	}
+	const neighborKeys = v => {
+		const out = []
+		for (let dx = -1; dx <= 1; dx++) {
+			for (let dz = -1; dz <= 1; dz++) {
+				for (let dy = -1; dy <= 1; dy++) {
+					if (!dx && !dz && !dy) continue
+					out.push(((v.kx + dx) * 2048 + (v.kz + dz)) * 2048 + (v.ky + dy))
+				}
+			}
+		}
+		return out
+	}
+	let splits = 0
+	for (const [blobId, keys] of blobVoxKeys) {
+		if (blobs[blobId].count < MIN_BLOB || keys.length < CORE_MIN_VOXELS * 2) continue
+		const inBlob = new Set(keys)
+		// Peel: survivors need in-blob company AND real gaussian density. Thin chains fail
+		// the first test; wispy grass-bridge voxels (a handful of gaussians where object
+		// surfaces pack dozens) fail the second.
+		const survivors = new Set()
+		for (const key of keys) {
+			const v = voxels.get(key)
+			if (v.idx.length < BRIDGE_MIN_DENSITY) continue
+			let count = 0
+			for (const nk of neighborKeys(v)) if (inBlob.has(nk)) count++
+			if (count >= BRIDGE_MIN_NEIGHBORS) survivors.add(key)
+		}
+		// Cores = connected components of the survivors.
+		const coreOf = new Map()
+		const coreSizes = []
+		for (const key of survivors) {
+			if (coreOf.has(key)) continue
+			const label = coreSizes.length
+			coreSizes.push(0)
+			const stack = [key]
+			coreOf.set(key, label)
+			while (stack.length) {
+				const cur = stack.pop()
+				coreSizes[coreOf.get(cur)]++
+				for (const nk of neighborKeys(voxels.get(cur))) {
+					if (survivors.has(nk) && !coreOf.has(nk)) {
+						coreOf.set(nk, coreOf.get(cur))
+						stack.push(nk)
+					}
+				}
+			}
+		}
+		const bigCores = coreSizes.map((s, i) => (s >= CORE_MIN_VOXELS ? i : -1)).filter(i => i >= 0)
+		if (bigCores.length < 2) continue // one solid core (or none) — nothing to split
+		// Grow the big cores back over the whole blob: multi-source BFS, first come wins.
+		const owner = new Map()
+		const queue = []
+		const coreRank = new Map(bigCores.map((c, i) => [c, i]))
+		for (const [key, label] of coreOf) {
+			if (!coreRank.has(label)) continue
+			owner.set(key, coreRank.get(label))
+			queue.push(key)
+		}
+		for (let qi = 0; qi < queue.length; qi++) {
+			const cur = queue[qi]
+			for (const nk of neighborKeys(voxels.get(cur))) {
+				if (inBlob.has(nk) && !owner.has(nk)) {
+					owner.set(nk, owner.get(cur))
+					queue.push(nk)
+				}
+			}
+		}
+		// Relabel: rank 0 keeps this blob id, every further core becomes a new blob.
+		const newIds = bigCores.map((_, i) => (i === 0 ? blobId : blobs.push({ count: 0, cols: new Set() }) - 1))
+		for (const key of keys) {
+			const rank = owner.get(key) ?? 0
+			voxels.get(key).blob = newIds[rank]
+		}
+		splits += bigCores.length - 1
+	}
+	if (splits) { // recompute per-blob stats after relabeling
+		for (const b of blobs) {
+			b.count = 0
+			b.cols = new Set()
+		}
+		for (const v of voxels.values()) {
+			const b = blobs[v.blob]
+			b.count += v.idx.length
+			b.cols.add(v.kx * 4096 + v.kz)
+		}
+	}
+
 	const blobOf = new Int32Array(n).fill(-1)
 	for (const v of voxels.values()) {
 		const keep = blobs[v.blob].count >= MIN_BLOB // tiny blobs = grass tufts → stay ground
@@ -3301,7 +3392,7 @@ function segmentSceneSplat() {
 	}
 	let pieces = seatPiece(ground, "floor")
 	for (const id of ranked) pieces += seatPiece(blobParts.get(id), "object")
-	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin gaussian(s) left behind)`)
+	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), ${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin gaussian(s) left behind)`)
 }
 
 // Whole-scene generation: ONE capture of the floor + all primitives goes directly to
