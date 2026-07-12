@@ -3,7 +3,7 @@ import { SparkRenderer, SplatMesh } from "spark"
 import { zip, unzip } from "fflate"
 import { getConfig, newOutput, generateSubject, generateGround, identifyObjects, planScene, planSketchObjects } from "/scripts/api.js"
 import { captureObject, captureFloor, captureWorldContext, projectGroundIso, projectGroundMaskIso, unprojectGroundIso, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
-import { fitSplatToBox, ensureSplatEditBase, applySplatEditTransform } from "/scripts/fit.js"
+import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { addEdgeOutline, clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
 import { addBuild, listBuilds, getBuildSplats, deleteBuild, clearBuilds } from "/scripts/history.js"
@@ -66,6 +66,7 @@ const defaultFitSettings = {
 	paletteStrength: 0.75,
 	paletteLightness: 0,
 	yawDeg: 0,
+	fillOverscale: 1.08, // floors only: overscale the X/Z fit, clip boxes cull the overhang
 }
 let objectFit = { ...defaultFitSettings }
 let floorFit = { ...defaultFitSettings }
@@ -90,7 +91,6 @@ let activeBrushScale = 1
 let selectedPrimitive = null
 let placementPreview = null
 let drag = null
-let groundDeformDirty = false // a floor lift drag is in flight; deform the ground splat once per frame
 let pendingPlotHeight = null // latest floor-lift target { pid, height }; applied once per frame in animate
 let elevationDirty = false // curved-terrain previews need a refresh; coalesced per frame in animate
 let nextPrimitiveId = 1
@@ -136,6 +136,7 @@ const els = {
 	drawCanvas: document.getElementById("draw_canvas"),
 	drawClear: document.getElementById("draw_clear_btn"),
 	drawToolButtons: [...document.querySelectorAll("[data-draw-tool]")],
+	viewToolButtons: [...document.querySelectorAll("[data-view-tool]")],
 	framesTitle: document.getElementById("frames_title"),
 	framesList: document.getElementById("frames_list"),
 	frameAdd: document.getElementById("frame_add_btn"),
@@ -610,7 +611,6 @@ class World {
 		const record = { mesh, primitives: sourcePrimitives }
 		this.generated.push(record)
 		this.group.add(mesh)
-		prepareGeneratedEdit(record)
 		mesh.visible = uiTab === "view"
 		for (const primitive of sourcePrimitives) setColliderStyle(primitive, false)
 	}
@@ -714,41 +714,6 @@ function editablePrimitiveFor(mesh) {
 	if (world.state !== "generated" || mesh.userData.isGround) return mesh
 	const record = generatedForPrimitive(mesh)
 	return record?.primitives?.[0] ?? mesh
-}
-
-function prepareGeneratedEdit(record) {
-	if (!record?.mesh || !record.primitives?.length) return
-	const root = record.primitives[0]
-	root.updateWorldMatrix(true, false)
-	record.editRoot = root
-	record.editRootBase = root.matrixWorld.clone()
-	ensureSplatEditBase(record.mesh)
-}
-
-function syncGeneratedForPrimitive(mesh) {
-	const record = generatedForPrimitive(mesh)
-	if (!record?.mesh || !record.primitives?.length) return
-	if (!record.editRoot || !record.editRootBase) prepareGeneratedEdit(record)
-	const root = record.editRoot ?? record.primitives[0]
-	root.updateWorldMatrix(true, false)
-	const delta = root.matrixWorld.clone().multiply(record.editRootBase.clone().invert())
-	applySplatEditTransform(record.mesh, delta)
-	const pos = root.getWorldPosition(tmpWorld)
-	record.mesh.userData.seatX = pos.x
-	record.mesh.userData.seatZ = pos.z
-	record.mesh.userData.genPlotId = root.userData.plotId ?? record.mesh.userData.genPlotId
-	seatObjectOnGround(record.mesh)
-	if (showBounds) world.setBoundsVisible(true)
-}
-
-function syncGeneratedForPrimitives(meshes) {
-	const seen = new Set()
-	for (const mesh of meshes) {
-		const record = generatedForPrimitive(mesh)
-		if (!record || seen.has(record)) continue
-		seen.add(record)
-		syncGeneratedForPrimitive(record.primitives[0])
-	}
 }
 
 // --- Translation gizmo ------------------------------------------------------
@@ -867,6 +832,8 @@ function startGizmoDrag(event, handle) {
 		startY: event.clientY,
 		subtree,
 		startPositions: [selectedPrimitive, ...subtree].map(mesh => mesh.position.clone()),
+		startQuaternions: [selectedPrimitive, ...subtree].map(mesh => mesh.quaternion.clone()),
+		groundRef: floorDrag ? null : gizmoGroundRef(selectedPrimitive, subtree),
 		startPlotHeight: floorDrag ? (plotHeights.get(selectedPrimitive.userData.plotId) || 0) : 0,
 		actionPushed: true,
 	}
@@ -903,6 +870,43 @@ function startFloorLift(event, tile) {
 	return true
 }
 
+// Ground-conform reference for a block move: the cluster's footprint centre/base and the
+// terrain sample under it at drag start. As the drag slides the cluster around, the same
+// delta-conform setPlotHeight applies to clusters (rotate by the slope-normal change about
+// the base, lift by the surface-height change) keeps it seated on — and tilted with — the
+// curved ground at its NEW spot, while preserving manual rotations and stack offsets.
+function gizmoGroundRef(mesh, subtree) {
+	const box = new THREE.Box3()
+	for (const m of [mesh, ...subtree]) box.expandByObject(m)
+	if (box.isEmpty()) return null
+	const centre = box.getCenter(new THREE.Vector3())
+	return { cx: centre.x, cz: centre.z, baseY: box.min.y, h0: heightAt(centre.x, centre.z), n0: slopeNormalAt(centre.x, centre.z) }
+}
+
+const conformQuat = new THREE.Quaternion()
+const conformQuatInv = new THREE.Quaternion()
+const conformBase = new THREE.Vector3()
+
+// Re-seat the dragged cluster onto the terrain under its CURRENT footprint. Positions and
+// quaternions were just reset from their drag-start values, so the conform is applied fresh
+// each pointer event and never accumulates.
+function conformDraggedCluster(moved) {
+	const g = drag.groundRef
+	if (!g || !drag.startQuaternions) return
+	const cx = g.cx + tmpDelta.x
+	const cz = g.cz + tmpDelta.z
+	conformQuat.setFromUnitVectors(localUp, slopeNormalAt(cx, cz))
+		.multiply(conformQuatInv.setFromUnitVectors(localUp, g.n0).invert())
+	const lift = heightAt(cx, cz) - g.h0
+	conformBase.set(cx, g.baseY + tmpDelta.y, cz)
+	for (let i = 0; i < moved.length; i++) {
+		const mesh = moved[i]
+		mesh.position.sub(conformBase).applyQuaternion(conformQuat).add(conformBase)
+		mesh.position.y += lift
+		mesh.quaternion.copy(conformQuat).multiply(drag.startQuaternions[i])
+	}
+}
+
 function bindPrimitiveTreeToCurrentPlot(mesh, subtree) {
 	const pos = mesh.getWorldPosition(tmpWorld)
 	const half = floorSize / 2
@@ -918,8 +922,8 @@ function updateGizmoDrag(event) {
 	if (drag.mesh.userData.isGround) {
 		// Only the LATEST target matters — pointer events fire far above frame rate, so
 		// the height change (cluster reseat + terrain refresh) applies once per frame.
+		// Generated splats are NOT touched: Build and View are decoupled after generation.
 		pendingPlotHeight = { pid: drag.mesh.userData.plotId ?? 0, height: drag.startPlotHeight + (drag.startY - event.clientY) * 0.03 }
-		groundDeformDirty = true // deform the generated ground splat live (coalesced per frame in animate)
 		return
 	}
 	if (!intersectGizmoPlane(event, gizmoRayPoint)) return
@@ -928,24 +932,22 @@ function updateGizmoDrag(event) {
 	tmpDelta.copy(drag.axisWorld).multiplyScalar(delta)
 	const moved = [drag.mesh, ...drag.subtree]
 	for (let i = 0; i < moved.length; i++) moved[i].position.copy(drag.startPositions[i]).add(tmpDelta)
+	conformDraggedCluster(moved) // stick to + tilt with the curved ground at the new spot
 	if (drag.axis !== "y") bindPrimitiveTreeToCurrentPlot(drag.mesh, drag.subtree)
-	syncGeneratedForPrimitive(drag.mesh)
 	updateTransformGizmo()
 }
 
 function finishGizmoDrag() {
 	if (!drag || drag.mode !== "gizmo") return
 	if (drag.mesh.userData.isGround) {
-		if (pendingPlotHeight) { // flush the last coalesced height before the final deform
+		if (pendingPlotHeight) { // flush the last coalesced height
 			const p = pendingPlotHeight
 			pendingPlotHeight = null
 			setPlotHeight(p.pid, p.height)
 		}
-		applyGroundDeform()
 	}
 	else {
 		bindPrimitiveTreeToCurrentPlot(drag.mesh, drag.subtree)
-		syncGeneratedForPrimitive(drag.mesh)
 		focusPlot(drag.mesh.userData.plotId ?? 0) // dragging a block onto another plot focuses it
 	}
 }
@@ -1105,10 +1107,10 @@ function applyBrushScale(scale) {
 
 // --- Build / View tabs --------------------------------------------------------
 // Two tabs over the same world. Build: the editable block-out (primitives + ground
-// tiles) with every generated splat hidden — all editing tools live here. View: the
-// generated splats exactly as the world looks, read-only apart from the camera.
-// Edits in Build sync to the splats live (syncGeneratedForPrimitive), so the View
-// tab always reflects the latest block-out changes.
+// tiles) with every generated splat hidden — all block-out editing lives here. View:
+// the generated splats. The tabs are DECOUPLED after generation: Build edits never
+// move existing splats (regenerate to reflect them), and View has its own move/rotate
+// tools that act on the splat meshes alone.
 
 const emptyViewHint = "Nothing generated yet — hit Generate and the View tab fills in"
 
@@ -1116,9 +1118,10 @@ function setUiTab(tab) {
 	if (tab === uiTab) return
 	uiTab = tab
 	if (tab !== "build") {
-		selectPrimitive(null) // Draw and View have no 3D selection / gizmo
+		selectPrimitive(null) // Draw and View have no block-out selection / gizmo
 		clearGhostHover()
 	}
+	if (tab !== "view") deselectSplat() // splat selection is a View-only thing
 	if (tab === "view" && !world.generated.length) setStatus(emptyViewHint)
 	else if (els.status.textContent === emptyViewHint) setStatus("")
 	applyUiTab()
@@ -1474,7 +1477,6 @@ function updatePrimitiveDrag(event) {
 			m.mesh.quaternion.copy(rollQuat).multiply(m.startQuat)
 			m.mesh.userData.manualRotation = true
 		}
-		syncGeneratedForPrimitives([drag.mesh, ...drag.roll.members.map(m => m.mesh)])
 		return
 	}
 }
@@ -1519,7 +1521,6 @@ function updateScaleDrag(event) {
 			rec.subtree[i].position.copy(rec.startPos[i]).add(tmpDelta)
 		}
 	}
-	syncGeneratedForPrimitive(s.mesh)
 }
 
 function objectScreenPosition(worldPosition) {
@@ -1551,6 +1552,122 @@ function paintAtEvent(event) {
 	focusPlot(plotIdFromHit(hit))
 }
 
+// --- View-tab splat tools -----------------------------------------------------
+// View owns its own move/rotate: they act on the generated SplatMesh transforms ONLY
+// (position + quaternion — never scale, which Spark collapses to an average), so
+// nothing here feeds back into the Build block-out. Selection raycasts invisible
+// proxy boxes (children of each splat mesh, sized to its content bounds), because
+// gaussian clouds have no geometry a raycaster could hit.
+
+let viewTool = "orbit" // "orbit" | "move" | "rotate"
+let selectedSplatMesh = null
+
+const splatProxyMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false })
+const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: 0x5b6ee1, transparent: true, opacity: 0.9 })
+const splatDragPlane = new THREE.Plane()
+const splatRotQuat = new THREE.Quaternion()
+const splatDragPoint = new THREE.Vector3()
+
+function ensureSplatProxies() {
+	for (const { mesh } of world.generated) {
+		if (mesh.userData.splatProxy?.parent === mesh) continue
+		const cb = mesh.userData.contentBox
+		if (!cb) continue
+		const size = cb.getSize(new THREE.Vector3())
+		const centre = cb.getCenter(new THREE.Vector3())
+		if (mesh.userData.genKind === "floor") { // floor content boxes carry huge Y headroom — use a thin slab at ground level
+			size.y = 0.6
+			centre.y = cb.min.y + 0.3
+		}
+		const proxy = new THREE.Mesh(
+			new THREE.BoxGeometry(Math.max(0.2, size.x), Math.max(0.2, size.y), Math.max(0.2, size.z)),
+			splatProxyMaterial,
+		)
+		proxy.position.copy(centre)
+		proxy.userData.isSplatProxy = true
+		const outline = new THREE.LineSegments(new THREE.EdgesGeometry(proxy.geometry), splatSelectionMaterial)
+		outline.userData.isSelectionOutline = true
+		outline.visible = false
+		proxy.add(outline)
+		proxy.userData.outline = outline
+		mesh.userData.splatProxy = proxy
+		mesh.add(proxy)
+	}
+}
+
+function selectSplat(mesh) {
+	if (selectedSplatMesh === mesh) return
+	deselectSplat()
+	selectedSplatMesh = mesh
+	const outline = mesh?.userData.splatProxy?.userData.outline
+	if (outline) outline.visible = true
+}
+
+function deselectSplat() {
+	const outline = selectedSplatMesh?.userData.splatProxy?.userData.outline
+	if (outline) outline.visible = false
+	selectedSplatMesh = null
+}
+
+function raycastSplatProxies(event) {
+	ensureSplatProxies()
+	const proxies = world.generated.map(g => g.mesh.userData.splatProxy).filter(Boolean)
+	return proxies.length ? raycast(event, proxies) : null
+}
+
+function startSplatDrag(event, hit) {
+	const mesh = hit.object.parent
+	selectSplat(mesh)
+	drag = {
+		mode: viewTool === "rotate" ? "splat-rotate" : "splat-move",
+		pointerId: event.pointerId,
+		mesh,
+		startPos: mesh.position.clone(),
+		startQuat: mesh.quaternion.clone(),
+		pivot: hit.object.getWorldPosition(new THREE.Vector3()),
+		startPoint: hit.point.clone(),
+		startX: event.clientX,
+		startY: event.clientY,
+	}
+	renderer.domElement.setPointerCapture(event.pointerId)
+	renderer.domElement.classList.add("is-dragging")
+}
+
+// Drag on the horizontal plane through the grab point; hold Shift to move vertically.
+function updateSplatMove(event) {
+	if (event.shiftKey) {
+		drag.mesh.position.set(drag.startPos.x, drag.startPos.y + (drag.startY - event.clientY) * 0.02, drag.startPos.z)
+		return
+	}
+	splatDragPlane.set(localUp, -drag.startPoint.y)
+	pointerFromEvent(event)
+	raycaster.setFromCamera(pointer, camera)
+	if (!raycaster.ray.intersectPlane(splatDragPlane, splatDragPoint)) return
+	drag.mesh.position.set(
+		drag.startPos.x + splatDragPoint.x - drag.startPoint.x,
+		drag.startPos.y,
+		drag.startPos.z + splatDragPoint.z - drag.startPoint.z,
+	)
+}
+
+// Sideways drag = yaw about the splat's own centre. The gaussians are baked in world
+// coords (identity object transform at seat time), so the spin must pivot about the
+// content centre: p' = dq·(p − c) + c, q' = dq·q.
+function updateSplatRotate(event) {
+	const angle = (event.clientX - drag.startX) * 0.01
+	splatRotQuat.setFromAxisAngle(localUp, angle)
+	drag.mesh.quaternion.copy(splatRotQuat).multiply(drag.startQuat)
+	drag.mesh.position.copy(drag.startPos).sub(drag.pivot).applyQuaternion(splatRotQuat).add(drag.pivot)
+}
+
+function setViewTool(tool) {
+	viewTool = tool
+	for (const button of els.viewToolButtons) button.classList.toggle("active", button.dataset.viewTool === tool)
+	if (tool === "orbit") deselectSplat()
+	renderer.domElement.classList.toggle("is-splat-move", tool === "move")
+	renderer.domElement.classList.toggle("is-splat-rotate", tool === "rotate")
+}
+
 // --- Pointer routing --------------------------------------------------------
 
 function pointerDown(event) {
@@ -1564,7 +1681,17 @@ function pointerDown(event) {
 		return
 	}
 	if (uiTab === "view") {
-		startOrbit(event) // View is look-only; every edit happens in the Build tab
+		// Move/rotate act on the splat under the cursor; anywhere else (or the orbit
+		// tool) the drag is the camera. Block-out editing stays a Build-only thing.
+		if (viewTool !== "orbit") {
+			const hit = raycastSplatProxies(event)
+			if (hit) {
+				startSplatDrag(event, hit)
+				return
+			}
+			deselectSplat()
+		}
+		startOrbit(event)
 		return
 	}
 
@@ -1630,6 +1757,8 @@ renderer.domElement.addEventListener("pointermove", event => {
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
+	else if (drag?.mode === "splat-move") updateSplatMove(event)
+	else if (drag?.mode === "splat-rotate") updateSplatRotate(event)
 	else if (drag && ["scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
 	else if (uiTab === "build" && !generating) { updateGhostHover(event); updatePlacement(event) }
 })
@@ -1641,7 +1770,6 @@ renderer.domElement.addEventListener("pointerup", event => {
 			addPlotAt(drag.pendingCell) // a clean click on an empty cell → new plot
 		}
 		if (drag.actionPushed && !drag.mutated) activeBuildHistory()?.undo.pop() // drag never moved — drop its checkpoint
-		groundDeformDirty = false // finishGizmoDrag already applied the final deform
 		renderer.domElement.releasePointerCapture(event.pointerId)
 		drag = null
 		renderer.domElement.classList.remove("is-dragging")
@@ -2640,6 +2768,7 @@ async function activateFrame(tab, id) {
 		activeFrameId.build = id
 		await applyBuildSnapshot(frame.snapshot ?? emptyBuildSnapshot())
 	} else {
+		deselectSplat() // the selection belongs to the frame being left
 		activeFrameId.view = id
 		for (const f of frames.view) for (const rec of f.records) rec.mesh.visible = false
 		world.generated = frame.records
@@ -2816,6 +2945,7 @@ function fitSettingsFromConfig(cfg, kind) {
 		paletteStrength: number("paletteStrength"),
 		paletteLightness: number("paletteLightness"),
 		yawDeg: number("yawDeg", "yaw"),
+		fillOverscale: number("fillOverscale"),
 	}
 }
 
@@ -3085,6 +3215,7 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 		fitHeight,
 		fillXZ: fillXZ || isFloor, // floors fill their rectangular footprint exactly on X/Z
 		exactBounds: isFloor, // floors are clamped into the target slab, including thickness
+		fillOverscale: fit.fillOverscale, // floors: overfill the tile, clip boxes trim the edges
 		clipBoxes: fitClipBoxes,
 		opacityFloor: fit.opacityFloor,
 		clampK: fit.fitClampK,
@@ -3600,7 +3731,8 @@ function setPlotHeight(pid, height) {
 			mesh.quaternion.premultiply(dq)
 		}
 	}
-	for (const g of world.generated) if (g.mesh.userData.genKind !== "floor") seatObjectOnGround(g.mesh)
+	// Generated splats intentionally NOT re-seated: Build edits after generation no longer
+	// move View content — the tabs are decoupled (View has its own move/rotate tools).
 	elevationDirty = true // terrain preview refresh is coalesced to once per frame (animate)
 }
 
@@ -4627,6 +4759,7 @@ function toggleSettings(open) {
 // --- UI wiring --------------------------------------------------------------
 
 for (const button of els.toolButtons) button.addEventListener("click", () => setActiveTool(button.dataset.tool))
+for (const button of els.viewToolButtons) button.addEventListener("click", () => setViewTool(button.dataset.viewTool))
 for (const button of els.viewTabs) button.addEventListener("click", () => setUiTab(button.dataset.viewTab))
 els.frameAdd?.addEventListener("click", addFrameForActiveTab)
 for (const swatch of els.colorSwatches) bindColorSwatch(swatch)
@@ -4712,6 +4845,7 @@ document.addEventListener("keydown", event => {
 			world.resetGenerated()
 			setStatus("")
 		}
+		else if (uiTab === "view" && selectedSplatMesh) deselectSplat()
 	}
 })
 
@@ -4762,10 +4896,6 @@ function animate() {
 		if (elevationDirty) { // curved-terrain refresh, at most once per frame
 			elevationDirty = false
 			updateElevationHandles()
-		}
-		if (groundDeformDirty) { // live plot-lift feedback: reshape the ground splat at most once per frame
-			applyGroundDeform()
-			groundDeformDirty = false
 		}
 		updateTransformGizmo()
 		renderer.render(scene, camera)

@@ -154,11 +154,32 @@ body.tab-draw.sketch-empty .chat-dock {
 	to { transform: rotate(360deg); }
 }
 
-/* View tab shows ONLY the tabs — no editing tools, no prompt bar. */
+/* View tab shows the tabs + the splat tool dock — no block-out tools, no prompt bar. */
 body.tab-view .palette-stack,
 body.tab-view .tool-dock,
-body.tab-view .bottom-dock {
+body.tab-view .chat-dock {
 	display: none;
+}
+
+/* Move/rotate for the generated splats — View's own tools, decoupled from Build. */
+.view-dock {
+	display: none;
+	align-items: center;
+	gap: 0.2rem;
+	padding: 0.35rem;
+	border-radius: 0.85rem;
+}
+
+body.tab-view .view-dock {
+	display: flex;
+}
+
+body.tab-view canvas.is-splat-move {
+	cursor: move;
+}
+
+body.tab-view canvas.is-splat-rotate {
+	cursor: grab;
 }
 
 /* Draw tab: a full-screen, pannable sketch canvas — the faint grid marks 16x16 plots.

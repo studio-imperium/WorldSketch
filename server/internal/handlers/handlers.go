@@ -74,6 +74,7 @@ func subjectClientConfig(kind string) map[string]any {
 		"yaw":               config.SubjectEnvFloat(kind, "YAW", nil, 0),
 		"fitClampK":         config.SubjectEnvFloat(kind, "FIT_CLAMP_K", []string{"WS_FIT_CLAMP_K"}, 0),
 		"fitBboxPercentile": config.SubjectEnvFloat(kind, "FIT_BBOX_PERCENTILE", []string{"WS_FIT_BBOX_PERCENTILE"}, 0),
+		"fillOverscale":     config.SubjectEnvFloat(kind, "FILL_OVERSCALE", nil, 1.08),
 	}
 }
 

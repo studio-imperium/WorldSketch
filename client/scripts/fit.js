@@ -390,13 +390,18 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		sz = scale + clampK * (effZFit - scale)
 	}
 	if (exactBounds) {
-		sx = effXFit
-		sz = effZFit
+		// Fill the tile to its border: overscale the X/Z fit slightly so the texture's
+		// SOLID interior — not its ragged, fading reconstruction edge — reaches the tile
+		// boundary. The overhang is culled against the clip boxes in the bake loop below
+		// (scale up, trim the edges off), so the floor reads flush to the tile edge.
+		const fillOverscale = Math.max(1, opts.fillOverscale ?? 1)
+		sx = effXFit * fillOverscale
+		sz = effZFit * fillOverscale
 		// NO vertical compression for floors: Y keeps the reconstruction's natural
 		// (XZ-proportional) scale. Vertical bounding is handled by seating the ground
 		// SHEET at floor level and CULLING everything that lands below it (see the
 		// bake loop) — underground gaussians could never be visible anyway.
-		sy = 0.5 * (effXFit + effZFit)
+		sy = 0.5 * (sx + sz)
 	}
 
 	// Floors seat the SHEET at floor level rather than the absolute lowest gaussian:
@@ -439,10 +444,14 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		// Floors: anything below floor level is underground and can never be visible —
 		// cull it outright. Above floor level Y is FREE (no clamp, no compression).
 		if (exactBounds && nextY < box.min.y + yOffset - 0.05) return
+		// With clip boxes the fill-overscale overhang is CULLED (insideClip below), keeping
+		// interior gaussians at their true positions; clamping is only the fallback when
+		// there is nothing to cull against (edge strays pile onto the border instead).
+		const clampXZ = exactBounds && !clipBoxes
 		center.set(
-			exactBounds ? Math.min(box.max.x, Math.max(box.min.x, nextX)) : nextX,
+			clampXZ ? Math.min(box.max.x, Math.max(box.min.x, nextX)) : nextX,
 			nextY,
-			exactBounds ? Math.min(box.max.z, Math.max(box.min.z, nextZ)) : nextZ,
+			clampXZ ? Math.min(box.max.z, Math.max(box.min.z, nextZ)) : nextZ,
 		)
 		if (!insideClip(center)) return
 		const transformedShape = transformSplatShape(scales, quaternion, linear)
