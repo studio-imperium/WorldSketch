@@ -104,7 +104,7 @@ func ParseIdentify(raw string) (map[string]string, string) {
 	return map[string]string{}, ""
 }
 
-func ImageFor(kind, userPrompt, groundColor, label string) string {
+func ImageFor(kind, userPrompt, groundColor, label string, hasGround bool) string {
 	scene := strings.TrimSpace(userPrompt)
 	if scene == "" {
 		scene = "a coherent stylized natural game environment"
@@ -113,7 +113,7 @@ func ImageFor(kind, userPrompt, groundColor, label string) string {
 		return Floor(scene, groundColor)
 	}
 	if kind == "scene" {
-		return Scene(scene)
+		return Scene(scene, hasGround)
 	}
 	return Object(scene, label)
 }
@@ -121,9 +121,17 @@ func ImageFor(kind, userPrompt, groundColor, label string) string {
 // Scene re-textures the complete one-plot block-out in a single image edit. Layout and
 // camera preservation are deliberately strict because the edited image is reconstructed
 // as one splat and fitted back onto the complete block-out bounds.
-func Scene(scene string) string {
-	return "Image 1 is the exact isometric geometry and color guide for ONE COMPLETE 3D ENVIRONMENT on a flat, hand-drawn ground shape. Re-texture the ENTIRE image as this scene: \"" + scene + "\". Transform the colored block structures into coherent real objects and materials that match the scene and their guide colors; transform the flat painted ground into richly textured terrain appropriate to the scene. Use a polished hand-painted stylized isometric game-art style — semi-realistic, richly detailed, soft ambient lighting, clean readable silhouettes, saturated natural colors, and crisp storybook charm. " +
-		"HARD COMPOSITION CONSTRAINTS: preserve the exact orthographic isometric camera angle, framing, the ground shape's exact position and silhouette, object count, object centers, relative sizes, heights, spacing, and overall silhouettes from Image 1. Keep every existing structure in place. Do not add, remove, duplicate, move, rotate, crop, or rearrange objects. Do not zoom or change perspective. Preserve distinct guide colors as material cues while replacing flat color with visible natural texture and fine surface detail such as bark, leaves, grass, stone, wood grain, soil, moss, and small pebbles as appropriate. The ground is EXACTLY the flat painted shape shown in Image 1 — keep its outline as drawn; do not expand, shrink, reshape, square it off, or turn it into a thick pedestal, floating island, hill, or cliff. " +
+func Scene(scene string, hasGround bool) string {
+	const blockout = "CRITICAL BLOCK-OUT INTERPRETATION: every visible cube or rectangular block is temporary volumetric scaffolding drawn by the user, never a literal cube, crate, tiled module, panel, button, or final design element. Treat each spatially connected cluster of blocks as ONE intended real object. The blocks encode only its coarse occupied volume, pose, placement, major proportions, protrusion directions, and colour/material cues. Infer the recognizable object named by the scene description, then redesign the cluster into that object. Semantic identity outranks the individual block shapes. Blend continuously across block boundaries; erase every cube seam and stacked-box joint; freely round, taper, bevel, curve, bridge, and streamline the mass within its overall envelope. Small blocks indicate coarse features or protrusions, not separate domes or blocks. Do NOT merely bevel or decorate each cube separately. The result should read immediately as the intended real object, not as a construction made from blocks. "
+	if !hasGround {
+		return "Image 1 is the exact isometric geometry and color guide for a scene containing OBJECTS ONLY, with NO ground. Interpret and transform the block-out as this scene: \"" + scene + "\". " + blockout +
+			"Render the interpreted objects in a polished hand-painted stylized isometric game-art style — semi-realistic, richly detailed, softly lit, with clean readable silhouettes and crisp storybook charm. " +
+			"HARD COMPOSITION CONSTRAINTS: preserve the exact orthographic isometric camera angle, framing, object count, object centers, relative sizes, heights, spacing, overall occupied envelope, and major protrusion directions from Image 1. Keep every object in place. Do not add, remove, duplicate, move, rotate, crop, or rearrange objects. Do not zoom or change perspective. Local silhouette changes that make the intended object recognizable are REQUIRED; per-block silhouettes are not constraints. " +
+			"CRITICAL: there is intentionally NO floor, terrain, ground plane, platform, baseplate, pedestal, island, grass patch, dirt patch, contact shadow, or surface beneath these objects. Do not invent one for context or support. Keep the objects isolated in empty space. Black areas far from each block cluster must remain pure black and empty; reshape only within a tight envelope around that cluster, and do not create any new disconnected region in the background. No sky, horizon, scenery, border, frame, text, labels, or UI."
+	}
+	return "Image 1 is the exact isometric geometry and color guide for ONE COMPLETE 3D ENVIRONMENT on a flat, hand-drawn ground shape. Interpret and transform the block-out as this scene: \"" + scene + "\". " + blockout +
+		"Transform the flat painted ground into richly textured terrain appropriate to the scene. Use a polished hand-painted stylized isometric game-art style — semi-realistic, richly detailed, soft ambient lighting, clean readable silhouettes, saturated natural colors, and crisp storybook charm. " +
+		"HARD COMPOSITION CONSTRAINTS: preserve the exact orthographic isometric camera angle, framing, the ground shape's exact position and silhouette, object count, object centers, relative sizes, heights, spacing, overall occupied envelopes, and major protrusion directions from Image 1. Keep every object in place. Do not add, remove, duplicate, move, rotate, crop, or rearrange objects. Do not zoom or change perspective. Local silhouette changes that make each intended object recognizable are REQUIRED; per-block silhouettes and seams are not constraints. Preserve distinct guide colors as material cues while replacing flat color with visible natural texture and fine surface detail such as bark, leaves, grass, stone, wood grain, soil, moss, and small pebbles as appropriate. The ground is EXACTLY the flat painted shape shown in Image 1 — keep its outline as drawn; do not expand, shrink, reshape, square it off, or turn it into a thick pedestal, floating island, hill, or cliff. " +
 		"Everything outside the drawn ground shape must remain pure black and empty. No sky, horizon, background scenery, border, frame, text, labels, UI, cast shadow outside the ground, or extra ground plane. The final image must show the complete textured environment fully inside the frame in exactly the input pose, ready for single-image Gaussian-splat reconstruction."
 }
 

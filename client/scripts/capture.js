@@ -41,8 +41,14 @@ export function captureFloor(renderer, scene, world, floorMeshes = null, box = n
 // the legacy per-subject helpers this deliberately skips the second material-map pass:
 // the returned guide is the sole image used by the scene-wide texture edit.
 export function captureWorld(renderer, scene, world, box) {
-	const floor = world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground]
-	return captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box), false)
+	// An unpainted drawable sheet is void, not a floor. Excluding it here prevents the
+	// image editor from receiving even an invisible floor mesh as part of the subject.
+	const floor = world.groundInkBounds?.()
+		? (world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground])
+		: []
+	// Whole-scene blocks are volumetric scaffolding, not literal cuboids in the final art.
+	// Omit per-cube edge overlays so touching same-colour blocks read as one coarse mass.
+	return captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box), false, false)
 }
 
 // Capture the WHOLE world in context (every block-out object + the painted floor) from
@@ -232,11 +238,11 @@ export function unprojectGroundIso(source, cols, rows, dstW, dstH) {
 	return canvas
 }
 
-// Render a guide (with edge lines) + a flat material-ID map of `subject` alone, on a
+// Render a guide (optionally with edge lines) + a flat material-ID map of `subject` alone, on a
 // black background, with the dedicated `view` camera. Everything else — other block-out
 // meshes, all splats, the sky dome, outlines, helpers, the placement preview — is hidden
 // so Tripo only sees the subject on black. The shared scene camera is never touched.
-async function captureSubject(renderer, scene, world, subject, view, includeMaterialMap = true) {
+async function captureSubject(renderer, scene, world, subject, view, includeMaterialMap = true, includeEdges = true) {
 	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
 	const subjectSet = new Set(subject)
 
@@ -276,7 +282,7 @@ async function captureSubject(renderer, scene, world, subject, view, includeMate
 	const prevClear = renderer.getClearColor(new THREE.Color()).clone()
 	const prevAlpha = renderer.getClearAlpha()
 
-	const edges = addEdges(subject, world)
+	const edges = includeEdges ? addEdges(subject, world) : []
 	const guide = await captureTarget(renderer, scene, view, target)
 	for (const edge of edges) {
 		edge.geometry.dispose()
@@ -330,7 +336,9 @@ function restoreMaterials(swaps) {
 function addEdges(meshes, world) {
 	const edges = []
 	for (const mesh of meshes) {
-		if (!mesh.geometry || mesh.userData.isGroundSlopePreview) continue
+		// EdgesGeometry knows only the sheet's outer box, not the alpha-painted ground
+		// silhouette. Outlining it drew a large white diamond even when the sheet was empty.
+		if (!mesh.geometry || mesh.userData.isGroundSlopePreview || mesh.userData.isGroundSheet) continue
 		const edge = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), edgeMaterial)
 		edge.position.copy(mesh.position)
 		edge.quaternion.copy(mesh.quaternion)

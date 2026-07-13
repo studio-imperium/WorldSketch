@@ -161,7 +161,7 @@ body.tab-view .chat-dock {
 	display: none;
 }
 
-/* Move/rotate for the generated splats — View's own tools, decoupled from Build. */
+/* Move/scale/rotate for the generated splats — View's own tools, decoupled from Build. */
 .view-dock {
 	display: none;
 	align-items: center;
@@ -176,6 +176,10 @@ body.tab-view .view-dock {
 
 body.tab-view canvas.is-splat-move {
 	cursor: move;
+}
+
+body.tab-view canvas.is-splat-scale {
+	cursor: nwse-resize;
 }
 
 body.tab-view canvas.is-splat-rotate {

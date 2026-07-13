@@ -1611,13 +1611,13 @@ function paintAtEvent(event) {
 }
 
 // --- View-tab splat tools -----------------------------------------------------
-// View owns its own move/rotate: they act on the generated SplatMesh transforms ONLY
-// (position + quaternion — never scale, which Spark collapses to an average), so
-// nothing here feeds back into the Build block-out. Selection raycasts invisible
-// proxy boxes (children of each splat mesh, sized to its content bounds), because
-// gaussian clouds have no geometry a raycaster could hit.
+// View owns its own move/scale/rotate: they act on the generated SplatMesh transforms
+// only, so nothing feeds back into the Build block-out. Splat scaling stays UNIFORM —
+// Spark collapses non-uniform mesh scales to an average, while a uniform scale is safe.
+// Selection raycasts invisible proxy boxes (children of each splat mesh, sized to its
+// content bounds), because gaussian clouds have no geometry a raycaster could hit.
 
-let viewTool = "orbit" // "orbit" | "move" | "rotate"
+let viewTool = "orbit" // "orbit" | "move" | "scale" | "rotate"
 let selectedSplatMesh = null
 
 const splatProxyMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false })
@@ -1676,17 +1676,24 @@ function raycastSplatProxies(event) {
 function startSplatDrag(event, hit) {
 	const mesh = hit.object.parent
 	selectSplat(mesh)
+	const pivot = hit.object.getWorldPosition(new THREE.Vector3())
+	mesh.updateWorldMatrix(true, false)
 	drag = {
-		mode: viewTool === "rotate" ? "splat-rotate" : "splat-move",
+		mode: viewTool === "rotate" ? "splat-rotate" : viewTool === "scale" ? "splat-scale" : "splat-move",
 		pointerId: event.pointerId,
 		mesh,
 		startPos: mesh.position.clone(),
 		startQuat: mesh.quaternion.clone(),
-		pivot: hit.object.getWorldPosition(new THREE.Vector3()),
+		startScale: mesh.scale.clone(),
+		pivot,
+		pivotLocal: mesh.worldToLocal(pivot.clone()),
 		startPoint: hit.point.clone(),
 		startX: event.clientX,
 		startY: event.clientY,
+		rollAxis: pivot.clone().sub(camera.position).normalize(),
+		rollCenter: objectScreenPosition(pivot),
 	}
+	drag.startAngle = pointerScreenAngle(event, drag.rollCenter)
 	renderer.domElement.setPointerCapture(event.pointerId)
 	renderer.domElement.classList.add("is-dragging")
 }
@@ -1708,12 +1715,23 @@ function updateSplatMove(event) {
 	)
 }
 
-// Sideways drag = yaw about the splat's own centre. The gaussians are baked in world
-// coords (identity object transform at seat time), so the spin must pivot about the
-// content centre: p' = dq·(p − c) + c, q' = dq·q.
+// Uniform scale about the selected splat's own content centre. Keeping all three scale
+// components equal avoids Spark's non-uniform-scale averaging limitation.
+function updateSplatScale(event) {
+	const delta = (event.clientX - drag.startX) - (event.clientY - drag.startY)
+	const factor = Math.min(6, Math.max(0.15, Math.exp(delta * 0.01)))
+	drag.mesh.scale.copy(drag.startScale).multiplyScalar(factor)
+	// The splat's packed coordinates are world-like and its mesh origin is usually zero;
+	// compensate position so scaling happens around the proxy/content centre, not origin.
+	tmpWorld.copy(drag.pivotLocal).multiply(drag.mesh.scale).applyQuaternion(drag.startQuat)
+	drag.mesh.position.copy(drag.pivot).sub(tmpWorld)
+}
+
+// Match Build-mode rotation: pointer angle around the object's on-screen centre drives
+// a roll about the camera-to-object axis, rather than a sideways-only world-Y spin.
 function updateSplatRotate(event) {
-	const angle = (event.clientX - drag.startX) * 0.01
-	splatRotQuat.setFromAxisAngle(localUp, angle)
+	const angle = pointerScreenAngle(event, drag.rollCenter) - drag.startAngle
+	splatRotQuat.setFromAxisAngle(drag.rollAxis, angle)
 	drag.mesh.quaternion.copy(splatRotQuat).multiply(drag.startQuat)
 	drag.mesh.position.copy(drag.startPos).sub(drag.pivot).applyQuaternion(splatRotQuat).add(drag.pivot)
 }
@@ -1723,6 +1741,7 @@ function setViewTool(tool) {
 	for (const button of els.viewToolButtons) button.classList.toggle("active", button.dataset.viewTool === tool)
 	if (tool === "orbit") deselectSplat()
 	renderer.domElement.classList.toggle("is-splat-move", tool === "move")
+	renderer.domElement.classList.toggle("is-splat-scale", tool === "scale")
 	renderer.domElement.classList.toggle("is-splat-rotate", tool === "rotate")
 }
 
@@ -1739,7 +1758,7 @@ function pointerDown(event) {
 		return
 	}
 	if (uiTab === "view") {
-		// Move/rotate act on the splat under the cursor; anywhere else (or the orbit
+		// Move/scale/rotate act on the splat under the cursor; anywhere else (or the orbit
 		// tool) the drag is the camera. Block-out editing stays a Build-only thing.
 		if (viewTool !== "orbit") {
 			const hit = raycastSplatProxies(event)
@@ -1828,6 +1847,7 @@ renderer.domElement.addEventListener("pointermove", event => {
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
 	else if (drag?.mode === "splat-move") updateSplatMove(event)
+	else if (drag?.mode === "splat-scale") updateSplatScale(event)
 	else if (drag?.mode === "splat-rotate") updateSplatRotate(event)
 	else if (drag && ["scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
 	else if (uiTab === "build" && !generating) { updateGhostHover(event); updatePlacement(event) }
@@ -3033,6 +3053,147 @@ function fitSettingsFor(kind) {
 	return objectFit
 }
 
+// --- Scene yaw estimation ------------------------------------------------------
+// Tripo's returned orientation for objects-only scenes is CONTENT-DEPENDENT — saved
+// runs needed 0° (tower+crates) or 90° (spaceships) under the same pipeline — so no
+// fixed yaw knob can seat every reconstruction facing its block-out. Estimate the
+// quarter-turn per run instead: project the raw splat and the guide blocks through the
+// capture camera and pick the yaw whose silhouette overlaps best AND whose distinct
+// colour masses (a blue roof, brown crates) land where the same-coloured blocks are.
+// Validated offline against runs 0101/0102/0104 (3/3 with wide margins); monochrome
+// content falls back to silhouette-only, which is genuinely ambiguous ±90 there.
+const ISO_PROJ_RIGHT = [1 / Math.sqrt(2), 0, 1 / Math.sqrt(2)] // capture camera basis
+const ISO_PROJ_UP = [1 / Math.sqrt(6), 2 / Math.sqrt(6), -1 / Math.sqrt(6)] // (MIRROR_CAPTURE_X pose)
+const YAW_GRID = 32
+
+function unitChroma(r, g, b) {
+	const m = (r + g + b) / 3
+	const v = [r - m, g - m, b - m]
+	const l = Math.hypot(v[0], v[1], v[2])
+	return l > 1e-6 ? [v[0] / l, v[1] / l, v[2] / l, l] : [0, 0, 0, 0]
+}
+
+function estimateSceneYaw(bytes, meshes) {
+	// The drawable ground sheet is void in a no-ground scene, and its 48u span would
+	// swamp the normalized comparison — only real blocks describe the content layout.
+	meshes = meshes?.filter(mesh => !mesh.userData.isGroundSheet && mesh.geometry)
+	if (!meshes?.length || bytes.length < 32 * 100) return null
+	// Project every block's sampled volume: occupancy silhouette + per-colour anchors.
+	const corner = new THREE.Vector3()
+	const blockUV = []
+	for (const mesh of meshes) {
+		const color = new THREE.Color(`#${mesh.userData.baseColor ?? mesh.material.color.getHexString()}`)
+		const key = color.getHexString()
+		mesh.updateWorldMatrix(true, false)
+		const geo = mesh.geometry.boundingBox ?? (mesh.geometry.computeBoundingBox(), mesh.geometry.boundingBox)
+		const vol = mesh.scale.x * mesh.scale.y * mesh.scale.z
+		for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) for (let c = 0; c < 3; c++) {
+			corner.set(
+				geo.min.x + (a / 2) * (geo.max.x - geo.min.x),
+				geo.min.y + (b / 2) * (geo.max.y - geo.min.y),
+				geo.min.z + (c / 2) * (geo.max.z - geo.min.z),
+			).applyMatrix4(mesh.matrixWorld)
+			blockUV.push([
+				corner.x * ISO_PROJ_RIGHT[0] + corner.y * ISO_PROJ_RIGHT[1] + corner.z * ISO_PROJ_RIGHT[2],
+				corner.x * ISO_PROJ_UP[0] + corner.y * ISO_PROJ_UP[1] + corner.z * ISO_PROJ_UP[2],
+				key, vol / 27,
+			])
+		}
+	}
+	let bu0 = Infinity, bu1 = -Infinity, bv0 = Infinity, bv1 = -Infinity
+	for (const [u, v] of blockUV) { bu0 = Math.min(bu0, u); bu1 = Math.max(bu1, u); bv0 = Math.min(bv0, v); bv1 = Math.max(bv1, v) }
+	const blockOcc = new Set()
+	const anchors = new Map() // colour key -> [Σux, Σvy, Σw]
+	let blockMass = 0
+	for (const [u, v, key, w] of blockUV) {
+		const x = (u - bu0) / Math.max(1e-9, bu1 - bu0)
+		const y = (v - bv0) / Math.max(1e-9, bv1 - bv0)
+		blockOcc.add(Math.min(YAW_GRID - 1, x * YAW_GRID | 0) * YAW_GRID + Math.min(YAW_GRID - 1, y * YAW_GRID | 0))
+		const a = anchors.get(key) ?? anchors.set(key, [0, 0, 0]).get(key)
+		a[0] += x * w; a[1] += y * w; a[2] += w
+		blockMass += w
+	}
+	// Parse guide hexes directly — THREE.Color would convert them to the linear working
+	// space, while the splat's stored colour bytes (and unitChroma) are display sRGB.
+	const anchorChroma = new Map([...anchors.keys()].map(key => [key, unitChroma(
+		parseInt(key.slice(0, 2), 16), parseInt(key.slice(2, 4), 16), parseInt(key.slice(4, 6), 16),
+	)]))
+
+	// Sample the raw splat (pos f32×3 at +0, rgba u8×4 at +24, 32-byte stride; stored Y
+	// is world-inverted — the same flip fit.js bakes with its negative Y scale).
+	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
+	const count = bytes.length >> 5
+	const stride = Math.max(1, Math.floor(count / 20000))
+	const pts = []
+	for (let i = 0; i < count; i += stride) {
+		const o = i << 5
+		if (view.getUint8(o + 27) < 40) continue // skip near-transparent reconstruction haze
+		pts.push([view.getFloat32(o, true), -view.getFloat32(o + 4, true), view.getFloat32(o + 8, true),
+			view.getUint8(o + 24), view.getUint8(o + 25), view.getUint8(o + 26)])
+	}
+	if (pts.length < 100) return null
+
+	const candidates = [0, 90, 180, 270]
+	let bestYaw = null, bestScore = -Infinity
+	const scores = []
+	for (const yaw of candidates) {
+		const th = (yaw * Math.PI) / 180, co = Math.cos(th), si = Math.sin(th)
+		const uv = []
+		for (const [x, y, z, r, g, b] of pts) {
+			const wx = x * co + z * si, wz = -x * si + z * co
+			uv.push([
+				wx * ISO_PROJ_RIGHT[0] + y * ISO_PROJ_RIGHT[1] + wz * ISO_PROJ_RIGHT[2],
+				wx * ISO_PROJ_UP[0] + y * ISO_PROJ_UP[1] + wz * ISO_PROJ_UP[2],
+				r, g, b,
+			])
+		}
+		const us = uv.map(p => p[0]).sort((a, b) => a - b)
+		const vs = uv.map(p => p[1]).sort((a, b) => a - b)
+		const q = (arr, f) => arr[Math.min(arr.length - 1, (f * (arr.length - 1)) | 0)]
+		const u0 = q(us, 0.003), u1 = q(us, 0.997), v0 = q(vs, 0.003), v1 = q(vs, 0.997)
+		const splatOcc = new Set()
+		const colorSums = new Map([...anchors.keys()].map(key => [key, [0, 0, 0]]))
+		let n = 0
+		for (const [u, v, r, g, b] of uv) {
+			const x = (u - u0) / Math.max(1e-9, u1 - u0)
+			const y = (v - v0) / Math.max(1e-9, v1 - v0)
+			if (x < 0 || x > 1 || y < 0 || y > 1) continue
+			n++
+			splatOcc.add(Math.min(YAW_GRID - 1, x * YAW_GRID | 0) * YAW_GRID + Math.min(YAW_GRID - 1, y * YAW_GRID | 0))
+			const cu = unitChroma(r, g, b)
+			if (cu[3] < 10) continue // grey/shadow gaussians carry no colour direction
+			let bestKey = null, bestDot = 0.6 // require a decent chroma match to claim a point
+			for (const [key, bc] of anchorChroma) {
+				if (bc[3] < 10) continue
+				const dot = cu[0] * bc[0] + cu[1] * bc[1] + cu[2] * bc[2]
+				if (dot > bestDot) { bestDot = dot; bestKey = key }
+			}
+			if (bestKey) {
+				const s = colorSums.get(bestKey)
+				s[0] += x; s[1] += y; s[2]++
+			}
+		}
+		let inter = 0
+		for (const cell of splatOcc) if (blockOcc.has(cell)) inter++
+		const iou = inter / Math.max(1, blockOcc.size + splatOcc.size - inter)
+		let anchorTerm = 0, anchorWeight = 0
+		for (const [key, a] of anchors) {
+			const s = colorSums.get(key)
+			const share = a[2] / blockMass
+			if (!s[2] || share > 0.6) continue // the dominant colour is everywhere — no signal
+			const w = Math.min(share, s[2] / Math.max(1, n))
+			const d = Math.hypot(s[0] / s[2] - a[0] / a[2], s[1] / s[2] - a[1] / a[2])
+			anchorTerm += w * (1 - Math.min(1, d * 1.5))
+			anchorWeight += w
+		}
+		const score = iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0)
+		scores.push(`${yaw}°:${score.toFixed(3)}(iou ${iou.toFixed(3)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(3) : "—"})`)
+		if (score > bestScore) { bestScore = score; bestYaw = yaw }
+	}
+	console.log(`[fit] scene yaw estimate → ${bestYaw}° (${scores.join(" ")})`)
+	return bestYaw
+}
+
 // Two objects are "equal" when their blocks match in relative position, size, spin and
 // colour, with nothing painted — equal objects share ONE generated splat, seated once
 // per instance (no extra image-edit or reconstruction cost for duplicates).
@@ -3084,7 +3245,7 @@ function wholeSceneBox() {
 // own piece, including objects the image model invented on its own. The guide blocks are
 // not consulted at all: the splat is the sole source of truth for what exists and where.
 // (Two objects painted touching each other become one piece — acceptable, and visible.)
-function segmentSceneSplat() {
+function segmentSceneSplat(hasGround = true) {
 	const record = world.generated.find(g => g.mesh.userData.genName === "scene")
 	const packed = record?.mesh.packedSplats
 	if (!packed?.forEachSplat) return
@@ -3172,7 +3333,7 @@ function segmentSceneSplat() {
 	const VOFF = 128 // voxel index offset keeps negative heights positive
 	const voxels = new Map() // packed voxel key -> { idx, blob, kx, ky, kz }
 	for (let i = 0; i < n; i++) {
-		if (pys[i] <= floorLevel[cellOfXZ(pxs[i], pzs[i])] + FLOOR_BAND) continue
+		if (hasGround && pys[i] <= floorLevel[cellOfXZ(pxs[i], pzs[i])] + FLOOR_BAND) continue
 		const kx = Math.floor((pxs[i] - minX) / VOX)
 		const kz = Math.floor((pzs[i] - minZ) / VOX)
 		const ky = Math.floor(pys[i] / VOX) + VOFF
@@ -3308,12 +3469,43 @@ function segmentSceneSplat() {
 		}
 	}
 
+	const minBlob = hasGround ? MIN_BLOB : Math.max(40, Math.floor(MIN_BLOB / 4))
 	const blobOf = new Int32Array(n).fill(-1)
 	for (const v of voxels.values()) {
-		const keep = blobs[v.blob].count >= MIN_BLOB // tiny blobs = grass tufts → stay ground
+		const keep = blobs[v.blob].count >= minBlob // tiny floor blobs stay ground; object-only specks attach below
 		if (keep) for (const gi of v.idx) blobOf[gi] = v.blob
 	}
-	const bigBlobIds = blobs.map((b, id) => id).filter(id => blobs[id].count >= MIN_BLOB)
+	const bigBlobIds = blobs.map((b, id) => id).filter(id => blobs[id].count >= minBlob)
+	if (!hasGround && !bigBlobIds.length && blobs.length) {
+		bigBlobIds.push(blobs.reduce((best, blob, id) => blob.count > blobs[best].count ? id : best, 0))
+		for (const v of voxels.values()) if (v.blob === bigBlobIds[0]) for (const gi of v.idx) blobOf[gi] = bigBlobIds[0]
+	}
+
+	// With no floor, there must not be a synthetic "ground remainder" piece. Attach
+	// sparse disconnected reconstruction specks to the nearest substantial object.
+	if (!hasGround && bigBlobIds.length) {
+		const centres = new Map(bigBlobIds.map(id => [id, { x: 0, y: 0, z: 0, n: 0 }]))
+		for (let i = 0; i < n; i++) {
+			const c = centres.get(blobOf[i])
+			if (!c) continue
+			c.x += pxs[i]; c.y += pys[i]; c.z += pzs[i]; c.n++
+		}
+		for (const c of centres.values()) {
+			const d = Math.max(1, c.n)
+			c.x /= d; c.y /= d; c.z /= d
+		}
+		for (let i = 0; i < n; i++) {
+			if (blobOf[i] >= 0) continue
+			let nearest = bigBlobIds[0]
+			let best = Infinity
+			for (const id of bigBlobIds) {
+				const c = centres.get(id)
+				const d = (pxs[i] - c.x) ** 2 + (pys[i] - c.y) ** 2 + (pzs[i] - c.z) ** 2
+				if (d < best) { best = d; nearest = id }
+			}
+			blobOf[i] = nearest
+		}
+	}
 
 	// Base-fringe claim: floor-band gaussians directly under a blob's (dilated) footprint
 	// and above the fringe floor join that blob, so objects keep their contact base.
@@ -3329,7 +3521,7 @@ function segmentSceneSplat() {
 		}
 		dilatedCols.set(blobId, out)
 	}
-	for (let i = 0; i < n; i++) {
+	for (let i = 0; hasGround && i < n; i++) {
 		if (blobOf[i] >= 0) continue
 		const floor = floorLevel[cellOfXZ(pxs[i], pzs[i])]
 		if (pys[i] <= floor + FRINGE_LOW || pys[i] > floor + FLOOR_BAND) continue
@@ -3356,7 +3548,7 @@ function segmentSceneSplat() {
 		// (they sneak in via the fringe claim and read as floor patches when moved).
 		// Genuine object material nearby survives: rock skirts are chunky (not razor
 		// thin) and tent walls are thin but stand upright (normal not vertical).
-		if (part !== ground && center.y <= floorLevel[cellOfXZ(center.x, center.z)] + FLOOR_BAND + SKIN_BAND_PAD) {
+		if (hasGround && part !== ground && center.y <= floorLevel[cellOfXZ(center.x, center.z)] + FLOOR_BAND + SKIN_BAND_PAD) {
 			const ax = Math.abs(scales.x)
 			const ay = Math.abs(scales.y)
 			const az = Math.abs(scales.z)
@@ -3390,9 +3582,10 @@ function segmentSceneSplat() {
 		world.addGenerated(mesh, [])
 		return 1
 	}
-	let pieces = seatPiece(ground, "floor")
+	let pieces = hasGround ? seatPiece(ground, "floor") : 0
 	for (const id of ranked) pieces += seatPiece(blobParts.get(id), "object")
-	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), ${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin gaussian(s) left behind)`)
+	const remainder = hasGround ? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin gaussian(s) left behind` : "no ground piece"
+	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), ${remainder})`)
 }
 
 // Whole-scene generation: ONE capture of the floor + all primitives goes directly to
@@ -3402,7 +3595,8 @@ function segmentSceneSplat() {
 // currently unused.
 async function generateWorld(prompt) {
 	if (generating) return
-	if (!world.groundInkBounds() && !world.primitives.length) {
+	const hasGround = Boolean(world.groundInkBounds())
+	if (!hasGround && !world.primitives.length) {
 		// The status line is CSS-hidden, so surface the hint where the user is looking.
 		els.chatPrompt.value = ""
 		els.chatPrompt.placeholder = "Draw some ground with the paint tool first…"
@@ -3426,6 +3620,7 @@ async function generateWorld(prompt) {
 		try { output = (await newOutput()).index } catch {}
 
 		const box = wholeSceneBox()
+		const subjectMeshes = hasGround ? world.allBlockoutMeshes() : [...world.primitives]
 		const tCap = performance.now()
 		const capture = await captureWorld(renderer, scene, world, box)
 		const captureMs = performance.now() - tCap
@@ -3438,26 +3633,31 @@ async function generateWorld(prompt) {
 			kind: "scene",
 			output,
 			name: "scene",
-			colors: primitiveColors(world.allBlockoutMeshes()),
+			hasGround,
+			colors: primitiveColors(subjectMeshes),
 			image: capture.guide,
 		})
 		// Fit a copy so splatStore retains the pristine TripoSplat bytes for ZIP/history.
-		// fillXZ = the floors' proven fit mode: X/Z land exactly on the drawn footprint,
-		// height stays proportional (the guide blocks' height is no target — a 1u cube
-		// legitimately becomes a 9u pine).
-		await seatSubject(bytes.slice(), box, "scene", world.allBlockoutMeshes(), {
+		// Exact X/Z footprint fitting is useful when a scene includes terrain, but it
+		// distorts object-only splats toward a thin block-out depth. Preserve Tripo's
+		// proportions for no-ground scenes by leaving them on the uniform fit path.
+		// WS_SCENE_YAW corrects the with-terrain capture pose. Objects-only scenes come
+		// back in a CONTENT-DEPENDENT orientation, so estimate the quarter-turn per run
+		// against the block-out (fallback: the object yaw for monochrome/degenerate cases).
+		const sceneYawDeg = hasGround ? sceneFit.yawDeg : (estimateSceneYaw(bytes, subjectMeshes) ?? objectFit.yawDeg)
+		await seatSubject(bytes.slice(), box, "scene", subjectMeshes, {
 			kind: "scene",
 			yawTurns: OBJECT_YAW_TURNS,
-			yawDeg: sceneFit.yawDeg,
+			yawDeg: sceneYawDeg,
 			yOffset: sceneFit.yOffset,
-			fillXZ: true,
-			colors: primitiveColors(world.allBlockoutMeshes()),
+			fillXZ: hasGround,
+			colors: primitiveColors(subjectMeshes),
 		})
 		splatStore.set("scene", bytes)
-		sessionSubjects = [{ name: "scene", kind: "scene", plotId: null, yawTurns: OBJECT_YAW_TURNS, fitHeight: false }]
+		sessionSubjects = [{ name: "scene", kind: "scene", plotId: null, yawTurns: OBJECT_YAW_TURNS, fitHeight: false, hasGround, yawDeg: sceneYawDeg }]
 		// Carve the one splat into per-object pieces so View can move them; a segmentation
 		// failure must never sink the (paid) generation — the monolith is a fine fallback.
-		try { segmentSceneSplat() } catch (error) { console.warn("segment:", error) }
+		try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment:", error) }
 
 		console.log(`[timing] whole scene ${((performance.now() - genStart) / 1000).toFixed(1)}s — one capture ${(captureMs / 1000).toFixed(1)}s · one texture edit · one TripoSplat request`)
 
@@ -4661,8 +4861,9 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 	pushBuildFrame()
 	beginNewSplatFrame()
 
-	// Reload primitives (resets generated state, rebuilds block-out).
-	await uploadPrimitives(new File([primBytes], "primitives.json", { type: "application/json" }))
+	// Reload primitives (resets generated state, rebuilds block-out). Must be the
+	// lock-free core — this path runs under the caller's `generating` lock.
+	await applyPrimitives(new File([primBytes], "primitives.json", { type: "application/json" }))
 
 	// Pull fresh fit params from the server so the user can tune via .env and re-fit.
 	const cfg = await getConfig()
@@ -4734,10 +4935,15 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 			const seated = await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
 				kind: s.kind,
 				yawTurns: s.yawTurns ?? 0,
-				yawDeg: fit.yawDeg,
+				// Objects-only scenes reuse the yaw estimated at generation time (stored on the
+				// subject); older no-ground exports re-estimate against the restored block-out.
+				// Ground scenes and old sessions keep the config scene yaw they seated with.
+				yawDeg: s.kind === "scene" && s.hasGround === false
+					? (Number.isFinite(s.yawDeg) ? s.yawDeg : (estimateSceneYaw(splatBytes, sourcePrimitives) ?? objectFit.yawDeg))
+					: fit.yawDeg,
 				yOffset: fit.yOffset,
 				fitHeight: Boolean(s.fitHeight) && s.kind !== "scene",
-				fillXZ: s.kind === "scene", // scenes restore with the same footprint-exact fit they were generated with
+				fillXZ: s.kind === "scene" && s.hasGround !== false, // old sessions default to their original footprint-exact fit
 				colors,
 				plotId,
 				clipBoxes,
@@ -4765,9 +4971,17 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 }
 
 // Load a primitives JSON file (from downloadPrimitives), replacing the current block-out
-// and restoring the support links once every mesh exists.
+// and restoring the support links once every mesh exists. The user-facing input handler
+// guards on the `generating` lock; applyPrimitives is the lock-free core so ZIP/history
+// restores (which run UNDER that lock) can swap the block-out too — the guarded wrapper
+// silently skipped the import there, leaving every restore without its primitives.
 async function uploadPrimitives(file) {
 	if (!file || generating) return
+	await applyPrimitives(file)
+}
+
+async function applyPrimitives(file) {
+	if (!file) return
 	let parsed
 	try {
 		parsed = JSON.parse(await file.text())

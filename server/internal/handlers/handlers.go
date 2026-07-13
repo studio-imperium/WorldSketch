@@ -117,7 +117,11 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	promptText := prompts.ImageFor(kind, prompt, groundColor, strings.TrimSpace(r.FormValue("label")))
+	hasGround := true // backwards-compatible default for older clients
+	if kind == "scene" {
+		hasGround = config.ParseBoolDefault(r.FormValue("has_ground"), true)
+	}
+	promptText := prompts.ImageFor(kind, prompt, groundColor, strings.TrimSpace(r.FormValue("label")), hasGround)
 	imageSettings := config.SubjectImageEditSettings(kind)
 	if config.ParseBoolDefault(r.FormValue("skip_image_edit"), false) {
 		imageSettings.SkipImageEdit = true
