@@ -485,9 +485,9 @@ body.tab-draw .draw-overlay {
 	gap: 0.6rem;
 }
 
-/* Unified left rail (art-tool style): tools on top, a small curated palette and brush
-   sizes below — replaces the bottom tool dock + the big top-right palette panel.
-   Deliberately DENSE like tldraw/Figma: small buttons, near-zero gaps, small dots. */
+/* Unified left rail (art-tool style): tools only — the colour + brush palette lives
+   in a contextual flyout beside it (tldraw/FigJam pattern: styles appear only when
+   the active tool consumes them). Deliberately DENSE: small buttons, tiny gaps. */
 .side-rail {
 	position: absolute;
 	left: 0.9rem;
@@ -508,6 +508,7 @@ body.tab-draw .draw-overlay {
 }
 
 .side-rail .tool-btn {
+	position: relative;
 	width: 2.15rem;
 	height: 2.15rem;
 	min-width: 2.15rem;
@@ -520,14 +521,54 @@ body.tab-draw .draw-overlay {
 	height: 1.1rem;
 }
 
+/* The pen wears the current colour as a little dot, like FigJam's marker. */
+.tool-color-dot {
+	position: absolute;
+	right: 0.24rem;
+	bottom: 0.24rem;
+	width: 0.5rem;
+	height: 0.5rem;
+	border-radius: 50%;
+	background: #587553;
+	box-shadow: 0 0 0 1.5px #fff;
+	pointer-events: none;
+}
+
 .rail-divider {
 	width: 82%;
 	height: 1px;
 	background: #e6e8eb;
 }
 
+/* Colour + brush flyout: a small card floating beside the rail. Opened by
+   renderer.js whenever the pen/box tool is active or a primitive is selected. */
+.rail-flyout {
+	position: absolute;
+	left: calc(100% + 0.55rem);
+	top: 50%;
+	transform: translateY(-50%) translateX(-0.3rem);
+	display: flex;
+	flex-direction: column;
+	align-items: center;
+	gap: 0.3rem;
+	padding: 0.4rem;
+	background: #fff;
+	border: 1px solid rgba(15, 23, 42, 0.08);
+	border-radius: 0.8rem;
+	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
+	opacity: 0;
+	visibility: hidden;
+	transition: opacity 0.14s ease, transform 0.14s ease, visibility 0.14s;
+}
+
+.rail-flyout.open {
+	opacity: 1;
+	visibility: visible;
+	transform: translateY(-50%);
+}
+
 .side-rail .swatch-grid {
-	grid-template-columns: repeat(2, 1.8rem);
+	grid-template-columns: repeat(3, 1.8rem);
 	gap: 0.1rem;
 }
 
@@ -545,22 +586,216 @@ body.tab-draw .draw-overlay {
 	height: 1.05rem;
 }
 
+/* Active colour reads as a ring around the dot — the standard palette affordance. */
+.side-rail .color-swatch.active {
+	background: transparent !important;
+}
+
+.side-rail .color-swatch.active span {
+	box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08), 0 0 0 2px #fff, 0 0 0 3.5px #5b6ee1;
+}
+
+/* Hovering a swatch reveals its remove badge (Canva-style palette editing). */
+.side-rail .color-swatch {
+	position: relative;
+	overflow: visible;
+}
+
+.swatch-del {
+	position: absolute;
+	top: -0.2rem;
+	right: -0.2rem;
+	width: 0.9rem;
+	height: 0.9rem;
+	display: none;
+	place-items: center;
+	border-radius: 50%;
+	background: #fff;
+	border: 1px solid #d8dee4;
+	color: #69717d;
+	font-size: 0.72rem;
+	line-height: 1;
+	cursor: pointer;
+	box-shadow: 0 1px 3px rgba(15, 23, 42, 0.2);
+	z-index: 1;
+}
+
+.color-swatch:hover .swatch-del {
+	display: grid;
+}
+
+.swatch-del:hover {
+	background: #fde8e8;
+	border-color: #f0b9b9;
+	color: #d64545;
+}
+
+/* Custom colour picker popover: SV square + hue strip + hex field, anchored beside
+   the palette — replaces the OS colour dialog that opened in the screen corner. */
+.color-pop {
+	position: absolute;
+	left: calc(100% + 0.55rem);
+	top: 50%;
+	transform: translateY(-50%);
+	width: 10.5rem;
+	padding: 0.5rem;
+	display: flex;
+	flex-direction: column;
+	gap: 0.45rem;
+	background: #fff;
+	border: 1px solid rgba(15, 23, 42, 0.08);
+	border-radius: 0.8rem;
+	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
+}
+
+.color-pop-sv {
+	position: relative;
+	width: 100%;
+	height: 7rem;
+	border-radius: 0.5rem;
+	cursor: crosshair;
+	touch-action: none;
+	background:
+		linear-gradient(to top, #000, rgba(0, 0, 0, 0)),
+		linear-gradient(to right, #fff, var(--pop-hue, #f00));
+}
+
+.color-pop-hue {
+	position: relative;
+	height: 0.75rem;
+	border-radius: 999px;
+	cursor: ew-resize;
+	touch-action: none;
+	background: linear-gradient(to right, #f00, #ff0, #0f0, #0ff, #00f, #f0f, #f00);
+}
+
+.color-pop-thumb {
+	position: absolute;
+	width: 0.85rem;
+	height: 0.85rem;
+	box-sizing: border-box;
+	border-radius: 50%;
+	border: 2px solid #fff;
+	box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.25), 0 1px 3px rgba(15, 23, 42, 0.3);
+	transform: translate(-50%, -50%);
+	pointer-events: none;
+}
+
+.color-pop-hue .color-pop-thumb {
+	top: 50%;
+}
+
+.color-pop-row {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+}
+
+.color-pop-preview {
+	flex: none;
+	width: 1.6rem;
+	height: 1.6rem;
+	border-radius: 0.45rem;
+	box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.1);
+}
+
+.color-pop-hex {
+	flex: 1;
+	min-width: 0;
+	padding: 0.3rem 0.4rem;
+	font-size: 0.82rem;
+	text-transform: lowercase;
+}
+
+.color-pop-add {
+	flex: none;
+	border: 0;
+	border-radius: 0.45rem;
+	padding: 0.34rem 0.55rem;
+	background: #5b6ee1;
+	color: #fff;
+	font-weight: 600;
+	font-size: 0.82rem;
+	cursor: pointer;
+}
+
+.color-pop-add:hover {
+	background: #4a5cd0;
+}
+
 .side-rail .add-color-swatch svg {
 	width: 0.95rem;
 	height: 0.95rem;
 }
 
-.side-rail .brush-grid {
-	grid-template-columns: repeat(3, 1.8rem);
-	gap: 0.1rem;
+/* Brush size: a continuous slider; the dot beside it previews the current size.
+   Width matches the 3-column colour grid above so the flyout keeps its footprint. */
+.brush-slider {
+	display: flex;
+	align-items: center;
+	gap: 0.35rem;
+	width: 5.8rem;
+	padding: 0.2rem 0.15rem;
 }
 
-.side-rail .brush-swatch {
-	width: 1.8rem;
-	height: 1.8rem;
-	min-width: 1.8rem;
-	min-height: 1.8rem;
-	border-radius: 0.4rem;
+.brush-size-dot {
+	flex: none;
+	display: grid;
+	place-items: center;
+	width: 1.05rem;
+	height: 1.05rem;
+}
+
+.brush-size-dot::before {
+	content: "";
+	width: var(--brush-dot, 0.66rem);
+	height: var(--brush-dot, 0.66rem);
+	border-radius: 50%;
+	background: #232323;
+	box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
+}
+
+.brush-slider input[type="range"] {
+	flex: 1;
+	min-width: 0;
+	margin: 0;
+	appearance: none;
+	-webkit-appearance: none;
+	height: 1rem;
+	background: transparent;
+	cursor: pointer;
+}
+
+.brush-slider input[type="range"]::-webkit-slider-runnable-track {
+	height: 0.2rem;
+	border-radius: 999px;
+	background: #e6e8eb;
+}
+
+.brush-slider input[type="range"]::-webkit-slider-thumb {
+	-webkit-appearance: none;
+	width: 0.8rem;
+	height: 0.8rem;
+	margin-top: -0.3rem;
+	border-radius: 50%;
+	background: #5b6ee1;
+	border: 2px solid #fff;
+	box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.12);
+}
+
+.brush-slider input[type="range"]::-moz-range-track {
+	height: 0.2rem;
+	border-radius: 999px;
+	background: #e6e8eb;
+}
+
+.brush-slider input[type="range"]::-moz-range-thumb {
+	width: 0.8rem;
+	height: 0.8rem;
+	border-radius: 50%;
+	background: #5b6ee1;
+	border: 2px solid #fff;
+	box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.12);
 }
 
 body.tab-view .side-rail,
@@ -575,34 +810,6 @@ body.tab-draw .side-rail {
 .color-palette,
 .brush-palette {
 	border-radius: 0.85rem;
-}
-
-.brush-grid {
-	display: grid;
-	grid-template-columns: repeat(4, 2.7rem);
-	gap: 0.45rem;
-}
-
-.brush-swatch {
-	display: grid;
-	place-items: center;
-	width: 2.7rem;
-	height: 2.7rem;
-	min-width: 2.7rem;
-	min-height: 2.7rem;
-	padding: 0;
-	border-radius: 0.5rem;
-}
-
-.brush-swatch:hover,
-.brush-swatch.active {
-	background: color-mix(in srgb, #5b6ee1 22%, transparent) !important;
-}
-
-.brush-swatch span {
-	border-radius: 50%;
-	background: #232323;
-	box-shadow: inset 0 0 0 1px rgba(15, 23, 42, 0.08);
 }
 
 /* Top-left settings: a single gear button that opens a popover holding the
@@ -1017,8 +1224,7 @@ input[type="color"] {
 		box-sizing: border-box;
 	}
 
-	.swatch-grid,
-	.brush-grid {
+	.swatch-grid {
 		grid-template-columns: repeat(4, 1fr);
 	}
 

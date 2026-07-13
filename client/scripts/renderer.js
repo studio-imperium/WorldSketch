@@ -7,6 +7,7 @@ import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { addEdgeOutline, clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
 import { addBuild, listBuilds, getBuildSplats, deleteBuild, clearBuilds } from "/scripts/history.js"
+import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
 import { createSky } from "/scripts/sky.js"
 
 const root = document.getElementById("canvas")
@@ -131,10 +132,20 @@ const els = {
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
 	viewTabs: [...document.querySelectorAll("[data-view-tab]")],
 	colorGrid: document.querySelector(".swatch-grid"),
+	paletteFlyout: document.getElementById("palette_flyout"),
+	penColorDot: document.getElementById("pen_color_dot"),
 	colorSwatches: [...document.querySelectorAll("[data-color]")],
 	addColor: document.getElementById("add_color_btn"),
-	customColor: document.getElementById("custom_color_input"),
-	brushSwatches: [...document.querySelectorAll("[data-scale]")],
+	colorPop: document.getElementById("color_pop"),
+	colorPopSv: document.getElementById("color_pop_sv"),
+	colorPopSvThumb: document.getElementById("color_pop_sv_thumb"),
+	colorPopHue: document.getElementById("color_pop_hue"),
+	colorPopHueThumb: document.getElementById("color_pop_hue_thumb"),
+	colorPopPreview: document.getElementById("color_pop_preview"),
+	colorPopHex: document.getElementById("color_pop_hex"),
+	colorPopAdd: document.getElementById("color_pop_add"),
+	brushSlider: document.getElementById("brush_size_slider"),
+	brushSizeDot: document.getElementById("brush_size_dot"),
 	generate: document.getElementById("generate_btn"),
 	drawCanvas: document.getElementById("draw_canvas"),
 	drawClear: document.getElementById("draw_clear_btn"),
@@ -1046,6 +1057,18 @@ function finishGizmoDrag() {
 
 // --- Tools / palette --------------------------------------------------------
 
+// Contextual palette (tldraw/FigJam style): the colour + brush flyout only shows
+// when the active tool consumes them (pen paints, box places coloured blocks) or
+// a primitive is selected for recolouring. Everything else keeps a slim rail.
+const paletteTools = new Set(["paint", "box"])
+
+function updatePaletteFlyout() {
+	const open = paletteTools.has(activeTool) || Boolean(selectedPrimitive)
+	els.paletteFlyout?.classList.toggle("open", open)
+	els.paletteFlyout?.setAttribute("aria-hidden", String(!open))
+	if (!open) toggleColorPop(false) // the picker never outlives its flyout
+}
+
 function setActiveTool(tool) {
 	const previous = activeTool
 	activeTool = tool
@@ -1063,6 +1086,7 @@ function setActiveTool(tool) {
 	syncPlacementPreview()
 	updateElevationHandles()
 	updateTransformGizmo()
+	updatePaletteFlyout()
 }
 
 function syncPlacementPreview() {
@@ -1098,6 +1122,7 @@ function selectPrimitive(mesh) {
 		syncActiveColorFromSelection(mesh)
 	}
 	updateTransformGizmo()
+	updatePaletteFlyout()
 }
 
 // An elevated floor's flat collider box would show a flat outline floating over the curved
@@ -1134,6 +1159,7 @@ function refreshGroundSelectionHighlight() {
 
 function setActiveColorOnly(color) {
 	activeColor = color
+	if (els.penColorDot) els.penColorDot.style.background = color
 	if (placementPreview) {
 		placementPreview.material.color.set(color)
 		placementPreview.userData.baseColor = placementPreview.material.color.getHexString()
@@ -1163,39 +1189,164 @@ function applyColor(color) {
 	}
 }
 
-function bindColorSwatch(swatch) {
-	swatch.addEventListener("click", () => applyColor(swatch.dataset.color))
+// The palette is user-editable (add via the picker popover, hover-x to remove) and
+// persists across sessions. Removing a swatch never touches colours already painted
+// into the world — the palette only feeds the picker UI.
+const DEFAULT_PALETTE = ["#587553", "#6abe30", "#8f563b", "#d9a066", "#847e87", "#306082", "#ac3232", "#eec39a"]
+const PALETTE_STORE_KEY = "worldsketch.palette"
+
+function loadPalette() {
+	try {
+		const saved = JSON.parse(localStorage.getItem(PALETTE_STORE_KEY))
+		if (Array.isArray(saved) && saved.length && saved.every(c => /^#[0-9a-f]{6}$/i.test(c))) {
+			return saved.map(c => c.toLowerCase())
+		}
+	} catch { /* corrupt store — fall back to defaults */ }
+	return DEFAULT_PALETTE.slice()
+}
+
+let palette = loadPalette()
+
+function savePalette() {
+	try { localStorage.setItem(PALETTE_STORE_KEY, JSON.stringify(palette)) } catch { /* private mode */ }
+}
+
+function renderPalette() {
+	for (const swatch of els.colorSwatches) swatch.remove()
+	els.colorSwatches = palette.map(hex => {
+		const swatch = document.createElement("button")
+		swatch.type = "button"
+		swatch.className = "color-swatch btn btn-ghost btn-square"
+		swatch.dataset.color = hex
+		swatch.setAttribute("aria-label", hex)
+		swatch.title = hex
+		const dot = document.createElement("span")
+		dot.style.background = hex
+		swatch.appendChild(dot)
+		if (palette.length > 1) {
+			const del = document.createElement("span")
+			del.className = "swatch-del"
+			del.title = "Remove color"
+			del.setAttribute("role", "button")
+			del.setAttribute("aria-label", `Remove ${hex}`)
+			del.textContent = "×"
+			del.addEventListener("click", event => {
+				event.stopPropagation()
+				removePaletteColor(hex)
+			})
+			swatch.appendChild(del)
+		}
+		swatch.addEventListener("click", () => applyColor(hex))
+		els.colorGrid.insertBefore(swatch, els.addColor)
+		return swatch
+	})
+	setActiveColorOnly(activeColor) // re-mark the active swatch
 }
 
 function addPaletteColor(color) {
 	const hex = color.toLowerCase()
-	const existing = els.colorSwatches.find(swatch => swatch.dataset.color.toLowerCase() === hex)
-	if (existing) {
-		applyColor(hex)
-		return
+	if (!palette.includes(hex)) {
+		palette.push(hex)
+		savePalette()
+		renderPalette()
 	}
-	const swatch = document.createElement("button")
-	swatch.type = "button"
-	swatch.className = "color-swatch btn btn-ghost btn-square"
-	swatch.dataset.color = hex
-	swatch.setAttribute("aria-label", hex)
-	swatch.title = hex
-	const dot = document.createElement("span")
-	dot.style.background = hex
-	swatch.appendChild(dot)
-	els.colorGrid.insertBefore(swatch, els.addColor)
-	els.colorSwatches.push(swatch)
-	bindColorSwatch(swatch)
 	applyColor(hex)
+}
+
+function removePaletteColor(hex) {
+	if (palette.length <= 1) return // never empty the palette
+	palette = palette.filter(c => c !== hex)
+	savePalette()
+	renderPalette()
+	if (activeColor.toLowerCase() === hex) applyColor(palette[0])
 }
 
 function applyBrushScale(scale) {
 	activeBrushScale = scale
 	if (placementPreview) placementPreview.userData.type = null
 	syncPlacementPreview()
-	for (const swatch of els.brushSwatches) {
-		swatch.classList.toggle("active", Number(swatch.dataset.scale) === scale)
+	if (Number(els.brushSlider.value) !== scale) els.brushSlider.value = scale
+	const t = (scale - Number(els.brushSlider.min)) / (Number(els.brushSlider.max) - Number(els.brushSlider.min))
+	els.brushSizeDot.style.setProperty("--brush-dot", `${(0.4 + t * 0.65).toFixed(3)}rem`)
+}
+
+// --- Colour picker popover ---------------------------------------------------
+// Replaces the native OS colour dialog (which opened as a floating panel in the
+// screen corner) with the canvas-app standard: an anchored popover holding an
+// SV square, a hue strip and a hex field.
+
+const picker = { h: 0, s: 0, v: 0 } // seeded from the active colour on open
+
+function normalizeHex(value) {
+	const raw = String(value).trim().replace(/^#/, "").toLowerCase()
+	if (/^[0-9a-f]{6}$/.test(raw)) return `#${raw}`
+	if (/^[0-9a-f]{3}$/.test(raw)) return `#${[...raw].map(c => c + c).join("")}`
+	return null
+}
+
+function hexToHsv(hex) {
+	const n = parseInt(hex.slice(1), 16)
+	const r = (n >> 16 & 255) / 255, g = (n >> 8 & 255) / 255, b = (n & 255) / 255
+	const max = Math.max(r, g, b), d = max - Math.min(r, g, b)
+	let h = 0
+	if (d) {
+		if (max === r) h = ((g - b) / d + (g < b ? 6 : 0)) * 60
+		else if (max === g) h = ((b - r) / d + 2) * 60
+		else h = ((r - g) / d + 4) * 60
 	}
+	return { h, s: max ? d / max : 0, v: max }
+}
+
+function hsvToHex({ h, s, v }) {
+	const f = n => {
+		const k = (n + h / 60) % 6
+		const c = v - v * s * Math.max(0, Math.min(k, 4 - k, 1))
+		return Math.round(c * 255).toString(16).padStart(2, "0")
+	}
+	return `#${f(5)}${f(3)}${f(1)}`
+}
+
+// Push the picker state into the popover widgets. `fromHex` keeps the hex field
+// untouched while the user is typing in it.
+function syncPicker({ fromHex = false } = {}) {
+	if (!els.colorPop) return
+	const hex = hsvToHex(picker)
+	els.colorPopSv.style.setProperty("--pop-hue", `hsl(${picker.h}, 100%, 50%)`)
+	els.colorPopSvThumb.style.left = `${picker.s * 100}%`
+	els.colorPopSvThumb.style.top = `${(1 - picker.v) * 100}%`
+	els.colorPopHueThumb.style.left = `${picker.h / 360 * 100}%`
+	els.colorPopPreview.style.background = hex
+	if (!fromHex) els.colorPopHex.value = hex
+}
+
+function toggleColorPop(open) {
+	if (!els.colorPop) return
+	const show = open ?? els.colorPop.classList.contains("hidden")
+	els.colorPop.classList.toggle("hidden", !show)
+	els.addColor?.setAttribute("aria-expanded", String(show))
+	if (show) {
+		Object.assign(picker, hexToHsv(normalizeHex(activeColor) ?? "#639bff"))
+		syncPicker()
+		els.colorPopHex?.focus()
+	}
+}
+
+function bindPickerDrag(el, apply) {
+	if (!el) return
+	el.addEventListener("pointerdown", event => {
+		event.preventDefault()
+		el.setPointerCapture(event.pointerId)
+		const move = ev => {
+			const rect = el.getBoundingClientRect()
+			const x = Math.min(Math.max((ev.clientX - rect.left) / rect.width, 0), 1)
+			const y = Math.min(Math.max((ev.clientY - rect.top) / rect.height, 0), 1)
+			apply(x, y)
+			syncPicker()
+		}
+		move(event)
+		el.addEventListener("pointermove", move)
+		el.addEventListener("pointerup", () => el.removeEventListener("pointermove", move), { once: true })
+	})
 }
 
 // --- Build / View tabs --------------------------------------------------------
@@ -1926,6 +2077,7 @@ renderer.domElement.addEventListener("pointerup", event => {
 			addPlotAt(drag.pendingCell) // a clean click on an empty cell → new plot
 		}
 		if (drag.actionPushed && !drag.mutated) activeBuildHistory()?.undo.pop() // drag never moved — drop its checkpoint
+		if (drag.mutated) persistFramesSoon() // a drag can outlive the debounce its checkpoint armed
 		renderer.domElement.releasePointerCapture(event.pointerId)
 		drag = null
 		renderer.domElement.classList.remove("is-dragging")
@@ -2711,6 +2863,7 @@ function renderFramesPanel() {
 		row.addEventListener("click", () => activateFrame(uiTab, frame.id))
 		els.framesList.appendChild(row)
 	}
+	persistFramesSoon() // every frame add/delete/switch re-renders, so this catches them all
 }
 
 // -- Draw frames: the live sketch state IS the active frame's data (by reference). --
@@ -2797,6 +2950,7 @@ function beginBuildAction() {
 	h.undo.push(snapshotBuildWorld())
 	if (h.undo.length > 30) h.undo.shift()
 	h.redo.length = 0
+	persistFramesSoon() // the debounced save runs after the mutation this checkpoints
 }
 
 async function undoBuild() {
@@ -2807,6 +2961,7 @@ async function undoBuild() {
 		const snap = h.undo.pop()
 		h.redo.push(snapshotBuildWorld())
 		await applyBuildSnapshot(snap)
+		persistFramesSoon()
 	} finally {
 		buildHistoryBusy = false
 	}
@@ -2820,6 +2975,7 @@ async function redoBuild() {
 		const snap = h.redo.pop()
 		h.undo.push(snapshotBuildWorld())
 		await applyBuildSnapshot(snap)
+		persistFramesSoon()
 	} finally {
 		buildHistoryBusy = false
 	}
@@ -2835,6 +2991,17 @@ function emptyBuildSnapshot() {
 }
 
 async function applyBuildSnapshot(snap) {
+	// Persistence guard: while a snapshot is being applied the live world is half-built,
+	// so serializeFramesState must not re-snapshot the active frame from it.
+	applyingBuildSnapshot++
+	try {
+		await applyBuildSnapshotInner(snap)
+	} finally {
+		applyingBuildSnapshot--
+	}
+}
+
+async function applyBuildSnapshotInner(snap) {
 	selectPrimitive(null)
 	for (const mesh of [...world.primitives]) world.removePrimitive(mesh)
 	// The drawable ground sheet is permanent — restoring a snapshot means wiping the ink
@@ -2992,6 +3159,73 @@ function addFrameForActiveTab() {
 		applyUiTab()
 	}
 	renderFramesPanel()
+}
+
+// --- Frame persistence -----------------------------------------------------------
+// Draw + Build frames survive reloads: every frame change (and every block-out edit,
+// debounced) writes the serialized lists to IndexedDB, and boot restores them. Splat
+// frames are NOT persisted — their meshes exist only as fitted GPU splats; the Build
+// history panel (history.js) is the durable store for generated splats.
+
+let applyingBuildSnapshot = 0
+let persistTimer = 0
+
+function serializeFramesState() {
+	// Live edits land in their frames before writing — unless a snapshot swap is mid-
+	// flight, when the active frame's stored snapshot is already the truth.
+	if (!applyingBuildSnapshot && !buildHistoryBusy) {
+		stashActiveDrawFrame()
+		snapshotActiveBuildFrame()
+	}
+	return {
+		frameSeq,
+		activeDrawId: activeFrameId.draw,
+		activeBuildId: activeFrameId.build,
+		draw: frames.draw.map(f => ({ id: f.id, name: f.name, strokes: f.strokes, fills: [...(f.fills ?? [])], pan: f.pan })),
+		// Undo/redo stacks (frame.history) stay session-local — 30 snapshots per frame
+		// is too heavy to rewrite on every edit.
+		build: frames.build.map(f => ({ id: f.id, name: f.name, snapshot: f.snapshot })),
+	}
+}
+
+function persistFramesSoon() {
+	clearTimeout(persistTimer)
+	persistTimer = setTimeout(persistFramesNow, 800)
+}
+
+function persistFramesNow() {
+	clearTimeout(persistTimer)
+	saveFramesState(serializeFramesState()).catch(err => console.warn("Frame save failed:", err))
+}
+
+// Flush on tab-hide/close — the debounce window would otherwise drop the last edits.
+addEventListener("pagehide", persistFramesNow)
+document.addEventListener("visibilitychange", () => {
+	if (document.visibilityState === "hidden") persistFramesNow()
+})
+
+// Rebuild the frame lists from the last session and re-enter the active build frame.
+// Returns false (leaving state untouched) when there is nothing saved, so boot can
+// fall through to the fresh-world path.
+async function restoreFramesState() {
+	let saved = null
+	try {
+		saved = await loadFramesState()
+	} catch (err) {
+		console.warn("Frame restore failed:", err)
+	}
+	if (!saved?.build?.length) return false
+	frames.draw = (saved.draw ?? []).map(f => ({ id: f.id, name: f.name, strokes: f.strokes ?? [], fills: new Map(f.fills ?? []), pan: f.pan ?? { x: 0, y: 0 } }))
+	frames.build = saved.build.map(f => ({ id: f.id, name: f.name, snapshot: f.snapshot ?? null }))
+	frameSeq = Math.max(saved.frameSeq ?? 0, ...frames.draw.map(f => f.id), ...frames.build.map(f => f.id), 0)
+	const drawFrame = frames.draw.find(f => f.id === saved.activeDrawId) ?? frames.draw.at(-1)
+	if (drawFrame) activateDrawFrame(drawFrame)
+	const buildFrame = frames.build.find(f => f.id === saved.activeBuildId) ?? frames.build.at(-1)
+	activeFrameId.build = buildFrame.id
+	await applyBuildSnapshot(buildFrame.snapshot ?? emptyBuildSnapshot())
+	renderFramesPanel()
+	syncViewGate()
+	return true
 }
 
 // --- Generation -------------------------------------------------------------
@@ -6229,11 +6463,34 @@ for (const button of els.toolButtons) button.addEventListener("click", () => set
 for (const button of els.viewToolButtons) button.addEventListener("click", () => setViewTool(button.dataset.viewTool))
 for (const button of els.viewTabs) button.addEventListener("click", () => setUiTab(button.dataset.viewTab))
 els.frameAdd?.addEventListener("click", addFrameForActiveTab)
-for (const swatch of els.colorSwatches) bindColorSwatch(swatch)
-for (const swatch of els.brushSwatches) swatch.addEventListener("click", () => applyBrushScale(Number(swatch.dataset.scale)))
+renderPalette()
+els.brushSlider.addEventListener("input", () => applyBrushScale(Number(els.brushSlider.value)))
 
-els.addColor?.addEventListener("click", () => els.customColor?.click())
-els.customColor?.addEventListener("change", event => addPaletteColor(event.target.value))
+els.addColor?.addEventListener("click", () => toggleColorPop())
+bindPickerDrag(els.colorPopSv, (x, y) => { picker.s = x; picker.v = 1 - y })
+bindPickerDrag(els.colorPopHue, x => { picker.h = x * 360 })
+els.colorPopHex?.addEventListener("input", () => {
+	const hex = normalizeHex(els.colorPopHex.value)
+	if (!hex) return
+	Object.assign(picker, hexToHsv(hex))
+	syncPicker({ fromHex: true })
+})
+els.colorPopHex?.addEventListener("keydown", event => {
+	if (event.key === "Enter") {
+		event.preventDefault()
+		els.colorPopAdd?.click()
+	}
+})
+els.colorPopAdd?.addEventListener("click", () => {
+	addPaletteColor(hsvToHex(picker))
+	toggleColorPop(false)
+})
+// Click anywhere outside the picker closes it (the + button toggles it itself).
+document.addEventListener("pointerdown", event => {
+	if (!els.colorPop || els.colorPop.classList.contains("hidden")) return
+	if (els.colorPop.contains(event.target) || els.addColor?.contains(event.target)) return
+	toggleColorPop(false)
+})
 
 els.floorShot?.addEventListener("click", async () => {
 	try {
@@ -6307,7 +6564,8 @@ document.addEventListener("keydown", event => {
 	}
 	if (event.key === "Escape") {
 		const settingsOpen = !els.settingsPopover.classList.contains("hidden")
-		if (settingsOpen) toggleSettings(false)
+		if (els.colorPop && !els.colorPop.classList.contains("hidden")) toggleColorPop(false)
+		else if (settingsOpen) toggleSettings(false)
 		else if (rawSplatPreview) {
 			world.resetGenerated()
 			setStatus("")
@@ -6364,8 +6622,11 @@ function animate() {
 setActiveTool("pointer")
 applyColor(activeColor)
 applyBrushScale(activeBrushScale)
-pushBuildFrame()
-snapshotActiveBuildFrame()
+if (!(await restoreFramesState())) {
+	// Nothing saved from an earlier session — a fresh one-plot build is frame 1.
+	pushBuildFrame()
+	snapshotActiveBuildFrame()
+}
 applyUiTab() // start directly in Build; Draw is temporarily removed
 updateCamera()
 syncGenerateButton()

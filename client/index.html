@@ -52,33 +52,38 @@
 				<button class="tool-btn btn btn-ghost btn-square" data-tool="eraser" aria-label="Eraser" title="Eraser (blocks and drawn ground)">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 20h-10.5l-4.21 -4.3a1 1 0 0 1 0 -1.41l10 -10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3"></path><path d="M18 13.3l-6.3 -6.3"></path></svg>
 				</button>
-				<button class="tool-btn btn btn-ghost btn-square" data-tool="paint" aria-label="Draw ground / paint" title="Draw ground where there is none, paint terrain where there is">
-					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 21v-4a4 4 0 1 1 4 4h-4"></path><path d="M21 3a16 16 0 0 0 -12.8 10.2"></path><path d="M21 3a16 16 0 0 1 -10.2 12.8"></path><path d="M10.6 9a9 9 0 0 1 4.4 4.4"></path></svg>
+				<button class="tool-btn btn btn-ghost btn-square" data-tool="paint" aria-label="Pen" title="Pen — draw ground where there is none, paint terrain where there is">
+					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 20h4l10.5 -10.5a2.828 2.828 0 1 0 -4 -4l-10.5 10.5v4"></path><path d="M13.5 6.5l4 4"></path></svg>
+					<span class="tool-color-dot" id="pen_color_dot" aria-hidden="true"></span>
 				</button>
 				<button class="tool-btn btn btn-ghost btn-square" data-tool="box" aria-label="Box tool" title="Box">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 16.008v-8.018a1.98 1.98 0 0 0 -1 -1.717l-7 -4.008a2.016 2.016 0 0 0 -2 0l-7 4.008c-.619 .355 -1 1.01 -1 1.718v8.018c0 .709 .381 1.363 1 1.717l7 4.008a2.016 2.016 0 0 0 2 0l7 -4.008c.619 -.355 1 -1.01 1 -1.718"></path><path d="M12 22v-10"></path><path d="M12 12l8.73 -5.04"></path><path d="M3.27 6.96l8.73 5.04"></path></svg>
 				</button>
 			</nav>
-			<span class="rail-divider" aria-hidden="true"></span>
+			<div class="rail-flyout" id="palette_flyout" aria-label="Colors and brush size" aria-hidden="true">
 			<div class="swatch-grid rail-colors" id="color_palette" aria-label="Color palette">
-				<button class="color-swatch btn btn-ghost btn-square active" data-color="#587553" aria-label="Terrain green" title="Terrain green"><span style="background: #587553"></span></button>
-				<button class="color-swatch btn btn-ghost btn-square" data-color="#6abe30" aria-label="Grass green" title="Grass green"><span style="background: #6abe30"></span></button>
-				<button class="color-swatch btn btn-ghost btn-square" data-color="#8f563b" aria-label="Wood brown" title="Wood brown"><span style="background: #8f563b"></span></button>
-				<button class="color-swatch btn btn-ghost btn-square" data-color="#d9a066" aria-label="Sand" title="Sand"><span style="background: #d9a066"></span></button>
-				<button class="color-swatch btn btn-ghost btn-square" data-color="#847e87" aria-label="Stone gray" title="Stone gray"><span style="background: #847e87"></span></button>
-				<button class="color-swatch btn btn-ghost btn-square" data-color="#306082" aria-label="Water blue" title="Water blue"><span style="background: #306082"></span></button>
-				<button class="color-swatch btn btn-ghost btn-square" data-color="#ac3232" aria-label="Red" title="Red"><span style="background: #ac3232"></span></button>
-				<button class="color-swatch btn btn-ghost btn-square" data-color="#eec39a" aria-label="Peach" title="Peach"><span style="background: #eec39a"></span></button>
-				<button class="add-color-swatch btn btn-ghost btn-square" id="add_color_btn" aria-label="Add color" title="Add color">
+				<button class="add-color-swatch btn btn-ghost btn-square" id="add_color_btn" aria-label="Add color" title="Add color" aria-haspopup="true" aria-expanded="false">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
 				</button>
-				<input type="color" id="custom_color_input" value="#639bff" hidden>
+			</div>
+			<div class="color-pop hidden" id="color_pop" role="dialog" aria-label="Add a color">
+				<div class="color-pop-sv" id="color_pop_sv">
+					<span class="color-pop-thumb" id="color_pop_sv_thumb"></span>
+				</div>
+				<div class="color-pop-hue" id="color_pop_hue">
+					<span class="color-pop-thumb" id="color_pop_hue_thumb"></span>
+				</div>
+				<div class="color-pop-row">
+					<span class="color-pop-preview" id="color_pop_preview"></span>
+					<input class="color-pop-hex" id="color_pop_hex" type="text" autocomplete="off" spellcheck="false" maxlength="7" aria-label="Hex color">
+					<button class="color-pop-add" id="color_pop_add" type="button">Add</button>
+				</div>
 			</div>
 			<span class="rail-divider" aria-hidden="true"></span>
-			<div class="brush-grid rail-brushes" id="brush_palette" aria-label="Brush size">
-				<button class="brush-swatch btn btn-ghost btn-square" data-scale="0.5" aria-label="Small" title="Small"><span style="width: 0.45rem; height: 0.45rem"></span></button>
-				<button class="brush-swatch btn btn-ghost btn-square active" data-scale="1" aria-label="Medium" title="Medium"><span style="width: 0.75rem; height: 0.75rem"></span></button>
-				<button class="brush-swatch btn btn-ghost btn-square" data-scale="1.75" aria-label="Large" title="Large"><span style="width: 1.05rem; height: 1.05rem"></span></button>
+			<div class="brush-slider rail-brushes" id="brush_palette" aria-label="Brush size">
+				<span class="brush-size-dot" id="brush_size_dot" aria-hidden="true"></span>
+				<input type="range" id="brush_size_slider" min="0.5" max="1.75" step="0.05" value="1" aria-label="Brush size" title="Brush size">
+			</div>
 			</div>
 		</div>
 		<div class="settings-menu" id="settings_menu">
