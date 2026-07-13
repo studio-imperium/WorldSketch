@@ -3054,17 +3054,55 @@ function fitSettingsFor(kind) {
 }
 
 // --- Scene yaw estimation ------------------------------------------------------
-// Tripo's returned orientation for objects-only scenes is CONTENT-DEPENDENT — saved
-// runs needed 0° (tower+crates) or 90° (spaceships) under the same pipeline — so no
-// fixed yaw knob can seat every reconstruction facing its block-out. Estimate the
-// quarter-turn per run instead: project the raw splat and the guide blocks through the
-// capture camera and pick the yaw whose silhouette overlaps best AND whose distinct
-// colour masses (a blue roof, brown crates) land where the same-coloured blocks are.
+// Tripo's returned orientation is CONTENT-DEPENDENT — saved runs needed different
+// quarter-turns under the same pipeline, with and without terrain — so no fixed yaw
+// knob can seat every reconstruction facing its block-out. Estimate the quarter-turn
+// per run instead: project the raw splat and the guide blocks through the capture camera
+// and pick the yaw whose silhouette overlaps best AND whose distinct colour masses (a
+// blue roof, brown crates) land where the same-coloured blocks are.
 // Validated offline against runs 0101/0102/0104 (3/3 with wide margins); monochrome
 // content falls back to silhouette-only, which is genuinely ambiguous ±90 there.
 const ISO_PROJ_RIGHT = [1 / Math.sqrt(2), 0, 1 / Math.sqrt(2)] // capture camera basis
 const ISO_PROJ_UP = [1 / Math.sqrt(6), 2 / Math.sqrt(6), -1 / Math.sqrt(6)] // (MIRROR_CAPTURE_X pose)
 const YAW_GRID = 32
+
+async function guideOccupancy(blob) {
+	if (!blob || typeof createImageBitmap !== "function") return null
+	let bitmap
+	try {
+		bitmap = await createImageBitmap(blob)
+		const size = 128
+		const canvas = document.createElement("canvas")
+		canvas.width = canvas.height = size
+		const ctx = canvas.getContext("2d", { willReadFrequently: true })
+		ctx.drawImage(bitmap, 0, 0, size, size)
+		const data = ctx.getImageData(0, 0, size, size).data
+		const pixels = []
+		let minX = size, maxX = -1, minY = size, maxY = -1
+		for (let y = 0; y < size; y++) {
+			for (let x = 0; x < size; x++) {
+				const o = (y * size + x) * 4
+				if (data[o + 3] <= 20 || data[o] + data[o + 1] + data[o + 2] <= 30) continue
+				pixels.push([x, y])
+				minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+				minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+			}
+		}
+		if (!pixels.length) return null
+		const out = new Set()
+		for (const [x, y] of pixels) {
+			const gx = Math.min(YAW_GRID - 1, Math.floor(((x - minX) / Math.max(1, maxX - minX + 1)) * YAW_GRID))
+			// Canvas Y points down; ISO_PROJ_UP points up.
+			const gy = Math.min(YAW_GRID - 1, Math.floor(((maxY - y) / Math.max(1, maxY - minY + 1)) * YAW_GRID))
+			out.add(gx * YAW_GRID + gy)
+		}
+		return out
+	} catch {
+		return null
+	} finally {
+		bitmap?.close?.()
+	}
+}
 
 function unitChroma(r, g, b) {
 	const m = (r + g + b) / 3
@@ -3073,9 +3111,10 @@ function unitChroma(r, g, b) {
 	return l > 1e-6 ? [v[0] / l, v[1] / l, v[2] / l, l] : [0, 0, 0, 0]
 }
 
-function estimateSceneYaw(bytes, meshes) {
-	// The drawable ground sheet is void in a no-ground scene, and its 48u span would
-	// swamp the normalized comparison — only real blocks describe the content layout.
+async function estimateSceneYaw(bytes, meshes, guide = null) {
+	// The drawable ground sheet's geometry is always the full 48u canvas, not the actual
+	// painted outline, so it would swamp the normalized comparison. Real blocks provide
+	// the reliable position/colour anchors for both grounded and object-only scenes.
 	meshes = meshes?.filter(mesh => !mesh.userData.isGroundSheet && mesh.geometry)
 	if (!meshes?.length || bytes.length < 32 * 100) return null
 	// Project every block's sampled volume: occupancy silhouette + per-colour anchors.
@@ -3113,6 +3152,11 @@ function estimateSceneYaw(bytes, meshes) {
 		a[0] += x * w; a[1] += y * w; a[2] += w
 		blockMass += w
 	}
+	// The actual capture contains the exact projected silhouette and spacing, including
+	// irregular bases made from blocks. It is a stronger yaw target than the sparse 3×3×3
+	// block samples above. Keep those samples for colour anchors and as a fallback for
+	// older sessions where no guide can be rendered.
+	const occupancyTarget = await guideOccupancy(guide) ?? blockOcc
 	// Parse guide hexes directly — THREE.Color would convert them to the linear working
 	// space, while the splat's stored colour bytes (and unitChroma) are display sRGB.
 	const anchorChroma = new Map([...anchors.keys()].map(key => [key, unitChroma(
@@ -3174,8 +3218,8 @@ function estimateSceneYaw(bytes, meshes) {
 			}
 		}
 		let inter = 0
-		for (const cell of splatOcc) if (blockOcc.has(cell)) inter++
-		const iou = inter / Math.max(1, blockOcc.size + splatOcc.size - inter)
+		for (const cell of splatOcc) if (occupancyTarget.has(cell)) inter++
+		const iou = inter / Math.max(1, occupancyTarget.size + splatOcc.size - inter)
 		let anchorTerm = 0, anchorWeight = 0
 		for (const [key, a] of anchors) {
 			const s = colorSums.get(key)
@@ -3255,7 +3299,14 @@ function segmentSceneSplat(hasGround = true) {
 	const FRINGE_LOW = 0.25 // fringe claim floor: below this stays ground even under a blob (the "contact patch" an object leaves behind)
 	const FRINGE_DILATE = 1 // fringe claim reach in voxels beyond the blob's own footprint; raise if object bases get clipped, lower if bases grab a turf ring
 	const CELL = 0.5 // floor height-map cell (world units)
-	const VOX = 0.4 // flood-fill voxel size; larger merges near-touching objects sooner
+	// Resolve every scene at roughly the same voxel density. A fixed world-space voxel
+	// made compact scenes far too coarse: the visible gap between two props could land in
+	// adjacent voxels and 26-connectivity would merge them into one object. Forty-eight
+	// cells across the longest scene axis cleanly separates those gaps while remaining
+	// small enough for the bridge/core pass below.
+	const VOX_TARGET_CELLS = 48
+	const VOX_MIN = 0.06
+	const VOX_MAX = 0.25
 	const MIN_BLOB = 200 // smaller blobs (grass tufts) fold back into the ground
 	const ERODE = 2 // floor-map min-filter radius in cells; raise for very wide flat-bottomed objects faking an elevated floor
 	const SKIN_FLATNESS = 0.45 // pancake test: thinnest axis under this fraction of the median axis
@@ -3270,18 +3321,22 @@ function segmentSceneSplat(hasGround = true) {
 	const pxs = new Float32Array(n)
 	const pys = new Float32Array(n)
 	const pzs = new Float32Array(n)
-	let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+	let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
 	packed.forEachSplat((i, center) => {
 		pxs[i] = center.x
 		pys[i] = center.y
 		pzs[i] = center.z
 		if (center.x < minX) minX = center.x
 		if (center.x > maxX) maxX = center.x
+		if (center.y < minY) minY = center.y
+		if (center.y > maxY) maxY = center.y
 		if (center.z < minZ) minZ = center.z
 		if (center.z > maxZ) maxZ = center.z
 	})
 	const spanX = Math.max(1e-3, maxX - minX)
+	const spanY = Math.max(1e-3, maxY - minY)
 	const spanZ = Math.max(1e-3, maxZ - minZ)
+	const VOX = Math.max(VOX_MIN, Math.min(VOX_MAX, Math.max(spanX, spanY, spanZ) / VOX_TARGET_CELLS))
 
 	// Local floor height map: per-cell low percentile of gaussian heights. A MAP, not a
 	// single plane — the drawn ground has real relief. Sparse cells inherit the median.
@@ -3585,7 +3640,7 @@ function segmentSceneSplat(hasGround = true) {
 	let pieces = hasGround ? seatPiece(ground, "floor") : 0
 	for (const id of ranked) pieces += seatPiece(blobParts.get(id), "object")
 	const remainder = hasGround ? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin gaussian(s) left behind` : "no ground piece"
-	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), ${remainder})`)
+	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), voxel ${VOX.toFixed(3)}, ${remainder})`)
 }
 
 // Whole-scene generation: ONE capture of the floor + all primitives goes directly to
@@ -3638,19 +3693,19 @@ async function generateWorld(prompt) {
 			image: capture.guide,
 		})
 		// Fit a copy so splatStore retains the pristine TripoSplat bytes for ZIP/history.
-		// Exact X/Z footprint fitting is useful when a scene includes terrain, but it
-		// distorts object-only splats toward a thin block-out depth. Preserve Tripo's
-		// proportions for no-ground scenes by leaving them on the uniform fit path.
-		// WS_SCENE_YAW corrects the with-terrain capture pose. Objects-only scenes come
-		// back in a CONTENT-DEPENDENT orientation, so estimate the quarter-turn per run
-		// against the block-out (fallback: the object yaw for monochrome/degenerate cases).
-		const sceneYawDeg = hasGround ? sceneFit.yawDeg : (estimateSceneYaw(bytes, subjectMeshes) ?? objectFit.yawDeg)
+		// Preserve the one-shot reconstruction's proportions with a uniform fit. The
+		// terrain and objects share one cloud, so independently forcing X and Z onto the
+		// block-out footprint would stretch/compress every object along with the floor.
+		// Estimate every one-shot scene's quarter-turn from its content. The config yaw is
+		// only a fallback when a scene is too monochrome or symmetric to disambiguate.
+		const sceneYawDeg = await estimateSceneYaw(bytes, subjectMeshes, capture.guide)
+			?? (hasGround ? sceneFit.yawDeg : objectFit.yawDeg)
 		await seatSubject(bytes.slice(), box, "scene", subjectMeshes, {
 			kind: "scene",
 			yawTurns: OBJECT_YAW_TURNS,
 			yawDeg: sceneYawDeg,
 			yOffset: sceneFit.yOffset,
-			fillXZ: hasGround,
+			fillXZ: false,
 			colors: primitiveColors(subjectMeshes),
 		})
 		splatStore.set("scene", bytes)
@@ -3716,7 +3771,7 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 		yawDeg,
 		yOffset,
 		fitHeight,
-		fillXZ: fillXZ || isFloor, // floors + whole scenes: X/Z exact on the footprint, height proportional
+		fillXZ: fillXZ || isFloor, // dedicated floor splats may fit X/Z exactly; scenes pass false to preserve proportions
 		exactBounds: isFloor, // floors are clamped into the target slab, including thickness
 		fillOverscale: fit.fillOverscale, // floors: overfill the tile, clip boxes trim the edges
 		reliefDip: fit.reliefDip, // floors: shallow ruts below the sheet survive the underground cull
@@ -4932,18 +4987,24 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 
 		const fit = fitSettingsFor(s.kind)
 		try {
+			let yawDeg = fit.yawDeg
+			if (s.kind === "scene") {
+				let guide = null
+				try { guide = (await captureWorld(renderer, scene, world, box)).guide }
+				catch (error) { console.warn("capture restored yaw guide:", error) }
+				yawDeg = await estimateSceneYaw(splatBytes, sourcePrimitives, guide)
+					?? (Number.isFinite(s.yawDeg) ? s.yawDeg : fit.yawDeg)
+			}
 			const seated = await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
 				kind: s.kind,
 				yawTurns: s.yawTurns ?? 0,
-				// Objects-only scenes reuse the yaw estimated at generation time (stored on the
-				// subject); older no-ground exports re-estimate against the restored block-out.
-				// Ground scenes and old sessions keep the config scene yaw they seated with.
-				yawDeg: s.kind === "scene" && s.hasGround === false
-					? (Number.isFinite(s.yawDeg) ? s.yawDeg : (estimateSceneYaw(splatBytes, sourcePrimitives) ?? objectFit.yawDeg))
-					: fit.yawDeg,
+				// Re-estimate restored one-shot scenes so orientation fixes apply to existing
+				// paid generations. Stored/config yaw remains the ambiguity fallback.
+				yawDeg,
 				yOffset: fit.yOffset,
 				fitHeight: Boolean(s.fitHeight) && s.kind !== "scene",
-				fillXZ: s.kind === "scene" && s.hasGround !== false, // old sessions default to their original footprint-exact fit
+				// A scene's floor and objects are one cloud; keep a uniform fit on restore too.
+				fillXZ: false,
 				colors,
 				plotId,
 				clipBoxes,
@@ -4956,6 +5017,15 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 		}
 		done++
 		showProgress(done, total)
+	}
+
+	// Stored one-shot builds contain the pristine monolithic scene splat. Re-run the
+	// current segmentation whenever they are restored so segmentation fixes can be
+	// tested on an existing paid generation without generating it again.
+	const restoredScene = sessionSubjects.find(s => s.kind === "scene")
+	if (restoredScene) {
+		try { segmentSceneSplat(restoredScene.hasGround !== false) }
+		catch (error) { console.warn("segment restored scene:", error) }
 	}
 
 	if (sessionSubjects.some(s => s.kind === "floor")) world.groundGenerated()
