@@ -67,7 +67,7 @@ func subjectClientConfig(kind string) map[string]any {
 	if kind == "object" {
 		yOffsetLegacy = []string{"WS_CULL_Y_OFFSET"}
 	}
-	return map[string]any{
+	out := map[string]any{
 		"yOffset":           config.SubjectEnvFloat(kind, "Y_OFFSET", yOffsetLegacy, 0),
 		"opacityFloor":      config.SubjectEnvFloat(kind, "OPACITY_FLOOR", []string{"WS_OPACITY_FLOOR"}, 0.03),
 		"paletteLock":       palette.Mode == "lock",
@@ -79,6 +79,10 @@ func subjectClientConfig(kind string) map[string]any {
 		"fillOverscale":     config.SubjectEnvFloat(kind, "FILL_OVERSCALE", nil, 1.08),
 		"reliefDip":         config.SubjectEnvFloat(kind, "RELIEF_DIP", nil, 0.35),
 	}
+	if kind == "scene" {
+		out["semanticImage"] = config.SubjectEnvBool(kind, "SEMANTIC_IMAGE", []string{"WS_SEMANTIC_IMAGE"}, false)
+	}
+	return out
 }
 
 func Generate(w http.ResponseWriter, r *http.Request) {

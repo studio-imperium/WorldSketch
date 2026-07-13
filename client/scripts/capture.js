@@ -18,10 +18,9 @@ const ISO_PHI = Math.acos(1 / Math.sqrt(3)) // ≈54.74° polar angle from +Y (e
 export const FRONT_THETA = ISO_THETA // azimuth subjects are captured from = the scene "front"
 export const FRONT_PHI = ISO_PHI
 
-// Mirror every subject capture across X (negates the camera's X position), so the guide —
-// and therefore the reconstructed splat — comes out left-right flipped. Flat materials are
-// DoubleSide so this never causes back-face culling.
-const MIRROR_CAPTURE_X = true
+// Keep generated guides aligned with the editor's default build view. This used to mirror
+// X for older seating assumptions, which made captures come from the opposite front.
+const MIRROR_CAPTURE_X = false
 
 // Capture one object: its primitives, alone, from the true isometric camera.
 export function captureObject(renderer, scene, world, object) {
