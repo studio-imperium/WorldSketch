@@ -3426,11 +3426,11 @@ function segmentSceneSplat(hasGround = true) {
 	const CELL = 0.5 // floor height-map cell (world units)
 	// Resolve every scene at roughly the same voxel density. A fixed world-space voxel
 	// made compact scenes far too coarse: the visible gap between two props could land in
-	// adjacent voxels and 26-connectivity would merge them into one object. Forty-eight
-	// cells across the longest scene axis cleanly separates those gaps while remaining
+	// adjacent voxels and 26-connectivity would merge them into one object. A 256-cell
+	// target across the longest scene axis cleanly separates those gaps while remaining
 	// small enough for the bridge/core pass below.
-	const VOX_TARGET_CELLS = 48
-	const VOX_MIN = 0.06
+	const VOX_TARGET_CELLS = 200
+	const VOX_MIN = 0.01
 	const VOX_MAX = 0.25
 	const MIN_BLOB = 200 // smaller blobs (grass tufts) fold back into the ground
 	const ERODE = 2 // floor-map min-filter radius in cells; raise for very wide flat-bottomed objects faking an elevated floor
@@ -4016,30 +4016,17 @@ function segmentSceneSplat(hasGround = true) {
 			groupPrimary.set(gi, id)
 		}
 
-		// Secondary blobs: crown shells and detached fragments of an already-matched
-		// object sit right next to its primary blob — attach them. Anything farther has
-		// no guide explanation and folds into the static ground/remainder. A neon blob
-		// the neighbour's palette cannot explain never attaches: a hallucinated glow
-		// must not ride along when the object beside it is moved.
-		for (const id of matchBlobIds) {
-			if (blobGroup.has(id)) continue
-			const s = stats.get(id)
-			// A blob that mostly hugs the terrain surface is a mound/cliff fragment; it
-			// must never ride along with a moved object as a fake "shell".
-			if (hasGround && s.nearSurf / Math.max(1, s.n) > 0.7) continue
-			const mr = s.cr / Math.max(1, s.n), mg = s.cg / Math.max(1, s.n), mb = s.cb / Math.max(1, s.n)
-			const neon = unitChroma(mr, mg, mb)[3] > 70
-			let bestGi = -1, bestD = ATTACH * 1.5
-			for (const [gi, pid] of groupPrimary) {
-				const affinity = paletteAffinity(groups.find(g => g.gi === gi).palette, mr, mg, mb)
-				if (neon && affinity < 0.5) continue
-				const p = stats.get(pid)
-				const d = Math.hypot(s.cx - p.cx, s.cz - p.cz)
-				const limit = affinity > 0.6 ? ATTACH * 1.5 : ATTACH
-				if (d <= limit && d < bestD) { bestD = d; bestGi = gi }
-			}
-			if (bestGi >= 0) blobGroup.set(id, bestGi)
-		}
+		// Disconnected reconstructed islands must stay independently movable. Older code
+		// attached nearby secondary blobs (crown shells, fragments) to a matched guide
+		// group, but that made visibly separate splat islands move as one object. Keep
+		// every substantial non-terrain blob as its own piece instead.
+		const detachedObjectIds = matchBlobIds
+			.filter(id => {
+				if (blobGroup.has(id)) return false
+				const s = stats.get(id)
+				return !(hasGround && s.nearSurf / Math.max(1, s.n) > 0.7)
+			})
+			.sort((a, b) => stats.get(b).n - stats.get(a).n)
 
 		// Do not carve unmatched guide groups out of a donor blob. That fallback made
 		// independent handles, but it also sliced coherent objects in half whenever the
@@ -4050,8 +4037,8 @@ function segmentSceneSplat(hasGround = true) {
 			console.warn(`[segment] group ${g.gi + 1} has no matching content blob`)
 		}
 
-		// Relabel every matched blob to its group's primary id, so each group is ONE
-		// piece downstream (fringe claim + skin cull operate on the merged labels).
+		// Relabel only true same-object claims. Detached blobs are deliberately NOT
+		// relabeled to a nearby primary id, so disconnected islands become separate pieces.
 		const relabel = new Map()
 		for (const [id, gi] of blobGroup) relabel.set(id, groupPrimary.get(gi))
 		for (let i = 0; i < n; i++) {
@@ -4066,10 +4053,14 @@ function segmentSceneSplat(hasGround = true) {
 		}
 		const matchedIds = [...groupPrimary.entries()].sort((a, b) => a[0] - b[0])
 		bigBlobIds.length = 0
-		bigBlobIds.push(...matchedIds.map(([, id]) => id))
-		groupNames = matchedIds.map(([gi]) => `obj-${String(gi + 1).padStart(3, "0")}`)
-		const dropped = matchBlobIds.filter(id => !blobGroup.has(id)).length
-		console.log(`[segment] blob match → ${groupPrimary.size}/${groups.length} group(s) claimed, ${dropped} unexplained + ${terrainBlobIds.size} terrain blob(s) folded into ground`)
+		bigBlobIds.push(...matchedIds.map(([, id]) => id), ...detachedObjectIds)
+		groupNames = [
+			...matchedIds.map(([gi]) => `obj-${String(gi + 1).padStart(3, "0")}`),
+			...detachedObjectIds.map((_, i) => `obj-detached-${String(i + 1).padStart(3, "0")}`),
+		]
+		const detachedSet = new Set(detachedObjectIds)
+		const dropped = matchBlobIds.filter(id => !blobGroup.has(id) && !detachedSet.has(id)).length
+		console.log(`[segment] blob match → ${groupPrimary.size}/${groups.length} group(s) claimed, ${detachedObjectIds.length} detached object blob(s), ${dropped} unexplained + ${terrainBlobIds.size} terrain blob(s) folded into ground`)
 	}
 
 	// Never force unassigned specks into the nearest floorless object. Reconstruction
@@ -4170,8 +4161,8 @@ function segmentSceneSplat(hasGround = true) {
 	let interiorClaimed = 0
 	const interiorClaimMask = new Uint8Array(n)
 	if (blobParts.size) {
-		const PAD = Math.max(VOX * 2, 0.25)
-		const YPAD = Math.max(VOX * 2, 0.35)
+		const PAD = Math.max(VOX * 4, 0.75)
+		const YPAD = Math.max(VOX * 4, 0.8)
 		const envelopes = new Map([...blobParts.keys()].map(label => [label, {
 			minX: Infinity, maxX: -Infinity, minY: Infinity, maxY: -Infinity, minZ: Infinity, maxZ: -Infinity,
 			cx: 0, cy: 0, cz: 0, n: 0,
@@ -4190,7 +4181,7 @@ function segmentSceneSplat(hasGround = true) {
 		}
 		for (let i = 0; i < n; i++) {
 			if (blobParts.has(blobOf[i])) continue
-			if (hasGround && pys[i] <= floorLevel[cellOfXZ(pxs[i], pzs[i])] + FLOOR_BAND) continue
+			if (hasGround && pys[i] <= groundSurf[cellOfXZ(pxs[i], pzs[i])] + 0.35) continue
 			let bestLabel = null, bestD = Infinity
 			for (const [label, e] of envelopes) {
 				if (!e) continue
@@ -4262,6 +4253,8 @@ function segmentSceneSplat(hasGround = true) {
 	const skinNormal = new THREE.Vector3()
 	let skinCulled = 0
 	let unsupportedCulled = 0
+	const groundCellCount = hasGround ? new Int32Array(gw * gh) : null
+	const groundCellColor = hasGround ? Array.from({ length: gw * gh }, () => [0, 0, 0]) : null
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
 		let part = blobParts.get(blobOf[i]) ?? ground
 		// Surface-hugging material with no object mass overhead is grabbed terrain —
@@ -4295,7 +4288,89 @@ function segmentSceneSplat(hasGround = true) {
 		}
 		part.packed.pushSplat(center, scales, quaternion, opacity, color)
 		part.bounds.expandByPoint(center)
+		if (hasGround && part === ground && color) {
+			const cell = cellOfXZ(center.x, center.z)
+			groundCellCount[cell]++
+			const acc = groundCellColor[cell]
+			acc[0] += color.r
+			acc[1] += color.g
+			acc[2] += color.b
+		}
 	})
+
+	let patchSplats = 0
+	if (hasGround && groundSurf && blobParts.size) {
+		const patchCenter = new THREE.Vector3()
+		const patchScales = new THREE.Vector3()
+		const patchQuat = new THREE.Quaternion()
+		const patchColor = new THREE.Color()
+		const cellW = spanX / gw
+		const cellD = spanZ / gh
+		const fallbackColor = new THREE.Color(world.baseGroundColor || baseGroundColor)
+		const hash01 = (cx, cz, k, salt = 0) => {
+			const v = Math.sin((cx + 1) * 127.1 + (cz + 1) * 311.7 + (k + 1) * 74.7 + salt * 19.19) * 43758.5453
+			return v - Math.floor(v)
+		}
+		const colorForCell = (cx, cz) => {
+			for (let r = 0; r <= 5; r++) {
+				const acc = [0, 0, 0, 0]
+				for (let dz = -r; dz <= r; dz++) {
+					for (let dx = -r; dx <= r; dx++) {
+						const nx = cx + dx, nz = cz + dz
+						if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+						const cell = nz * gw + nx
+						const count = groundCellCount[cell]
+						if (!count) continue
+						const c = groundCellColor[cell]
+						acc[0] += c[0]
+						acc[1] += c[1]
+						acc[2] += c[2]
+						acc[3] += count
+					}
+				}
+				if (acc[3]) return patchColor.setRGB(acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]).clone()
+			}
+			return fallbackColor.clone()
+		}
+		for (const part of blobParts.values()) {
+			if (!part.packed.numSplats || part.bounds.isEmpty()) continue
+			const x0 = Math.max(0, Math.floor(((part.bounds.min.x - minX) / spanX) * gw) - 2)
+			const x1 = Math.min(gw - 1, Math.floor(((part.bounds.max.x - minX) / spanX) * gw) + 2)
+			const z0 = Math.max(0, Math.floor(((part.bounds.min.z - minZ) / spanZ) * gh) - 2)
+			const z1 = Math.min(gh - 1, Math.floor(((part.bounds.max.z - minZ) / spanZ) * gh) + 2)
+			for (let cz = z0; cz <= z1; cz++) {
+				for (let cx = x0; cx <= x1; cx++) {
+					const cell = cz * gw + cx
+					const target = 10
+					if (groundCellCount[cell] >= target) continue
+					const color = colorForCell(cx, cz)
+					const need = Math.min(12, target - groundCellCount[cell])
+					for (let k = 0; k < need; k++) {
+						const ox = 0.12 + hash01(cx, cz, k, 1) * 0.76
+						const oz = 0.12 + hash01(cx, cz, k, 2) * 0.76
+						const scale = 0.38 + hash01(cx, cz, k, 3) * 0.2
+						const shade = 0.92 + hash01(cx, cz, k, 4) * 0.16
+						patchScales.set(cellW * scale, 0.02, cellD * scale)
+						patchColor.setRGB(Math.min(1, color.r * shade), Math.min(1, color.g * shade), Math.min(1, color.b * shade))
+						patchCenter.set(
+							minX + (cx + ox) * cellW,
+							groundSurf[cell] + 0.008 + hash01(cx, cz, k, 5) * 0.012,
+							minZ + (cz + oz) * cellD,
+						)
+						ground.packed.pushSplat(patchCenter, patchScales, patchQuat, 0.96, patchColor)
+						ground.bounds.expandByPoint(patchCenter)
+						patchSplats++
+					}
+					groundCellCount[cell] += need
+					const acc = groundCellColor[cell]
+					acc[0] += color.r * need
+					acc[1] += color.g * need
+					acc[2] += color.b * need
+				}
+			}
+		}
+		if (patchSplats) console.log(`[segment] ground patch backfill → ${patchSplats} filler gaussian(s) under movable object footprint(s)`)
+	}
 
 	// Swap the monolith for its pieces inside the same view-frame records array.
 	const idx = world.generated.indexOf(record)
