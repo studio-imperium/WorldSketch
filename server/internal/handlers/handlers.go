@@ -9,6 +9,7 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -121,7 +122,13 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 	if kind == "scene" {
 		hasGround = config.ParseBoolDefault(r.FormValue("has_ground"), true)
 	}
-	promptText := prompts.ImageFor(kind, prompt, groundColor, strings.TrimSpace(r.FormValue("label")), hasGround)
+	objectCount := -1
+	if value := strings.TrimSpace(r.FormValue("object_count")); value != "" {
+		if parsed, parseErr := strconv.Atoi(value); parseErr == nil && parsed >= 0 {
+			objectCount = parsed
+		}
+	}
+	promptText := prompts.ImageFor(kind, prompt, groundColor, strings.TrimSpace(r.FormValue("label")), hasGround, objectCount)
 	imageSettings := config.SubjectImageEditSettings(kind)
 	if config.ParseBoolDefault(r.FormValue("skip_image_edit"), false) {
 		imageSettings.SkipImageEdit = true

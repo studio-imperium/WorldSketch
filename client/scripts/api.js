@@ -74,11 +74,12 @@ export async function newOutput() {
 
 // Texture and reconstruct one capture (legacy object/floor or the current whole scene).
 // The whole-scene path performs one image edit followed by one TripoSplat call.
-export async function generateSubject({ prompt, kind, steps, gaussians, output, name, groundColor, label, colors, image, materialImage, hasGround, skipImageEdit = false, signal }) {
+export async function generateSubject({ prompt, kind, steps, gaussians, output, name, groundColor, label, colors, image, materialImage, hasGround, objectCount, skipImageEdit = false, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt ?? "")
 	form.append("kind", kind)
 	if (typeof hasGround === "boolean") form.append("has_ground", String(hasGround))
+	if (Number.isInteger(objectCount) && objectCount >= 0) form.append("object_count", String(objectCount))
 	if (steps) form.append("steps", String(steps))
 	if (gaussians) form.append("gaussians", String(gaussians))
 	if (label) form.append("label", label)

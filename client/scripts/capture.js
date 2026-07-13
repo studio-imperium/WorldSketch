@@ -37,10 +37,11 @@ export function captureFloor(renderer, scene, world, floorMeshes = null, box = n
 	return captureSubject(renderer, scene, world, subject, isoCamera(targetBox))
 }
 
-// Capture the complete block-out — floor and every primitive — in ONE render. Unlike
-// the legacy per-subject helpers this deliberately skips the second material-map pass:
-// the returned guide is the sole image used by the scene-wide texture edit.
-export function captureWorld(renderer, scene, world, box) {
+// Capture the complete block-out — floor and every primitive — in ONE camera pose.
+// Alongside the visual guide, optionally render a semantic ID diagram in which every
+// connected object group is one artificial solid colour. The image editor uses that
+// second image as an inventory/mask reference, never as appearance guidance.
+export function captureWorld(renderer, scene, world, box, objectGroups = null) {
 	// An unpainted drawable sheet is void, not a floor. Excluding it here prevents the
 	// image editor from receiving even an invisible floor mesh as part of the subject.
 	const floor = world.groundInkBounds?.()
@@ -48,7 +49,7 @@ export function captureWorld(renderer, scene, world, box) {
 		: []
 	// Whole-scene blocks are volumetric scaffolding, not literal cuboids in the final art.
 	// Omit per-cube edge overlays so touching same-colour blocks read as one coarse mass.
-	return captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box), false, false)
+	return captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box), false, false, objectGroups)
 }
 
 // Capture the WHOLE world in context (every block-out object + the painted floor) from
@@ -242,7 +243,7 @@ export function unprojectGroundIso(source, cols, rows, dstW, dstH) {
 // black background, with the dedicated `view` camera. Everything else — other block-out
 // meshes, all splats, the sky dome, outlines, helpers, the placement preview — is hidden
 // so Tripo only sees the subject on black. The shared scene camera is never touched.
-async function captureSubject(renderer, scene, world, subject, view, includeMaterialMap = true, includeEdges = true) {
+async function captureSubject(renderer, scene, world, subject, view, includeMaterialMap = true, includeEdges = true, semanticGroups = null) {
 	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
 	const subjectSet = new Set(subject)
 
@@ -289,6 +290,9 @@ async function captureSubject(renderer, scene, world, subject, view, includeMate
 		edge.removeFromParent()
 	}
 	const materialMap = includeMaterialMap ? await captureTarget(renderer, scene, view, target) : null
+	const semanticMap = semanticGroups?.length
+		? await captureSemanticMap(renderer, scene, view, target, swaps, semanticGroups)
+		: null
 
 	restoreMaterials(swaps)
 	for (const object of overlays) object.visible = true
@@ -297,7 +301,41 @@ async function captureSubject(renderer, scene, world, subject, view, includeMate
 	for (const [mesh, visible] of shown) mesh.visible = visible
 	renderer.setClearColor(prevClear, prevAlpha)
 	target.dispose()
-	return { guide, materialMap }
+	return { guide, materialMap, semanticMap }
+}
+
+// Render each logical object in one unmistakable flat ID colour. Ground is deliberately
+// left in its original flat material so its painted alpha silhouette remains exact; only
+// the bright artificial colours are object IDs. This is a diagram, not a texture source.
+async function captureSemanticMap(renderer, scene, view, target, swaps, groups) {
+	const groupOf = new Map()
+	groups.forEach((group, id) => group.primitives.forEach(mesh => groupOf.set(mesh, id)))
+	const restore = []
+	for (const [mesh, _original, temporary] of swaps) {
+		const id = groupOf.get(mesh)
+		restore.push([temporary, temporary.color.clone(), temporary.map, temporary.alphaTest])
+		if (id == null) {
+			// Keep the ground texture attached so its transparent painted outline survives,
+			// but tint it dark so it cannot be confused with a bright object ID.
+			temporary.color.setHex(0x303030)
+			temporary.needsUpdate = true
+			continue
+		}
+		// Golden-ratio hue stepping keeps IDs distinct without repeating when a manual
+		// block-out contains more objects than a small fixed palette could represent.
+		temporary.color.setHSL((0.96 + id * 0.61803398875) % 1, 1, id % 2 ? 0.48 : 0.62)
+		temporary.map = null
+		temporary.alphaTest = 0
+		temporary.needsUpdate = true
+	}
+	const result = await captureTarget(renderer, scene, view, target)
+	for (const [material, color, map, alphaTest] of restore) {
+		material.color.copy(color)
+		material.map = map
+		material.alphaTest = alphaTest
+		material.needsUpdate = true
+	}
+	return result
 }
 
 // Replace each subject mesh's material with an unlit flat one (true colour, plus the

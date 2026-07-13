@@ -104,7 +104,7 @@ func ParseIdentify(raw string) (map[string]string, string) {
 	return map[string]string{}, ""
 }
 
-func ImageFor(kind, userPrompt, groundColor, label string, hasGround bool) string {
+func ImageFor(kind, userPrompt, groundColor, label string, hasGround bool, objectCount ...int) string {
 	scene := strings.TrimSpace(userPrompt)
 	if scene == "" {
 		scene = "a coherent stylized natural game environment"
@@ -113,7 +113,7 @@ func ImageFor(kind, userPrompt, groundColor, label string, hasGround bool) strin
 		return Floor(scene, groundColor)
 	}
 	if kind == "scene" {
-		return Scene(scene, hasGround)
+		return Scene(scene, hasGround, objectCount...)
 	}
 	return Object(scene, label)
 }
@@ -121,15 +121,29 @@ func ImageFor(kind, userPrompt, groundColor, label string, hasGround bool) strin
 // Scene re-textures the complete one-plot block-out in a single image edit. Layout and
 // camera preservation are deliberately strict because the edited image is reconstructed
 // as one splat and fitted back onto the complete block-out bounds.
-func Scene(scene string, hasGround bool) string {
-	const blockout = "CRITICAL BLOCK-OUT INTERPRETATION: every visible cube or rectangular block is temporary volumetric scaffolding drawn by the user, never a literal cube, crate, tiled module, panel, button, or final design element. Treat each spatially connected cluster of blocks as ONE intended real object. The blocks encode only its coarse occupied volume, pose, placement, major proportions, protrusion directions, and colour/material cues. Infer the recognizable object named by the scene description, then redesign the cluster into that object. Semantic identity outranks the individual block shapes. Blend continuously across block boundaries; erase every cube seam and stacked-box joint; freely round, taper, bevel, curve, bridge, and streamline the mass within its overall envelope. Small blocks indicate coarse features or protrusions, not separate domes or blocks. Do NOT merely bevel or decorate each cube separately. The result should read immediately as the intended real object, not as a construction made from blocks. "
+func Scene(scene string, hasGround bool, objectCount ...int) string {
+	countConstraint := ""
+	if len(objectCount) > 0 && objectCount[0] >= 0 {
+		count := objectCount[0]
+		countConstraint = " EXACT INVENTORY: Image 1 contains exactly " + strconv.Itoa(count) + " spatially connected above-ground object cluster"
+		if count != 1 {
+			countConstraint += "s"
+		}
+		countConstraint += ", so the output must contain exactly " + strconv.Itoa(count) + " independently placeable object"
+		if count != 1 {
+			countConstraint += "s"
+		}
+		countConstraint += ". Fine terrain texture such as grass blades, leaves, and pebbles does not count as a new object, but no additional tree, rock, structure, prop, campfire, fire, flame, tent, pond, path, or landmark is allowed — not even the single most typical centerpiece of the named setting (a 'campsite' with no fire cluster gets NO fire; a 'village' with no house cluster gets NO house). Each output object must stay centered exactly on its own source cluster's position: never shift, shrink, or push an object aside to make room for anything else or to improve the composition."
+	}
+	const authority = "SOURCE-OF-TRUTH ORDER: Image 1 is the sole authority for WHAT EXISTS and WHERE. Image 2, when provided, is a same-camera SEMANTIC ID DIAGRAM: each bright artificial solid colour marks exactly one connected source object, while the dark non-black region is ground. Use Image 2 only to enforce object count, membership, silhouette region, and placement; never copy its artificial colours or literal block shapes into the artwork. The user's text is only a secondary theme, material, mood, and style hint; it is NOT an object inventory and must never add a typical feature of that setting. An output object is allowed only when a corresponding connected block cluster and ID region exist: NO SOURCE CLUSTER = NO OBJECT. Never replace a cluster with an unrelated object merely because the text mentions a broad place or theme. For example, if Image 1 shows one tree and several stones and the text says 'forest', output that same one tree and those same stones with forest-appropriate materials — do not add a cabin, hut, extra trees, path, fence, or any other forest scenery. "
+	const blockout = "CRITICAL BLOCK-OUT INTERPRETATION: every visible cube or rectangular block is temporary volumetric scaffolding drawn by the user, never a literal cube, crate, tiled module, panel, button, or final design element. Treat each spatially connected cluster of blocks as ONE intended real object, and every separate cluster as a separate object. The blocks encode only its coarse occupied volume, pose, placement, major proportions, protrusion directions, and colour/material cues. Infer the most plausible recognizable object primarily from that cluster's geometry and colours; use the text only to resolve genuine ambiguity. Semantic identity outranks the individual block shapes, but never outranks the cluster's existence, placement, or occupied envelope. Blend continuously across block boundaries; erase every cube seam and stacked-box joint; freely round, taper, bevel, curve, bridge, and streamline the mass within its overall envelope. Small blocks indicate coarse features or protrusions, not separate domes or blocks. Do NOT merely bevel or decorate each cube separately. The result should read immediately as an interpretation of the user's geometry, not as a newly composed scene and not as a construction made from blocks. "
 	if !hasGround {
-		return "Image 1 is the exact isometric geometry and color guide for a scene containing OBJECTS ONLY, with NO ground. Interpret and transform the block-out as this scene: \"" + scene + "\". " + blockout +
+		return "PRIMARY TASK: faithfully reinterpret the geometry already present in Image 1; do not compose a new scene from text. Image 1 is the exact isometric geometry and color guide for a scene containing OBJECTS ONLY, with NO ground. Secondary theme/style hint: \"" + scene + "\". " + authority + countConstraint + " " + blockout +
 			"Render the interpreted objects in a polished hand-painted stylized isometric game-art style — semi-realistic, richly detailed, softly lit, with clean readable silhouettes and crisp storybook charm. " +
 			"HARD COMPOSITION CONSTRAINTS: preserve the exact orthographic isometric camera angle, framing, object count, object centers, relative sizes, heights, spacing, overall occupied envelope, and major protrusion directions from Image 1. Keep every object in place. Do not add, remove, duplicate, move, rotate, crop, or rearrange objects. Do not zoom or change perspective. Local silhouette changes that make the intended object recognizable are REQUIRED; per-block silhouettes are not constraints. " +
 			"CRITICAL: there is intentionally NO floor, terrain, ground plane, platform, baseplate, pedestal, island, grass patch, dirt patch, contact shadow, or surface beneath these objects. Do not invent one for context or support. Keep the objects isolated in empty space. Black areas far from each block cluster must remain pure black and empty; reshape only within a tight envelope around that cluster, and do not create any new disconnected region in the background. No sky, horizon, scenery, border, frame, text, labels, or UI."
 	}
-	return "Image 1 is the exact isometric geometry and color guide for ONE COMPLETE 3D ENVIRONMENT on a flat, hand-drawn ground shape. Interpret and transform the block-out as this scene: \"" + scene + "\". " + blockout +
+	return "PRIMARY TASK: faithfully reinterpret the geometry already present in Image 1; do not compose a new scene from text. Image 1 is the exact isometric geometry and color guide for ONE COMPLETE 3D ENVIRONMENT on a flat, hand-drawn ground shape. Secondary theme/material/style hint: \"" + scene + "\". " + authority + countConstraint + " " + blockout +
 		"Transform the flat painted ground into richly textured terrain appropriate to the scene. Use a polished hand-painted stylized isometric game-art style — semi-realistic, richly detailed, soft ambient lighting, clean readable silhouettes, saturated natural colors, and crisp storybook charm. " +
 		"HARD COMPOSITION CONSTRAINTS: preserve the exact orthographic isometric camera angle, framing, the ground shape's exact position and silhouette, object count, object centers, relative sizes, heights, spacing, overall occupied envelopes, and major protrusion directions from Image 1. Keep every object in place. Do not add, remove, duplicate, move, rotate, crop, or rearrange objects. Do not zoom or change perspective. Local silhouette changes that make each intended object recognizable are REQUIRED; per-block silhouettes and seams are not constraints. Preserve distinct guide colors as material cues while replacing flat color with visible natural texture and fine surface detail such as bark, leaves, grass, stone, wood grain, soil, moss, and small pebbles as appropriate. The ground is EXACTLY the flat painted shape shown in Image 1 — keep its outline as drawn; do not expand, shrink, reshape, square it off, or turn it into a thick pedestal, floating island, hill, or cliff. " +
 		"Everything outside the drawn ground shape must remain pure black and empty. No sky, horizon, background scenery, border, frame, text, labels, UI, cast shadow outside the ground, or extra ground plane. The final image must show the complete textured environment fully inside the frame in exactly the input pose, ready for single-image Gaussian-splat reconstruction."

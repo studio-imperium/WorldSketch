@@ -1628,6 +1628,9 @@ const splatDragPoint = new THREE.Vector3()
 
 function ensureSplatProxies() {
 	for (const { mesh } of world.generated) {
+		// Uncertain/unmatched reconstruction material stays visible as scene context, but
+		// is deliberately not selectable or movable with a semantic object.
+		if (mesh.userData.genKind === "remainder") continue
 		if (mesh.userData.splatProxy?.parent === mesh) continue
 		const cb = mesh.userData.contentBox
 		if (!cb) continue
@@ -1678,6 +1681,8 @@ function startSplatDrag(event, hit) {
 	selectSplat(mesh)
 	const pivot = hit.object.getWorldPosition(new THREE.Vector3())
 	mesh.updateWorldMatrix(true, false)
+	const scaleAnchorLocal = splatScaleAnchorLocal(mesh, pivot)
+	const scaleAnchorWorld = mesh.localToWorld(scaleAnchorLocal.clone())
 	drag = {
 		mode: viewTool === "rotate" ? "splat-rotate" : viewTool === "scale" ? "splat-scale" : "splat-move",
 		pointerId: event.pointerId,
@@ -1687,6 +1692,8 @@ function startSplatDrag(event, hit) {
 		startScale: mesh.scale.clone(),
 		pivot,
 		pivotLocal: mesh.worldToLocal(pivot.clone()),
+		scaleAnchorLocal,
+		scaleAnchorWorld,
 		startPoint: hit.point.clone(),
 		startX: event.clientX,
 		startY: event.clientY,
@@ -1696,6 +1703,16 @@ function startSplatDrag(event, hit) {
 	drag.startAngle = pointerScreenAngle(event, drag.rollCenter)
 	renderer.domElement.setPointerCapture(event.pointerId)
 	renderer.domElement.classList.add("is-dragging")
+}
+
+function splatScaleAnchorLocal(mesh, fallbackWorld) {
+	const box = mesh.userData.contentBox
+	if (box && !box.isEmpty()) {
+		const anchor = box.getCenter(new THREE.Vector3())
+		anchor.y = box.min.y
+		return anchor
+	}
+	return mesh.worldToLocal(fallbackWorld.clone())
 }
 
 // Drag on the horizontal plane through the grab point; hold Shift to move vertically.
@@ -1715,16 +1732,16 @@ function updateSplatMove(event) {
 	)
 }
 
-// Uniform scale about the selected splat's own content centre. Keeping all three scale
-// components equal avoids Spark's non-uniform-scale averaging limitation.
+// Uniform scale from the selected splat's bottom centre, so the object grows up/out
+// instead of sinking below or floating above its seated contact point.
 function updateSplatScale(event) {
 	const delta = (event.clientX - drag.startX) - (event.clientY - drag.startY)
 	const factor = Math.min(6, Math.max(0.15, Math.exp(delta * 0.01)))
 	drag.mesh.scale.copy(drag.startScale).multiplyScalar(factor)
-	// The splat's packed coordinates are world-like and its mesh origin is usually zero;
-	// compensate position so scaling happens around the proxy/content centre, not origin.
-	tmpWorld.copy(drag.pivotLocal).multiply(drag.mesh.scale).applyQuaternion(drag.startQuat)
-	drag.mesh.position.copy(drag.pivot).sub(tmpWorld)
+	// Packed splat coordinates are world-like and the mesh origin is usually zero;
+	// compensate position so scaling happens from the bottom anchor, not origin.
+	tmpWorld.copy(drag.scaleAnchorLocal).multiply(drag.mesh.scale).applyQuaternion(drag.startQuat)
+	drag.mesh.position.copy(drag.scaleAnchorWorld).sub(tmpWorld)
 }
 
 // Match Build-mode rotation: pointer angle around the object's on-screen centre drives
@@ -3120,27 +3137,53 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 	// Project every block's sampled volume: occupancy silhouette + per-colour anchors.
 	const corner = new THREE.Vector3()
 	const blockUV = []
+	const blockRects = [] // per-mesh projected uv bounds — every block must be "explained"
 	for (const mesh of meshes) {
 		const color = new THREE.Color(`#${mesh.userData.baseColor ?? mesh.material.color.getHexString()}`)
 		const key = color.getHexString()
 		mesh.updateWorldMatrix(true, false)
 		const geo = mesh.geometry.boundingBox ?? (mesh.geometry.computeBoundingBox(), mesh.geometry.boundingBox)
 		const vol = mesh.scale.x * mesh.scale.y * mesh.scale.z
+		const rect = [Infinity, -Infinity, Infinity, -Infinity]
 		for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) for (let c = 0; c < 3; c++) {
 			corner.set(
 				geo.min.x + (a / 2) * (geo.max.x - geo.min.x),
 				geo.min.y + (b / 2) * (geo.max.y - geo.min.y),
 				geo.min.z + (c / 2) * (geo.max.z - geo.min.z),
 			).applyMatrix4(mesh.matrixWorld)
-			blockUV.push([
-				corner.x * ISO_PROJ_RIGHT[0] + corner.y * ISO_PROJ_RIGHT[1] + corner.z * ISO_PROJ_RIGHT[2],
-				corner.x * ISO_PROJ_UP[0] + corner.y * ISO_PROJ_UP[1] + corner.z * ISO_PROJ_UP[2],
-				key, vol / 27,
-			])
+			const pu = corner.x * ISO_PROJ_RIGHT[0] + corner.y * ISO_PROJ_RIGHT[1] + corner.z * ISO_PROJ_RIGHT[2]
+			const pv = corner.x * ISO_PROJ_UP[0] + corner.y * ISO_PROJ_UP[1] + corner.z * ISO_PROJ_UP[2]
+			blockUV.push([pu, pv, key, vol / 27])
+			rect[0] = Math.min(rect[0], pu); rect[1] = Math.max(rect[1], pu)
+			rect[2] = Math.min(rect[2], pv); rect[3] = Math.max(rect[3], pv)
 		}
+		blockRects.push(rect)
 	}
 	let bu0 = Infinity, bu1 = -Infinity, bv0 = Infinity, bv1 = -Infinity
 	for (const [u, v] of blockUV) { bu0 = Math.min(bu0, u); bu1 = Math.max(bu1, u); bv0 = Math.min(bv0, v); bv1 = Math.max(bv1, v) }
+	// Ground scenes: the splat (and guide) span the whole painted terrain, so block
+	// anchors must be expressed in that same frame — the blocks' own extent is a
+	// different, incompatible space, and comparing centroids across the two frames made
+	// the colour term prefer the wrong quarter-turn (run 0112: picked 0°, truth 90°).
+	if (world.groundInkBounds()) {
+		const domain = wholeSceneBox()
+		bu0 = Infinity; bu1 = -Infinity; bv0 = Infinity; bv1 = -Infinity
+		for (let c = 0; c < 8; c++) {
+			corner.set(
+				c & 1 ? domain.max.x : domain.min.x,
+				c & 2 ? domain.max.y : domain.min.y,
+				c & 4 ? domain.max.z : domain.min.z,
+			)
+			const u = corner.x * ISO_PROJ_RIGHT[0] + corner.y * ISO_PROJ_RIGHT[1] + corner.z * ISO_PROJ_RIGHT[2]
+			const v = corner.x * ISO_PROJ_UP[0] + corner.y * ISO_PROJ_UP[1] + corner.z * ISO_PROJ_UP[2]
+			bu0 = Math.min(bu0, u); bu1 = Math.max(bu1, u)
+			bv0 = Math.min(bv0, v); bv1 = Math.max(bv1, v)
+		}
+	}
+	const normRects = blockRects.map(([u0, u1, v0, v1]) => [
+		(u0 - bu0) / Math.max(1e-9, bu1 - bu0), (u1 - bu0) / Math.max(1e-9, bu1 - bu0),
+		(v0 - bv0) / Math.max(1e-9, bv1 - bv0), (v1 - bv0) / Math.max(1e-9, bv1 - bv0),
+	])
 	const blockOcc = new Set()
 	const anchors = new Map() // colour key -> [Σux, Σvy, Σw]
 	let blockMass = 0
@@ -3177,6 +3220,14 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 	}
 	if (pts.length < 100) return null
 
+	// Height gate for the block-coverage term: yaw rotates about Y, so heights are
+	// yaw-invariant. Points above the low quartile band count as "object material" —
+	// flat terrain inside a block's projected rect must not make the block look found.
+	const heights = pts.map(p => p[1]).sort((a, b) => a - b)
+	const hq = f => heights[Math.min(heights.length - 1, (f * (heights.length - 1)) | 0)]
+	const floorY = hq(0.25)
+	const aboveY = floorY + 0.08 * Math.max(1e-6, hq(0.99) - floorY)
+
 	const candidates = [0, 90, 180, 270]
 	let bestYaw = null, bestScore = -Infinity
 	const scores = []
@@ -3188,7 +3239,7 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 			uv.push([
 				wx * ISO_PROJ_RIGHT[0] + y * ISO_PROJ_RIGHT[1] + wz * ISO_PROJ_RIGHT[2],
 				wx * ISO_PROJ_UP[0] + y * ISO_PROJ_UP[1] + wz * ISO_PROJ_UP[2],
-				r, g, b,
+				r, g, b, y,
 			])
 		}
 		const us = uv.map(p => p[0]).sort((a, b) => a - b)
@@ -3197,18 +3248,36 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 		const u0 = q(us, 0.003), u1 = q(us, 0.997), v0 = q(vs, 0.003), v1 = q(vs, 0.997)
 		const splatOcc = new Set()
 		const colorSums = new Map([...anchors.keys()].map(key => [key, [0, 0, 0]]))
+		const rectCounts = new Array(normRects.length).fill(0)
+		const RECT_PAD = 0.03
 		let n = 0
-		for (const [u, v, r, g, b] of uv) {
+		for (const [u, v, r, g, b, wy] of uv) {
 			const x = (u - u0) / Math.max(1e-9, u1 - u0)
 			const y = (v - v0) / Math.max(1e-9, v1 - v0)
 			if (x < 0 || x > 1 || y < 0 || y > 1) continue
 			n++
 			splatOcc.add(Math.min(YAW_GRID - 1, x * YAW_GRID | 0) * YAW_GRID + Math.min(YAW_GRID - 1, y * YAW_GRID | 0))
+			if (wy > aboveY) {
+				for (let ri = 0; ri < normRects.length; ri++) {
+					const [ru0, ru1, rv0, rv1] = normRects[ri]
+					if (x >= ru0 - RECT_PAD && x <= ru1 + RECT_PAD && y >= rv0 - RECT_PAD && y <= rv1 + RECT_PAD) rectCounts[ri]++
+				}
+			}
 			const cu = unitChroma(r, g, b)
-			if (cu[3] < 10) continue // grey/shadow gaussians carry no colour direction
 			let bestKey = null, bestDot = 0.6 // require a decent chroma match to claim a point
 			for (const [key, bc] of anchorChroma) {
-				if (bc[3] < 10) continue
+				if (bc[3] < 10) {
+					// A neutral anchor (grey rock, white stone) is often the scene's most
+					// distinctive landmark — colourful terrain can't impersonate it. Claim
+					// splat points that are also neutral and of similar brightness instead
+					// of discarding the anchor entirely.
+					if (cu[3] < 28 && bestKey == null) { // low-chroma, not strictly neutral: painted grey is blue-grey
+						const anchorMean = (parseInt(key.slice(0, 2), 16) + parseInt(key.slice(2, 4), 16) + parseInt(key.slice(4, 6), 16)) / 3
+						if (Math.abs((r + g + b) / 3 - anchorMean) < 60) bestKey = key
+					}
+					continue
+				}
+				if (cu[3] < 10) continue // grey/shadow points carry no direction for chromatic anchors
 				const dot = cu[0] * bc[0] + cu[1] * bc[1] + cu[2] * bc[2]
 				if (dot > bestDot) { bestDot = dot; bestKey = key }
 			}
@@ -3230,8 +3299,14 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 			anchorTerm += w * (1 - Math.min(1, d * 1.5))
 			anchorWeight += w
 		}
-		const score = iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0)
-		scores.push(`${yaw}°:${score.toFixed(3)}(iou ${iou.toFixed(3)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(3) : "—"})`)
+		// Block coverage dominates: a quarter-turn that leaves any expected block's
+		// projected rect without above-floor material cannot be the true orientation
+		// (run 0112: the rock rect was empty at 0°/180°, yet colour centroids — skewed
+		// by terrain that shares the blocks' palette — preferred exactly those yaws).
+		const rectMin = Math.max(12, n * 0.0008)
+		const covered = rectCounts.filter(count => count >= rectMin).length
+		const score = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0)
+		scores.push(`${yaw}°:${score.toFixed(3)}(blocks ${covered}/${normRects.length} iou ${iou.toFixed(3)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(3) : "—"})`)
 		if (score > bestScore) { bestScore = score; bestYaw = yaw }
 	}
 	console.log(`[fit] scene yaw estimate → ${bestYaw}° (${scores.join(" ")})`)
@@ -3282,13 +3357,13 @@ function wholeSceneBox() {
 	return box.isEmpty() ? new THREE.Box3(new THREE.Vector3(-2, 0, -2), new THREE.Vector3(2, 1, 2)) : box
 }
 
-// Carve the single seated scene splat into independently movable pieces, purely from
-// CONTENT. The floor is (nearly) flat, so: estimate a LOCAL floor height map (eroded so
-// wide objects cannot fake an elevated floor), call everything within a band of it
-// "ground", flood-fill what remains into connected blobs — and make EVERY big blob its
-// own piece, including objects the image model invented on its own. The guide blocks are
-// not consulted at all: the splat is the sole source of truth for what exists and where.
-// (Two objects painted touching each other become one piece — acceptable, and visible.)
+// Carve the single seated scene splat into independently movable pieces. The primary
+// path projects fitted gaussians back through the canonical capture camera and assigns
+// them to masks made from the block-out's connected object groups. This keeps one object
+// together even when its single-view reconstruction is several disconnected shells
+// (crate lid/front/sides), while unmatched haze or hallucinated terrain stays in a static
+// remainder. The older content-only voxel splitter remains as a fallback when the guide
+// masks cannot confidently recover every expected object.
 function segmentSceneSplat(hasGround = true) {
 	const record = world.generated.find(g => g.mesh.userData.genName === "scene")
 	const packed = record?.mesh.packedSplats
@@ -3321,11 +3396,17 @@ function segmentSceneSplat(hasGround = true) {
 	const pxs = new Float32Array(n)
 	const pys = new Float32Array(n)
 	const pzs = new Float32Array(n)
+	const prgb = new Uint8Array(n * 3) // display-sRGB bytes for mask colour affinity
 	let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity, minZ = Infinity, maxZ = -Infinity
-	packed.forEachSplat((i, center) => {
+	packed.forEachSplat((i, center, _scales, _quaternion, _opacity, color) => {
 		pxs[i] = center.x
 		pys[i] = center.y
 		pzs[i] = center.z
+		if (color) {
+			prgb[i * 3] = Math.min(255, Math.max(0, color.r * 255 + 0.5)) | 0
+			prgb[i * 3 + 1] = Math.min(255, Math.max(0, color.g * 255 + 0.5)) | 0
+			prgb[i * 3 + 2] = Math.min(255, Math.max(0, color.b * 255 + 0.5)) | 0
+		}
 		if (center.x < minX) minX = center.x
 		if (center.x > maxX) maxX = center.x
 		if (center.y < minY) minY = center.y
@@ -3366,6 +3447,29 @@ function segmentSceneSplat(hasGround = true) {
 	// body behind as a shell when the piece moved. A cell's floor can never sit above
 	// its neighbourhood's lowest estimate, so take the neighbourhood minimum — the floor
 	// under a rock comes from the grass around it.
+	// The RAW (un-eroded) map is the actual local terrain SURFACE — kept for the turf
+	// trim below, which needs "how high is the ground right here", not the eroded
+	// lower bound used to seed object blobs.
+	const rawFloorLevel = Float32Array.from(floorLevel)
+	// 3×3 MAX of the raw floor = a contamination-resistant "local surface": under a
+	// wide object or at a plate-edge cliff the cell's own raw value sits partway up the
+	// object / down the cliff face; the neighbourhood maximum recovers the true nearby
+	// terrain top for hug tests.
+	const surfLevel = new Float32Array(gw * gh)
+	for (let cz = 0; cz < gh; cz++) {
+		for (let cx = 0; cx < gw; cx++) {
+			let high = -Infinity
+			for (let dz = -1; dz <= 1; dz++) {
+				for (let dx = -1; dx <= 1; dx++) {
+					const nx = cx + dx, nz = cz + dz
+					if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+					const v = floorLevel[nz * gw + nx]
+					if (v > high) high = v
+				}
+			}
+			surfLevel[cz * gw + cx] = high
+		}
+	}
 	const erodedLevel = new Float32Array(gw * gh)
 	for (let cz = 0; cz < gh; cz++) {
 		for (let cx = 0; cx < gw; cx++) {
@@ -3383,6 +3487,13 @@ function segmentSceneSplat(hasGround = true) {
 		}
 	}
 	floorLevel.set(erodedLevel)
+
+	// Object groups from the block-out: the source of expected-object COUNT, rough
+	// layout, size, and palette. The splat's own content decides what actually exists
+	// and where (the image model drifts objects several units from their clusters, so
+	// projected block masks must never directly own gaussians); the groups are matched
+	// to content blobs after flood fill instead.
+	const semanticGroups = computeObjects(world.primitives)
 
 	// Flood fill (26-connected voxel components) over everything ABOVE the floor band.
 	const VOFF = 128 // voxel index offset keeps negative heights positive
@@ -3536,31 +3647,399 @@ function segmentSceneSplat(hasGround = true) {
 		for (const v of voxels.values()) if (v.blob === bigBlobIds[0]) for (const gi of v.idx) blobOf[gi] = bigBlobIds[0]
 	}
 
-	// With no floor, there must not be a synthetic "ground remainder" piece. Attach
-	// sparse disconnected reconstruction specks to the nearest substantial object.
-	if (!hasGround && bigBlobIds.length) {
-		const centres = new Map(bigBlobIds.map(id => [id, { x: 0, y: 0, z: 0, n: 0 }]))
-		for (let i = 0; i < n; i++) {
-			const c = centres.get(blobOf[i])
-			if (!c) continue
-			c.x += pxs[i]; c.y += pys[i]; c.z += pzs[i]; c.n++
+	// ---- Turf trim ---------------------------------------------------------------------
+	// Lumpy terrain rises above the (eroded-floor + band) threshold, flood-fills into any
+	// object standing on it, and the object then tears a whole slab of grass out of the
+	// ground when moved. Standing terrain betrays itself per COLUMN: the blob's content
+	// there is a thin skin (small vertical span) hugging the RAW local floor surface.
+	// Object walls are tall columns, and overhanging canopy is thin but ELEVATED — both
+	// survive. Turf columns touching a real object column are kept as its contact ring.
+	if (hasGround && bigBlobIds.length) {
+		const bigSet = new Set(bigBlobIds)
+		// Tuning history: 1.3/1.6 removes terrain slabs completely but eats squat stumps
+		// (their turf-tested columns CONNECT to the surrounding slab patch, so a patch-
+		// size filter cannot save them) and leaves a large mound remnant that outbids
+		// small groups. 1.0/1.2 keeps every object assignment correct on all regression
+		// scenes at the cost of a moderate grass skirt on objects standing in lumpy
+		// terrain. Correct identity wins.
+		const TURF_SPAN = 1.0 // thinner vertical extent than any believable object wall
+		const TURF_TOP = 1.2 // ...and no higher than this above the raw local surface
+		// Extra safety for squat isolated objects: turf patches smaller than this many
+		// connected columns are left with their blob.
+		const MIN_TURF_PATCH = 25
+		const colStats = new Map() // blobId -> Map(colKey -> {minKy, maxKy, voxs})
+		for (const v of voxels.values()) {
+			if (!bigSet.has(v.blob)) continue
+			let cols = colStats.get(v.blob)
+			if (!cols) colStats.set(v.blob, cols = new Map())
+			const key = v.kx * 4096 + v.kz
+			let c = cols.get(key)
+			if (!c) cols.set(key, c = { minKy: v.ky, maxKy: v.ky, voxs: [] })
+			c.minKy = Math.min(c.minKy, v.ky)
+			c.maxKy = Math.max(c.maxKy, v.ky)
+			c.voxs.push(v)
 		}
-		for (const c of centres.values()) {
-			const d = Math.max(1, c.n)
-			c.x /= d; c.y /= d; c.z /= d
-		}
-		for (let i = 0; i < n; i++) {
-			if (blobOf[i] >= 0) continue
-			let nearest = bigBlobIds[0]
-			let best = Infinity
-			for (const id of bigBlobIds) {
-				const c = centres.get(id)
-				const d = (pxs[i] - c.x) ** 2 + (pys[i] - c.y) ** 2 + (pzs[i] - c.z) ** 2
-				if (d < best) { best = d; nearest = id }
+		let turfGaussians = 0
+		for (const [blobId, cols] of colStats) {
+			const turfKeys = new Set()
+			for (const [key, c] of cols) {
+				const span = (c.maxKy - c.minKy + 1) * VOX
+				if (span >= TURF_SPAN) continue
+				const colX = minX + (Math.floor(key / 4096) + 0.5) * VOX
+				const colZ = minZ + ((key % 4096) + 0.5) * VOX
+				const top = (c.maxKy + 1 - VOFF) * VOX
+				if (top < rawFloorLevel[cellOfXZ(colX, colZ)] + TURF_TOP) turfKeys.add(key)
 			}
-			blobOf[i] = nearest
+			// Contact-ring test against the FROZEN turf set — deciding against a mutating
+			// set lets "keep" cascade inward and spare the entire grass slab.
+			const frozenTurf = new Set(turfKeys)
+			const isContactRing = key => {
+				const kx = Math.floor(key / 4096), kz = key % 4096
+				for (let dx = -1; dx <= 1; dx++) {
+					for (let dz = -1; dz <= 1; dz++) {
+						const nk = (kx + dx) * 4096 + (kz + dz)
+						if (cols.has(nk) && !frozenTurf.has(nk)) return true
+					}
+				}
+				return false
+			}
+			// Connected components of the trimmable turf: patches smaller than
+			// MIN_TURF_PATCH are squat-object bodies, not terrain — leave them alone.
+			const trimmable = new Set([...frozenTurf].filter(key => !isContactRing(key)))
+			const seenCols = new Set()
+			const finalTrim = new Set()
+			for (const seed of trimmable) {
+				if (seenCols.has(seed)) continue
+				const comp = []
+				const stack = [seed]
+				seenCols.add(seed)
+				while (stack.length) {
+					const cur = stack.pop()
+					comp.push(cur)
+					const kx = Math.floor(cur / 4096), kz = cur % 4096
+					for (let dx = -1; dx <= 1; dx++) {
+						for (let dz = -1; dz <= 1; dz++) {
+							const nk = (kx + dx) * 4096 + (kz + dz)
+							if (trimmable.has(nk) && !seenCols.has(nk)) { seenCols.add(nk); stack.push(nk) }
+						}
+					}
+				}
+				if (comp.length >= MIN_TURF_PATCH) for (const key of comp) finalTrim.add(key)
+			}
+			for (const key of finalTrim) {
+				const c = cols.get(key)
+				for (const v of c.voxs) {
+					for (const gi of v.idx) { blobOf[gi] = -1; turfGaussians++ }
+					blobs[blobId].count -= v.idx.length
+					v.blob = -1
+				}
+				blobs[blobId].cols.delete(key)
+				cols.delete(key)
+			}
 		}
+		if (turfGaussians) console.log(`[segment] turf trim → ${turfGaussians} standing-terrain gaussian(s) returned to ground`)
 	}
+
+	// ---- Blob ↔ guide-group matching --------------------------------------------------
+	// The image model repeatedly paints objects several units away from their guide
+	// clusters (and at different scales), so ownership must be decided by matching the
+	// splat's own content blobs to the expected objects — by position, size, and
+	// palette — never by projecting block masks onto gaussians. One group may win
+	// several blobs (a tree that reconstructs as disconnected crown shells); a blob no
+	// group can explain (a hallucinated campfire) stays with the ground, visibly
+	// present but never movable as a false object.
+	let groupNames = null // bigBlobIds-aligned names once matching succeeds
+	let flipScene = false // set when the mirrored orientation explains the layout better
+	if (semanticGroups.length && bigBlobIds.length) {
+		const sceneSpan = Math.max(spanX, spanY, spanZ)
+		const groups = semanticGroups.map((group, gi) => {
+			const center = group.box.getCenter(new THREE.Vector3())
+			const palette = group.primitives.map(mesh => {
+				const hex = mesh.userData.baseColor ?? mesh.material.color.getHexString()
+				const cr = parseInt(hex.slice(0, 2), 16), cg = parseInt(hex.slice(2, 4), 16), cb = parseInt(hex.slice(4, 6), 16)
+				// Display sRGB on purpose: splat colour bytes are sRGB too.
+				return [...unitChroma(cr, cg, cb), (cr + cg + cb) / 3]
+			})
+			const volume = group.primitives.reduce((sum, mesh) => sum + Math.abs(mesh.scale.x * mesh.scale.y * mesh.scale.z), 0)
+			return { gi, group, center, height: Math.max(0.5, group.box.max.y - group.box.min.y), volume: Math.max(0.05, volume), palette }
+		})
+		// Per-blob stats + per-(blob,group) palette agreement in one pass.
+		const stats = new Map(bigBlobIds.map(id => [id, {
+			n: 0, cx: 0, cz: 0, minY: Infinity, maxY: -Infinity,
+			weight: 0, cr: 0, cg: 0, cb: 0, nearSurf: 0,
+			match: new Float64Array(groups.length),
+		}]))
+		for (let i = 0; i < n; i++) {
+			const s = stats.get(blobOf[i])
+			if (!s) continue
+			s.n++; s.cx += pxs[i]; s.cz += pzs[i]
+			s.cr += prgb[i * 3]; s.cg += prgb[i * 3 + 1]; s.cb += prgb[i * 3 + 2]
+			if (hasGround && Math.abs(pys[i] - surfLevel[cellOfXZ(pxs[i], pzs[i])]) < 1.0) s.nearSurf++
+			if (pys[i] < s.minY) s.minY = pys[i]
+			if (pys[i] > s.maxY) s.maxY = pys[i]
+			const pc = unitChroma(prgb[i * 3], prgb[i * 3 + 1], prgb[i * 3 + 2])
+			const pMean = (prgb[i * 3] + prgb[i * 3 + 1] + prgb[i * 3 + 2]) / 3
+			// Dark points carry proportionally less colour evidence — near-black shadow
+			// shells contribute none (they were outbidding real objects), while an object
+			// that is merely painted dark (a shaded wooden post, mean ~35) keeps half its
+			// vote instead of being silenced by a hard cutoff.
+			const evidence = Math.min(1, Math.max(0, (pMean - 15) / 40))
+			s.weight += evidence
+			if (!evidence) continue
+			for (const g of groups) {
+				let affinity = 0
+				for (const [cr, cg, cb, clen, cmean] of g.palette) {
+					const a = clen < 10 || pc[3] < 10
+						// Painted "grey" rock is really a slightly blue-grey (chroma length
+						// 15–25) AND its stored splat colours are ambient-darkened well below
+						// the block hex, so match neutral anchors on low chroma with only a
+						// gentle brightness falloff — the strict test made grey palettes match
+						// NOTHING and the rock blob lost its own group.
+						? (clen < 10 && pc[3] < 28 ? 1 - Math.min(1, Math.abs(pMean - cmean) / 200) : 0)
+						: pc[0] * cr + pc[1] * cg + pc[2] * cb
+					if (a > affinity) affinity = a
+				}
+				if (affinity > 0.5) s.match[g.gi] += evidence
+			}
+		}
+		for (const s of stats.values()) { s.cx /= Math.max(1, s.n); s.cz /= Math.max(1, s.n) }
+
+		// GLOBALLY optimal one-to-one assignment (branch & bound over the few groups).
+		// Greedy failed in practice: a drifted tent sitting where the tree's cluster was
+		// is locally the tree's cheapest blob, which then strands the real (drifted)
+		// tree entirely — while the total-cost-minimal assignment pairs both correctly.
+		const UNMATCHED_GROUP_COST = 2.0 // leaving a group empty must beat only absurd pairings
+		// The artwork's global scale drifts (objects painted ~2× their cluster height),
+		// so compare RELATIVE heights — each side normalized by its own tallest — and
+		// the shared exaggeration cancels while rank/size ordering still discriminates.
+		const maxBlobH = Math.max(...bigBlobIds.map(id => Math.max(0.3, stats.get(id).maxY - stats.get(id).minY)))
+		const maxGroupH = Math.max(...groups.map(g => g.height))
+		// Relative MASS (blob point count vs guide cluster volume, each normalized by its
+		// own largest) is the one signal the image model cannot lie about: a hallucinated
+		// neon wisp whose colour perfectly mimics a guide block is still a few thousand
+		// points impersonating a cluster that expects tens of thousands.
+		const maxBlobN = Math.max(...bigBlobIds.map(id => stats.get(id).n))
+		const maxGroupVol = Math.max(...groups.map(g => g.volume))
+		// Yaw self-correction: the estimator's one plausible failure is the 180° mirror
+		// (quarter turns fail its block-coverage term outright, but a near-symmetric
+		// silhouette can flip). Blobs and groups are both known here, so score the
+		// assignment in BOTH orientations — mirroring the group centers about the scene
+		// content center — and if the mirrored world explains the layout decisively
+		// better, rigidly flip every seated piece afterwards. Run 0118 seated mirrored:
+		// the wisp stole the tree group and the tower landed 11u from its cluster.
+		const cx0 = (minX + maxX) / 2
+		const cz0 = (minZ + maxZ) / 2
+		const groupCX = g => (flipScene ? 2 * cx0 - g.center.x : g.center.x)
+		const groupCZ = g => (flipScene ? 2 * cz0 - g.center.z : g.center.z)
+		const paletteAffinity = (palette, r, g, b) => {
+			const pc = unitChroma(r, g, b)
+			const pMean = (r + g + b) / 3
+			let best = 0
+			for (const [cr, cg, cb, clen, cmean] of palette) {
+				const a = clen < 10 || pc[3] < 10
+					? (clen < 10 && pc[3] < 28 ? 1 - Math.min(1, Math.abs(pMean - cmean) / 200) : 0)
+					: pc[0] * cr + pc[1] * cg + pc[2] * cb
+				if (a > best) best = a
+			}
+			return best
+		}
+		const buildCosts = mirror => {
+			const out = new Map() // `${id}:${gi}` -> cost
+			for (const id of bigBlobIds) {
+				const s = stats.get(id)
+				const blobHN = Math.max(0.3, s.maxY - s.minY) / maxBlobH
+				const mr = s.cr / Math.max(1, s.n), mg = s.cg / Math.max(1, s.n), mb = s.cb / Math.max(1, s.n)
+				const meanChroma = unitChroma(mr, mg, mb)[3]
+				for (const g of groups) {
+					const gx = mirror ? 2 * cx0 - g.center.x : g.center.x
+					const gz = mirror ? 2 * cz0 - g.center.z : g.center.z
+					const dxz = Math.hypot(s.cx - gx, s.cz - gz) / Math.max(1e-6, sceneSpan)
+					const sizeTerm = Math.abs(Math.log(blobHN / (g.height / maxGroupH)))
+					const massTerm = Math.abs(Math.log((s.n / maxBlobN) / (g.volume / maxGroupVol)))
+					const colourTerm = 1 - s.match[g.gi] / Math.max(1, s.weight)
+					// A NEON blob (mean chroma far beyond any painted material) that this
+					// group's palette cannot explain is almost certainly an effect the model
+					// invented (a glowing magic wisp) — it must not impersonate a real object.
+					// A group that genuinely asked for a saturated colour keeps its claim.
+					const hallucTerm = meanChroma > 70 && paletteAffinity(g.palette, mr, mg, mb) < 0.5 ? 0.5 : 0
+					out.set(`${id}:${g.gi}`, dxz * 1.0 + sizeTerm * 0.3 + massTerm * 0.3 + colourTerm * 0.8 + hallucTerm)
+				}
+			}
+			return out
+		}
+		let costOf = buildCosts(false)
+		{
+			const colSum = new Map(bigBlobIds.map(id => [id, [0, 0, 0]]))
+			for (let i = 0; i < n; i++) {
+				const cs = colSum.get(blobOf[i])
+				if (!cs) continue
+				cs[0] += prgb[i * 3]; cs[1] += prgb[i * 3 + 1]; cs[2] += prgb[i * 3 + 2]
+			}
+			for (const id of bigBlobIds) {
+				const s = stats.get(id)
+				const cs = colSum.get(id).map(v => (v / Math.max(1, s.n)) | 0)
+				console.log(`[segment]   blob ${id}: ${s.n} pts @ (${s.cx.toFixed(1)}, ${s.cz.toFixed(1)}) h ${(s.maxY - s.minY).toFixed(1)} rgb(${cs.join(",")}) | ${groups.map(g => `g${g.gi + 1}:${costOf.get(`${id}:${g.gi}`).toFixed(2)}`).join(" ")}`)
+			}
+		}
+		// A large content blob that NO assignment explains is expensive: dumping a whole
+		// drifted tree into the static ground to buy a marginally cheaper pairing is
+		// exactly the failure this matcher exists to prevent. Blobs that can attach to
+		// an assigned neighbour (crown shells, prop fragments) cost nothing to leave
+		// unassigned — the attachment pass below will fold them in.
+		const ATTACH = 0.2 * sceneSpan
+		// NOTE: scaling this penalty down for "terrain-hugging" blobs (nearSurf fraction
+		// vs the raw floor) was tried to stop trimmed mound remnants from claiming small
+		// groups — but short wide objects (a rock) hug the contaminated raw floor just
+		// as much, lost their protection, and the 4-object regression scene scrambled.
+		// Keep the penalty purely size-based until a signal separates rocks from mounds.
+		const droppedPenalty = id => 0.6 * Math.min(1, stats.get(id).n / Math.max(1, 0.04 * n))
+		const leafPenalty = () => {
+			let sum = 0
+			for (const id of bigBlobIds) {
+				if (usedBlobs.has(id)) continue
+				const s = stats.get(id)
+				let attachable = false
+				for (const uid of usedBlobs) {
+					const p = stats.get(uid)
+					if (Math.hypot(s.cx - p.cx, s.cz - p.cz) <= ATTACH) { attachable = true; break }
+				}
+				if (!attachable) sum += droppedPenalty(id)
+			}
+			return sum
+		}
+		let bestAssign = null, bestTotal = Infinity
+		const currentAssign = new Map()
+		const usedBlobs = new Set()
+		const searchGroups = [...groups]
+		let activeCosts = costOf
+		const assignSearch = (gIdx, total) => {
+			if (total >= bestTotal) return // penalties are non-negative, so pair-sum is a valid lower bound
+			if (gIdx === searchGroups.length) {
+				const full = total + leafPenalty()
+				if (full < bestTotal) { bestTotal = full; bestAssign = new Map(currentAssign) }
+				return
+			}
+			const gi = searchGroups[gIdx].gi
+			for (const id of bigBlobIds) {
+				if (usedBlobs.has(id)) continue
+				const c = activeCosts.get(`${id}:${gi}`)
+				if (c >= UNMATCHED_GROUP_COST) continue
+				usedBlobs.add(id); currentAssign.set(gi, id)
+				assignSearch(gIdx + 1, total + c)
+				usedBlobs.delete(id); currentAssign.delete(gi)
+			}
+			assignSearch(gIdx + 1, total + UNMATCHED_GROUP_COST) // this group stays empty
+		}
+		assignSearch(0, 0)
+		const normalAssign = bestAssign, normalTotal = bestTotal
+		// Second pass with mirrored group centers — a decisive win means the scene was
+		// seated 180° off and every piece must be rigidly flipped after building.
+		bestAssign = null; bestTotal = Infinity
+		activeCosts = buildCosts(true)
+		assignSearch(0, 0)
+		if (bestTotal < normalTotal - 0.2) {
+			flipScene = true
+			costOf = activeCosts
+			console.warn(`[segment] mirrored layout wins (${bestTotal.toFixed(2)} vs ${normalTotal.toFixed(2)}) — seated yaw was 180° off; flipping all pieces`)
+		} else {
+			bestAssign = normalAssign
+			bestTotal = normalTotal
+		}
+		const blobGroup = new Map() // blob id -> group index
+		const groupPrimary = new Map() // group index -> primary blob id
+		for (const [gi, id] of bestAssign ?? []) {
+			blobGroup.set(id, gi)
+			groupPrimary.set(gi, id)
+		}
+
+		// Secondary blobs: crown shells and detached fragments of an already-matched
+		// object sit right next to its primary blob — attach them. Anything farther has
+		// no guide explanation and folds into the static ground/remainder. A neon blob
+		// the neighbour's palette cannot explain never attaches: a hallucinated glow
+		// must not ride along when the object beside it is moved.
+		for (const id of bigBlobIds) {
+			if (blobGroup.has(id)) continue
+			const s = stats.get(id)
+			// A blob that mostly hugs the terrain surface is a mound/cliff fragment; it
+			// must never ride along with a moved object as a fake "shell".
+			if (hasGround && s.nearSurf / Math.max(1, s.n) > 0.7) continue
+			const mr = s.cr / Math.max(1, s.n), mg = s.cg / Math.max(1, s.n), mb = s.cb / Math.max(1, s.n)
+			const neon = unitChroma(mr, mg, mb)[3] > 70
+			let bestGi = -1, bestD = ATTACH
+			for (const [gi, pid] of groupPrimary) {
+				if (neon && paletteAffinity(groups.find(g => g.gi === gi).palette, mr, mg, mb) < 0.5) continue
+				const p = stats.get(pid)
+				const d = Math.hypot(s.cx - p.cx, s.cz - p.cz)
+				if (d < bestD) { bestD = d; bestGi = gi }
+			}
+			if (bestGi >= 0) blobGroup.set(id, bestGi)
+		}
+
+		// A group left without any blob usually shared its painted object with a
+		// neighbour (two close crates painted as ONE tent): partition that shared
+		// blob's gaussians by nearest group box in XZ so both groups stay movable.
+		const unmatchedGroups = groups.filter(g => !groupPrimary.has(g.gi))
+		for (const g of unmatchedGroups) {
+			let bestId = -1, bestD = 0.25 * sceneSpan
+			for (const [gi, pid] of groupPrimary) {
+				const p = stats.get(pid)
+				const d = Math.hypot(groupCX(g) - p.cx, groupCZ(g) - p.cz)
+				if (d < bestD) { bestD = d; bestId = pid }
+			}
+			if (bestId < 0) { console.warn(`[segment] group ${g.gi + 1} has no matching content blob`); continue }
+			const donorGi = blobGroup.get(bestId)
+			const donor = groups.find(q => q.gi === donorGi)
+			// New synthetic blob for the partitioned half so relabeling stays uniform.
+			const newId = blobs.push({ count: 0, cols: new Set() }) - 1
+			bigBlobIds.push(newId)
+			stats.set(newId, stats.get(bestId))
+			blobGroup.set(newId, g.gi)
+			groupPrimary.set(g.gi, newId)
+			const donorIds = new Set([bestId])
+			for (const [bid, gi] of blobGroup) if (gi === donorGi) donorIds.add(bid)
+			const boxDistXZ = (box, x, z) => {
+				const dx = x < box.min.x ? box.min.x - x : x > box.max.x ? x - box.max.x : 0
+				const dz = z < box.min.z ? box.min.z - z : z > box.max.z ? z - box.max.z : 0
+				return Math.hypot(dx, dz)
+			}
+			for (let i = 0; i < n; i++) {
+				if (!donorIds.has(blobOf[i])) continue
+				// In a flipped seating, compare against the mirrored point so box tests
+				// happen in the same orientation the assignment was scored in.
+				const px = flipScene ? 2 * cx0 - pxs[i] : pxs[i]
+				const pz = flipScene ? 2 * cz0 - pzs[i] : pzs[i]
+				if (boxDistXZ(g.group.box, px, pz) < boxDistXZ(donor.group.box, px, pz)) blobOf[i] = newId
+			}
+			for (const v of voxels.values()) if (donorIds.has(v.blob)) blobs[newId].cols.add(v.kx * 4096 + v.kz) // both halves keep the full footprint for fringe claims
+			console.log(`[segment] group ${g.gi + 1} carved out of group ${donorGi + 1}'s shared blob`)
+		}
+
+		// Relabel every matched blob to its group's primary id, so each group is ONE
+		// piece downstream (fringe claim + skin cull operate on the merged labels).
+		const relabel = new Map()
+		for (const [id, gi] of blobGroup) relabel.set(id, groupPrimary.get(gi))
+		for (let i = 0; i < n; i++) {
+			const to = relabel.get(blobOf[i])
+			if (to != null && to !== blobOf[i]) blobOf[i] = to
+		}
+		for (const [id, to] of relabel) {
+			if (to === id) continue
+			for (const col of blobs[id].cols) blobs[to].cols.add(col)
+			blobs[to].count += blobs[id].count
+			blobs[id].count = 0
+		}
+		const matchedIds = [...groupPrimary.entries()].sort((a, b) => a[0] - b[0])
+		bigBlobIds.length = 0
+		bigBlobIds.push(...matchedIds.map(([, id]) => id))
+		groupNames = matchedIds.map(([gi]) => `obj-${String(gi + 1).padStart(3, "0")}`)
+		const dropped = [...stats.keys()].filter(id => !blobGroup.has(id)).length
+		console.log(`[segment] blob match → ${groupPrimary.size}/${groups.length} group(s) claimed, ${dropped} unexplained blob(s) folded into ground`)
+	}
+
+	// Never force unassigned specks into the nearest floorless object. Reconstruction
+	// grass, haze, and detached hallucinations are precisely the material that made a
+	// moved crate drag unrelated fragments with it. They stay visible in a static,
+	// non-selectable remainder instead.
 
 	// Base-fringe claim: floor-band gaussians directly under a blob's (dilated) footprint
 	// and above the fringe floor join that blob, so objects keep their contact base.
@@ -3589,15 +4068,126 @@ function segmentSceneSplat(hasGround = true) {
 		}
 	}
 
-	// Build the pieces: one per big blob (largest first = obj-001), plus the ground rest.
+	// Build the pieces: one per matched group (guide order) when matching ran, else one
+	// per big blob (largest first = obj-001); plus the ground rest.
 	const makePart = name => ({ name, packed: new PackedSplats(), bounds: new THREE.Box3() })
-	const ground = makePart("scene-ground")
-	const ranked = [...bigBlobIds].sort((a, b) => blobs[b].count - blobs[a].count)
-	const blobParts = new Map(ranked.map((id, i) => [id, makePart(`obj-${String(i + 1).padStart(3, "0")}`)]))
+	const ground = makePart(hasGround ? "scene-ground" : "scene-remainder")
+	const ranked = groupNames ? [...bigBlobIds] : [...bigBlobIds].sort((a, b) => blobs[b].count - blobs[a].count)
+	const blobParts = new Map(ranked.map((id, i) => [id, makePart(groupNames?.[i] ?? `obj-${String(i + 1).padStart(3, "0")}`)]))
+
+	// SUPPORT-ABOVE guard (the decisive skirt killer, applied per gaussian at the very
+	// end): a surface-hugging point belongs to an object only if the object's own tall
+	// mass stands (nearly) directly above it. An object's contact base always has its
+	// body overhead; grabbed turf, mound skin, and plate-edge cliff strips have open
+	// air. Support must come from points GENUINELY above the raw local surface, so a
+	// mound's own skin can never vouch for the skin below it.
+	const SURF_HUG = 1.2 // within this of the raw local surface = "surface-hugging"
+	const SUPPORT_WINDOW = 2.0 // object mass within this far above rescues a hugger
+	const SUPPORT_REACH = 2 // ...searching this many floor cells around (covers wide bases)
+	// The definitive terrain-surface map: built ONLY from ground-labeled gaussians, so
+	// it is immune to the contamination that poisoned every floor statistic so far —
+	// raw percentiles read partway up tall objects (culling a tower's lower half) and
+	// eroded minima read down cliff faces (letting plate-edge strips ride along). Per
+	// cell: high percentile of ground-point heights; object-covered cells borrow from
+	// their neighbourhood.
+	let groundSurf = null
+	if (hasGround) {
+		const cellPts = Array.from({ length: gw * gh }, () => [])
+		for (let i = 0; i < n; i++) {
+			if (blobParts.has(blobOf[i])) continue // objects must not define the terrain
+			cellPts[cellOfXZ(pxs[i], pzs[i])].push(pys[i])
+		}
+		groundSurf = new Float32Array(gw * gh).fill(NaN)
+		for (let c = 0; c < gw * gh; c++) {
+			const hs = cellPts[c]
+			if (hs.length < 4) continue
+			hs.sort((a, b) => a - b)
+			groundSurf[c] = hs[Math.floor(hs.length * 0.85)]
+		}
+		// Object-covered cells: take the highest ground surface within reach, growing
+		// the search ring until something is found; last resort = eroded floor + 1.
+		for (let cz = 0; cz < gh; cz++) {
+			for (let cx = 0; cx < gw; cx++) {
+				const c = cz * gw + cx
+				if (!Number.isNaN(groundSurf[c])) continue
+				let found = NaN
+				for (let r = 1; r <= 4 && Number.isNaN(found); r++) {
+					let high = -Infinity
+					for (let dz = -r; dz <= r; dz++) {
+						for (let dx = -r; dx <= r; dx++) {
+							const nx = cx + dx, nz = cz + dz
+							if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+							const v = groundSurf[nz * gw + nx]
+							if (!Number.isNaN(v) && v > high) high = v
+						}
+					}
+					if (high > -Infinity) found = high
+				}
+				groundSurf[c] = Number.isNaN(found) ? floorLevel[c] + 1 : found
+			}
+		}
+	}
+	const supportY = hasGround ? new Map([...blobParts.keys()].map(id => [id, new Float32Array(gw * gh).fill(Infinity)])) : null
+	if (supportY) {
+		for (let i = 0; i < n; i++) {
+			const sup = supportY.get(blobOf[i])
+			if (!sup) continue
+			const cell = cellOfXZ(pxs[i], pzs[i])
+			if (pys[i] <= groundSurf[cell] + SURF_HUG) continue // huggers are not support
+			if (pys[i] < sup[cell]) sup[cell] = pys[i]
+		}
+	}
+	const supportedFromAbove = (label, x, z, y) => {
+		const sup = supportY.get(label)
+		const cx = Math.min(gw - 1, Math.max(0, Math.floor(((x - minX) / spanX) * gw)))
+		const cz = Math.min(gh - 1, Math.max(0, Math.floor(((z - minZ) / spanZ) * gh)))
+		for (let dz = -SUPPORT_REACH; dz <= SUPPORT_REACH; dz++) {
+			for (let dx = -SUPPORT_REACH; dx <= SUPPORT_REACH; dx++) {
+				const nx = cx + dx, nz = cz + dz
+				if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+				if (sup[nz * gw + nx] - y < SUPPORT_WINDOW) return true
+			}
+		}
+		return false
+	}
+	// Pre-compute guard decisions with a piece-level safety valve: a SQUAT object
+	// (post, low rock) barely rises above lumpy surroundings, so nearly all of it reads
+	// "unsupported" — stripping it would delete the object outright. If the guard wants
+	// more than 60% of a piece, that piece is squat: leave it whole (a small skirt on a
+	// stump beats a missing stump). Tall objects lose only their grabbed fringe.
+	const cullMask = supportY ? new Uint8Array(n) : null
+	if (cullMask) {
+		const totalOf = new Map([...blobParts.keys()].map(id => [id, 0]))
+		const cullOf = new Map([...blobParts.keys()].map(id => [id, 0]))
+		for (let i = 0; i < n; i++) {
+			const label = blobOf[i]
+			if (!blobParts.has(label)) continue
+			totalOf.set(label, totalOf.get(label) + 1)
+			if (pys[i] <= groundSurf[cellOfXZ(pxs[i], pzs[i])] + SURF_HUG
+				&& !supportedFromAbove(label, pxs[i], pzs[i], pys[i])) {
+				cullMask[i] = 1
+				cullOf.set(label, cullOf.get(label) + 1)
+			}
+		}
+		for (const [label, culled] of cullOf) {
+			if (culled / Math.max(1, totalOf.get(label)) > 0.6) {
+				for (let i = 0; i < n; i++) if (blobOf[i] === label) cullMask[i] = 0
+			}
+		}
+	}
+
 	const skinNormal = new THREE.Vector3()
 	let skinCulled = 0
+	let unsupportedCulled = 0
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
 		let part = blobParts.get(blobOf[i]) ?? ground
+		// Surface-hugging material with no object mass overhead is grabbed terrain —
+		// return it to the ground no matter how it ended up in the piece (flood fill,
+		// fringe claim, or shared-blob partition).
+		if (cullMask && part !== ground && cullMask[i]) {
+			part = ground
+			unsupportedCulled++
+		}
 		// Razor-thin, lying-flat pancakes near floor level are ground SKIN, not object —
 		// leave them with the ground even when they sit inside the object's footprint
 		// (they sneak in via the fringe claim and read as floor patches when moved).
@@ -3634,12 +4224,23 @@ function segmentSceneSplat(hasGround = true) {
 		mesh.userData.genName = part.name
 		mesh.userData.genKind = kind
 		mesh.userData.contentBox = part.bounds.clone()
+		if (flipScene) {
+			// The matcher proved the seating was mirrored: rotate every piece 180° about
+			// the scene content center. contentBox stays in mesh-local space, so proxies
+			// and gizmos follow the transform for free.
+			mesh.rotation.y = Math.PI
+			mesh.position.set(minX + maxX, 0, minZ + maxZ)
+		}
+		const c = part.bounds.getCenter(new THREE.Vector3())
+		console.log(`[segment]   ${part.name} (${kind}): ${part.packed.numSplats} splats @ (${c.x.toFixed(1)}, ${c.y.toFixed(1)}, ${c.z.toFixed(1)})${flipScene ? " [flipped]" : ""}`)
 		world.addGenerated(mesh, [])
 		return 1
 	}
-	let pieces = hasGround ? seatPiece(ground, "floor") : 0
+	let pieces = seatPiece(ground, hasGround ? "floor" : "remainder")
 	for (const id of ranked) pieces += seatPiece(blobParts.get(id), "object")
-	const remainder = hasGround ? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin gaussian(s) left behind` : "no ground piece"
+	const remainder = hasGround
+		? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin + ${unsupportedCulled} unsupported-surface gaussian(s) left behind`
+		: `${ground.packed.numSplats} unmatched gaussian(s) kept as static remainder`
 	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), voxel ${VOX.toFixed(3)}, ${remainder})`)
 }
 
@@ -3676,8 +4277,10 @@ async function generateWorld(prompt) {
 
 		const box = wholeSceneBox()
 		const subjectMeshes = hasGround ? world.allBlockoutMeshes() : [...world.primitives]
+		const objectGroups = computeObjects(world.primitives)
+		const objectCount = objectGroups.length
 		const tCap = performance.now()
-		const capture = await captureWorld(renderer, scene, world, box)
+		const capture = await captureWorld(renderer, scene, world, box, objectGroups)
 		const captureMs = performance.now() - tCap
 
 		splatStore.clear()
@@ -3689,8 +4292,10 @@ async function generateWorld(prompt) {
 			output,
 			name: "scene",
 			hasGround,
+			objectCount,
 			colors: primitiveColors(subjectMeshes),
 			image: capture.guide,
+			materialImage: capture.semanticMap,
 		})
 		// Fit a copy so splatStore retains the pristine TripoSplat bytes for ZIP/history.
 		// Preserve the one-shot reconstruction's proportions with a uniform fit. The
@@ -4809,7 +5414,10 @@ async function uploadSplats(files) {
 function serializePrimitives() {
 	const index = new Map(world.primitives.map((mesh, i) => [mesh, i]))
 	return {
-		version: 2,
+		version: 3,
+		// The drawn ground is part of the scene: without it a restored one-shot build
+		// computes a scene box from the objects alone and mis-fits the stored splat.
+		ground: world.groundInkBounds() ? world.paint.canvas.toDataURL("image/png") : null,
 		primitives: world.primitives.map(mesh => ({
 			type: mesh.userData.type,
 			position: mesh.position.toArray(),
@@ -4989,11 +5597,18 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 		try {
 			let yawDeg = fit.yawDeg
 			if (s.kind === "scene") {
-				let guide = null
-				try { guide = (await captureWorld(renderer, scene, world, box)).guide }
-				catch (error) { console.warn("capture restored yaw guide:", error) }
-				yawDeg = await estimateSceneYaw(splatBytes, sourcePrimitives, guide)
-					?? (Number.isFinite(s.yawDeg) ? s.yawDeg : fit.yawDeg)
+				// Debug override: ?forceYaw=N seats a restored scene at exactly N degrees so
+				// yaw-estimator changes can be validated against a known-good pose for free.
+				const forcedYaw = new URLSearchParams(location.search).get("forceYaw")
+				if (forcedYaw != null && Number.isFinite(Number(forcedYaw))) {
+					yawDeg = Number(forcedYaw)
+				} else {
+					let guide = null
+					try { guide = (await captureWorld(renderer, scene, world, box)).guide }
+					catch (error) { console.warn("capture restored yaw guide:", error) }
+					yawDeg = await estimateSceneYaw(splatBytes, sourcePrimitives, guide)
+						?? (Number.isFinite(s.yawDeg) ? s.yawDeg : fit.yawDeg)
+				}
 			}
 			const seated = await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
 				kind: s.kind,
@@ -5093,6 +5708,23 @@ async function applyPrimitives(file) {
 		mesh.userData.support = Number.isInteger(p?.support) ? created[p.support] ?? null : null
 		mesh.userData.supportAxis = p?.supportAxis ?? { name: "y", sign: 1 }
 	})
+
+	// Files that carry a `ground` key (v3+) own the drawn-ground state too: restore the
+	// stored paint layer, or clear it when the build was saved groundless. Legacy files
+	// predate ground serialization and leave the current paint untouched.
+	if (parsed && !Array.isArray(parsed) && "ground" in parsed) {
+		const { canvas, ctx, texture } = world.paint
+		ctx.clearRect(0, 0, canvas.width, canvas.height)
+		if (typeof parsed.ground === "string") {
+			await new Promise(resolve => {
+				const img = new Image()
+				img.onload = () => { ctx.drawImage(img, 0, 0, canvas.width, canvas.height); resolve() }
+				img.onerror = () => { console.warn("restore ground: image decode failed"); resolve() }
+				img.src = parsed.ground
+			})
+		}
+		texture.needsUpdate = true
+	}
 
 	setStatus(`Loaded ${world.primitives.length} primitive${world.primitives.length === 1 ? "" : "s"}`)
 }
