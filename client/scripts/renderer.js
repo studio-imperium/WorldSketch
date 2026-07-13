@@ -3426,7 +3426,7 @@ function segmentSceneSplat(hasGround = true) {
 	const CELL = 0.5 // floor height-map cell (world units)
 	// Resolve every scene at roughly the same voxel density. A fixed world-space voxel
 	// made compact scenes far too coarse: the visible gap between two props could land in
-	// adjacent voxels and 26-connectivity would merge them into one object. A 256-cell
+	// adjacent voxels and 26-connectivity would merge them into one object. A 200-cell
 	// target across the longest scene axis cleanly separates those gaps while remaining
 	// small enough for the bridge/core pass below.
 	const VOX_TARGET_CELLS = 200
@@ -4253,6 +4253,7 @@ function segmentSceneSplat(hasGround = true) {
 	const skinNormal = new THREE.Vector3()
 	let skinCulled = 0
 	let unsupportedCulled = 0
+	let wispCulled = 0
 	const groundCellCount = hasGround ? new Int32Array(gw * gh) : null
 	const groundCellColor = hasGround ? Array.from({ length: gw * gh }, () => [0, 0, 0]) : null
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
@@ -4372,6 +4373,138 @@ function segmentSceneSplat(hasGround = true) {
 		if (patchSplats) console.log(`[segment] ground patch backfill → ${patchSplats} filler gaussian(s) under movable object footprint(s)`)
 	}
 
+	// Post-segmentation wisp prune: now that object pieces are already built, trim only
+	// tiny disconnected islands from each final object. This must not feed back into
+	// blob matching, group creation, bounds used for patching, or detached-object splits.
+	const pruneObjectPartWisps = part => {
+		if (part.packed.numSplats < 160) return 0
+		const WISP_VOX = Math.min(0.25, Math.max(VOX * 1.5, 0.06))
+		const WISP_MIN_POINTS = 120
+		const WISP_REL_POINTS = 0.03
+		const WISP_MIN_VOXELS = 8
+		const WISP_MIN_AVG_NEIGHBORS = 3
+		const WOFF = 4096
+		const entries = []
+		const objVoxels = new Map()
+		const keyOf = (kx, ky, kz) => (kx * 8192 + kz) * 8192 + ky
+		part.packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
+			const entry = {
+				center: center.clone(),
+				scales: scales.clone(),
+				quaternion: quaternion.clone(),
+				opacity,
+				color: color?.clone?.() ?? color,
+			}
+			entries.push(entry)
+			const kx = Math.floor((center.x - minX) / WISP_VOX)
+			const kz = Math.floor((center.z - minZ) / WISP_VOX)
+			const ky = Math.floor(center.y / WISP_VOX) + WOFF
+			const key = keyOf(kx, ky, kz)
+			let voxel = objVoxels.get(key)
+			if (!voxel) objVoxels.set(key, voxel = { idx: [], kx, ky, kz, seen: false })
+			voxel.idx.push(i)
+		})
+		if (objVoxels.size < WISP_MIN_VOXELS * 2) return 0
+		const neighborCount = voxel => {
+			let count = 0
+			for (let dx = -1; dx <= 1; dx++) {
+				for (let dz = -1; dz <= 1; dz++) {
+					for (let dy = -1; dy <= 1; dy++) {
+						if (!dx && !dz && !dy) continue
+						if (objVoxels.has(keyOf(voxel.kx + dx, voxel.ky + dy, voxel.kz + dz))) count++
+					}
+				}
+			}
+			return count
+		}
+		const components = []
+		for (const [seedKey, seedVoxel] of objVoxels) {
+			if (seedVoxel.seen) continue
+			const component = { points: 0, voxels: 0, neighborSum: 0, indices: [] }
+			const stack = [seedKey]
+			seedVoxel.seen = true
+			while (stack.length) {
+				const key = stack.pop()
+				const voxel = objVoxels.get(key)
+				component.points += voxel.idx.length
+				component.voxels++
+				component.neighborSum += neighborCount(voxel)
+				component.indices.push(...voxel.idx)
+				for (let dx = -1; dx <= 1; dx++) {
+					for (let dz = -1; dz <= 1; dz++) {
+						for (let dy = -1; dy <= 1; dy++) {
+							if (!dx && !dz && !dy) continue
+							const nextKey = keyOf(voxel.kx + dx, voxel.ky + dy, voxel.kz + dz)
+							const next = objVoxels.get(nextKey)
+							if (next && !next.seen) {
+								next.seen = true
+								stack.push(nextKey)
+							}
+						}
+					}
+				}
+			}
+			components.push(component)
+		}
+		if (components.length < 2) return 0
+		components.sort((a, b) => b.points - a.points)
+		const pointLimit = Math.max(WISP_MIN_POINTS, components[0].points * WISP_REL_POINTS)
+		const remove = new Uint8Array(entries.length)
+		let removed = 0
+		for (const component of components.slice(1)) {
+			const avgNeighbors = component.neighborSum / Math.max(1, component.voxels)
+			const tiny = component.points < pointLimit
+			const sparse = component.voxels < WISP_MIN_VOXELS || avgNeighbors < WISP_MIN_AVG_NEIGHBORS
+			if (!tiny || !sparse) continue
+			for (const i of component.indices) remove[i] = 1
+			removed += component.points
+		}
+		if (!removed) return 0
+		const kept = new PackedSplats()
+		const nextBounds = new THREE.Box3()
+		for (let i = 0; i < entries.length; i++) {
+			const entry = entries[i]
+			const target = remove[i] ? ground.packed : kept
+			target.pushSplat(entry.center, entry.scales, entry.quaternion, entry.opacity, entry.color)
+			if (remove[i]) ground.bounds.expandByPoint(entry.center)
+			else nextBounds.expandByPoint(entry.center)
+		}
+		part.packed = kept
+		part.bounds = nextBounds
+		return removed
+	}
+	for (const part of blobParts.values()) {
+		const removed = pruneObjectPartWisps(part)
+		if (removed) {
+			wispCulled += removed
+			console.log(`[segment] wisp prune ${part.name} → ${removed} disconnected gaussian(s) returned to ground after segmentation`)
+		}
+	}
+	const movePartToGround = part => {
+		let moved = 0
+		part.packed.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
+			ground.packed.pushSplat(center, scales, quaternion, opacity, color)
+			ground.bounds.expandByPoint(center)
+			moved++
+		})
+		part.packed = new PackedSplats()
+		part.bounds = new THREE.Box3()
+		return moved
+	}
+	const largestNamedObject = Math.max(1, ...[...blobParts.values()]
+		.filter(part => !part.name.startsWith("obj-detached-"))
+		.map(part => part.packed.numSplats))
+	const detachedCullLimit = Math.max(120, largestNamedObject * 0.025)
+	for (const part of blobParts.values()) {
+		if (!part.name.startsWith("obj-detached-")) continue
+		if (part.packed.numSplats > detachedCullLimit) continue
+		const moved = movePartToGround(part)
+		if (moved) {
+			wispCulled += moved
+			console.log(`[segment] detached wisp prune ${part.name} → ${moved} gaussian(s) returned to ground`)
+		}
+	}
+
 	// Swap the monolith for its pieces inside the same view-frame records array.
 	const idx = world.generated.indexOf(record)
 	if (idx >= 0) world.generated.splice(idx, 1)
@@ -4397,7 +4530,7 @@ function segmentSceneSplat(hasGround = true) {
 	let pieces = seatPiece(ground, hasGround ? "floor" : "remainder")
 	for (const id of ranked) pieces += seatPiece(blobParts.get(id), "object")
 	const remainder = hasGround
-		? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin + ${unsupportedCulled} unsupported-surface gaussian(s) left behind`
+		? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin + ${unsupportedCulled} unsupported-surface + ${wispCulled} disconnected-wisp gaussian(s) left behind`
 		: `${ground.packed.numSplats} unmatched gaussian(s) kept as static remainder`
 	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), voxel ${VOX.toFixed(3)}, ${remainder})`)
 }
