@@ -825,6 +825,124 @@ body.dev-controls-visible .settings-menu {
 	display: block;
 }
 
+.tuning-panel {
+	position: absolute;
+	right: 1rem;
+	top: 1rem;
+	z-index: 30;
+	display: none;
+	width: min(23rem, calc(100vw - 2rem));
+	max-height: calc(100vh - 2rem);
+	overflow: auto;
+	padding: 0.85rem;
+	border: 1px solid #d8dee4;
+	border-radius: 1rem;
+	background: rgba(255, 255, 255, 0.96);
+	color: #24292f;
+	box-shadow: 0 18px 45px -24px rgba(0, 0, 0, 0.45);
+	backdrop-filter: blur(12px);
+}
+
+body.dev-controls-visible .tuning-panel {
+	display: block;
+}
+
+.tuning-head {
+	display: flex;
+	align-items: start;
+	justify-content: space-between;
+	gap: 0.75rem;
+	margin-bottom: 0.75rem;
+}
+
+.tuning-head strong {
+	display: block;
+	font-size: 0.92rem;
+	line-height: 1.15;
+}
+
+.tuning-head span {
+	display: block;
+	margin-top: 0.15rem;
+	font-size: 0.72rem;
+	color: #6b7280;
+}
+
+.tuning-live {
+	display: inline-flex;
+	align-items: center;
+	gap: 0.35rem;
+	font-size: 0.76rem;
+	color: #4b5563;
+	user-select: none;
+}
+
+.tuning-live input {
+	width: auto;
+}
+
+.tuning-group {
+	padding: 0.65rem 0;
+	border-top: 1px solid #edf0f2;
+}
+
+.tuning-group h3 {
+	margin: 0 0 0.45rem;
+	font-size: 0.72rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: #6b7280;
+}
+
+.tuning-row {
+	display: grid;
+	gap: 0.25rem;
+	margin: 0.5rem 0;
+}
+
+.tuning-row > span {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+	font-size: 0.78rem;
+	color: #374151;
+}
+
+.tuning-row output {
+	font-variant-numeric: tabular-nums;
+	color: #5b6ee1;
+}
+
+.tuning-row input[type="range"] {
+	width: 100%;
+	padding: 0;
+	accent-color: #5b6ee1;
+}
+
+.tuning-actions {
+	display: flex;
+	gap: 0.5rem;
+	padding-top: 0.65rem;
+	border-top: 1px solid #edf0f2;
+}
+
+.tuning-actions button {
+	flex: 1;
+	padding: 0.45rem 0.55rem;
+	border: 1px solid #d8dee4;
+	border-radius: 0.55rem;
+	background: #f8fafc;
+	color: #374151;
+	font-size: 0.78rem;
+}
+
+.tuning-actions button:hover {
+	background: #eef2ff;
+	border-color: #c7d2fe;
+}
+
 .settings-btn {
 	justify-content: center;
 	width: 3.25rem;

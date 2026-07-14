@@ -123,6 +123,29 @@ let showBounds = false
 let devControlsVisible = false
 let rawSplatPreview = null
 let rawOrbitSnapshot = null
+const segmentationTuneDefaults = {
+	voxelCells: 120,
+	minBlob: 200,
+	bridgeCut: 0.25,
+	floorBand: 0.9,
+	wispAggression: 0.72,
+	detachedCullPct: 0.025,
+	scarDilation: 1,
+	scarBaseHeight: 0.85,
+	scarBaseSurface: 1.1,
+	scarRaisedCull: 0.18,
+	scarFill: 0.18,
+}
+const segmentationTuning = { ...segmentationTuneDefaults }
+const clamp01 = value => Math.min(1, Math.max(0, value))
+const lerp = (a, b, t) => a + (b - a) * clamp01(t)
+try {
+	const saved = JSON.parse(localStorage.getItem("worldsketch.segmentationTuning") || "{}")
+	for (const key of Object.keys(segmentationTuning)) {
+		const value = Number(saved[key])
+		if (Number.isFinite(value)) segmentationTuning[key] = value
+	}
+} catch {}
 
 const els = {
 	status: document.getElementById("status"),
@@ -3284,6 +3307,110 @@ function toggleDevControls() {
 	setDevControlsVisible(!devControlsVisible)
 }
 
+let segmentationTunePanel = null
+let segmentationTuneAutoRetune = true
+let segmentationTuneTimer = null
+let segmentationTuneRunning = false
+let segmentationTuneQueued = false
+const segmentationTuneControls = [
+	{ group: "Grouping", key: "voxelCells", label: "Voxel cells", min: 64, max: 320, step: 8, format: v => `${Math.round(v)}` },
+	{ group: "Grouping", key: "minBlob", label: "Min blob", min: 40, max: 1000, step: 20, format: v => `${Math.round(v)} pts` },
+	{ group: "Grouping", key: "bridgeCut", label: "Bridge cut", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Ground Split", key: "floorBand", label: "Floor band", min: 0.2, max: 1.8, step: 0.02, format: v => `${v.toFixed(2)}u` },
+	{ group: "Wisp Culling", key: "wispAggression", label: "Object/floor wisps", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Wisp Culling", key: "detachedCullPct", label: "Detached specks", min: 0, max: 0.12, step: 0.0025, format: v => `${(v * 100).toFixed(2)}%` },
+	{ group: "Scar Patching", key: "scarFill", label: "Fill strength", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Scar Patching", key: "scarDilation", label: "Patch cells", min: 1, max: 6, step: 1, format: v => `${Math.round(v)}×${Math.round(v)}` },
+	{ group: "Scar Patching", key: "scarBaseHeight", label: "Base height", min: 0.1, max: 3.0, step: 0.05, format: v => `${v.toFixed(2)}u` },
+	{ group: "Scar Patching", key: "scarBaseSurface", label: "Base surface", min: 0.1, max: 3.0, step: 0.05, format: v => `${v.toFixed(2)}u` },
+	{ group: "Scar Patching", key: "scarRaisedCull", label: "Raised cull", min: 0.02, max: 0.8, step: 0.01, format: v => `${v.toFixed(2)}u` },
+]
+
+function saveSegmentationTuning() {
+	try { localStorage.setItem("worldsketch.segmentationTuning", JSON.stringify(segmentationTuning)) } catch {}
+}
+
+function scheduleSegmentationRetune() {
+	if (!segmentationTuneAutoRetune) return
+	if (!splatStore.has("scene")) return
+	window.clearTimeout(segmentationTuneTimer)
+	segmentationTuneTimer = window.setTimeout(() => { retuneCurrentSceneSegmentation() }, 350)
+}
+
+function createSegmentationTunePanel() {
+	if (segmentationTunePanel) return
+	const panel = document.createElement("aside")
+	panel.className = "tuning-panel"
+	panel.setAttribute("aria-label", "Segmentation tuning")
+	panel.innerHTML = `
+		<header class="tuning-head">
+			<div>
+				<strong>Segmentation tuning</strong>
+				<span>Live values used by scene carving</span>
+			</div>
+			<label class="tuning-live"><input type="checkbox" data-tune-live checked> Live</label>
+		</header>
+		<div class="tuning-groups"></div>
+		<footer class="tuning-actions">
+			<button type="button" data-tune-retune>Retune current</button>
+			<button type="button" data-tune-reset>Reset</button>
+		</footer>
+	`
+	const groupsEl = panel.querySelector(".tuning-groups")
+	let currentGroup = ""
+	let groupEl = null
+	for (const control of segmentationTuneControls) {
+		if (control.group !== currentGroup) {
+			currentGroup = control.group
+			groupEl = document.createElement("section")
+			groupEl.className = "tuning-group"
+			groupEl.innerHTML = `<h3>${control.group}</h3>`
+			groupsEl.appendChild(groupEl)
+		}
+		const row = document.createElement("label")
+		row.className = "tuning-row"
+		row.innerHTML = `
+			<span><span>${control.label}</span><output></output></span>
+			<input type="range" min="${control.min}" max="${control.max}" step="${control.step}" data-tune-key="${control.key}">
+		`
+		const input = row.querySelector("input")
+		const output = row.querySelector("output")
+		const sync = () => {
+			input.value = String(segmentationTuning[control.key])
+			output.textContent = control.format(segmentationTuning[control.key])
+		}
+		input.addEventListener("input", () => {
+			const value = Number(input.value)
+			if (!Number.isFinite(value)) return
+			segmentationTuning[control.key] = value
+			output.textContent = control.format(value)
+			saveSegmentationTuning()
+			scheduleSegmentationRetune()
+		})
+		sync()
+		groupEl.appendChild(row)
+	}
+	panel.querySelector("[data-tune-live]")?.addEventListener("change", event => {
+		segmentationTuneAutoRetune = Boolean(event.target.checked)
+	})
+	panel.querySelector("[data-tune-retune]")?.addEventListener("click", () => retuneCurrentSceneSegmentation())
+	panel.querySelector("[data-tune-reset]")?.addEventListener("click", () => {
+		Object.assign(segmentationTuning, segmentationTuneDefaults)
+		saveSegmentationTuning()
+		for (const input of panel.querySelectorAll("[data-tune-key]")) {
+			const control = segmentationTuneControls.find(c => c.key === input.dataset.tuneKey)
+			const output = input.closest(".tuning-row")?.querySelector("output")
+			input.value = String(segmentationTuning[control.key])
+			if (output) output.textContent = control.format(segmentationTuning[control.key])
+		}
+		scheduleSegmentationRetune()
+	})
+	document.body.appendChild(panel)
+	segmentationTunePanel = panel
+}
+
+createSegmentationTunePanel()
+
 // Run `worker` over `items` with at most `limit` in flight at once (bounded concurrency).
 async function runPool(items, limit, worker) {
 	let next = 0
@@ -3654,7 +3781,7 @@ function segmentSceneSplat(hasGround = true) {
 	if (!packed?.forEachSplat) return
 
 	// ---- The dials ------------------------------------------------------------------
-	const FLOOR_BAND = 0.9 // height above local floor that still counts as ground; RAISE if objects grab turf, LOWER if short props vanish into the floor
+	const FLOOR_BAND = segmentationTuning.floorBand // height above local floor that still counts as ground; RAISE if objects grab turf, LOWER if short props vanish into the floor
 	const FRINGE_LOW = 0.25 // fringe claim floor: below this stays ground even under a blob (the "contact patch" an object leaves behind)
 	const FRINGE_DILATE = 1 // fringe claim reach in voxels beyond the blob's own footprint; raise if object bases get clipped, lower if bases grab a turf ring
 	const CELL = 0.5 // floor height-map cell (world units)
@@ -3663,17 +3790,17 @@ function segmentSceneSplat(hasGround = true) {
 	// adjacent voxels and 26-connectivity would merge them into one object. A 200-cell
 	// target across the longest scene axis cleanly separates those gaps while remaining
 	// small enough for the bridge/core pass below.
-	const VOX_TARGET_CELLS = 200
+	const VOX_TARGET_CELLS = segmentationTuning.voxelCells
 	const VOX_MIN = 0.01
 	const VOX_MAX = 0.25
-	const MIN_BLOB = 200 // smaller blobs (grass tufts) fold back into the ground
+	const MIN_BLOB = segmentationTuning.minBlob // smaller blobs (grass tufts) fold back into the ground
 	const ERODE = 2 // floor-map min-filter radius in cells; raise for very wide flat-bottomed objects faking an elevated floor
 	const SKIN_FLATNESS = 0.45 // pancake test: thinnest axis under this fraction of the median axis
 	const SKIN_UPRIGHT = 0.75 // ...and lying flat (|vertical component of thin axis| above this) → ground skin, stays behind
 	const SKIN_BAND_PAD = 0.4 // how far above FLOOR_BAND the skin cull still applies
-	const BRIDGE_MIN_NEIGHBORS = 2 // bridge cutting: keep weak links unless they are truly isolated grass/wisps
-	const BRIDGE_MIN_DENSITY = 3 // ...low enough that thin object shells stay connected
-	const CORE_MIN_VOXELS = 60 // a peeled component must be substantial before it can split a blob
+	const BRIDGE_MIN_NEIGHBORS = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 4) // bridge cutting: higher splits more thin links
+	const BRIDGE_MIN_DENSITY = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 8) // higher peels sparse bridges more aggressively
+	const CORE_MIN_VOXELS = Math.round(30 + clamp01(segmentationTuning.bridgeCut) * 120) // a peeled component must be substantial before it can split a blob
 
 	// Pass 1: positions + XZ bounds.
 	const n = packed.numSplats
@@ -4610,13 +4737,13 @@ function segmentSceneSplat(hasGround = true) {
 	// Post-segmentation wisp prune: now that object pieces are already built, trim only
 	// tiny disconnected islands from each final object. This must not feed back into
 	// blob matching, group creation, bounds used for patching, or detached-object splits.
-	const pruneObjectPartWisps = part => {
+	const WISP_VOX = Math.min(0.25, Math.max(VOX * 1.5, 0.06))
+	const WISP_MIN_POINTS = Math.round(lerp(40, 280, segmentationTuning.wispAggression))
+	const WISP_REL_POINTS = lerp(0.005, 0.065, segmentationTuning.wispAggression)
+	const WISP_MIN_VOXELS = Math.round(lerp(8, 160, segmentationTuning.wispAggression))
+	const WISP_MIN_AVG_NEIGHBORS = lerp(1.5, 4.25, segmentationTuning.wispAggression)
+	const pruneObjectPartWisps = (part, removedPart = ground, { keepOnlyMain = false } = {}) => {
 		if (part.packed.numSplats < 160) return 0
-		const WISP_VOX = Math.min(0.25, Math.max(VOX * 1.5, 0.06))
-		const WISP_MIN_POINTS = 120
-		const WISP_REL_POINTS = 0.03
-		const WISP_MIN_VOXELS = 64
-		const WISP_MIN_AVG_NEIGHBORS = 3
 		const WOFF = 4096
 		const entries = []
 		const objVoxels = new Map()
@@ -4689,7 +4816,7 @@ function segmentSceneSplat(hasGround = true) {
 			const avgNeighbors = component.neighborSum / Math.max(1, component.voxels)
 			const tiny = component.points < pointLimit
 			const sparse = component.voxels < WISP_MIN_VOXELS || avgNeighbors < WISP_MIN_AVG_NEIGHBORS
-			if (!tiny || !sparse) continue
+			if (!keepOnlyMain && (!tiny || !sparse)) continue
 			for (const i of component.indices) remove[i] = 1
 			removed += component.points
 		}
@@ -4698,10 +4825,15 @@ function segmentSceneSplat(hasGround = true) {
 		const nextBounds = new THREE.Box3()
 		for (let i = 0; i < entries.length; i++) {
 			const entry = entries[i]
-			const target = remove[i] ? ground.packed : kept
-			target.pushSplat(entry.center, entry.scales, entry.quaternion, entry.opacity, entry.color)
-			if (remove[i]) ground.bounds.expandByPoint(entry.center)
-			else nextBounds.expandByPoint(entry.center)
+			if (remove[i]) {
+				if (removedPart) {
+					removedPart.packed.pushSplat(entry.center, entry.scales, entry.quaternion, entry.opacity, entry.color)
+					removedPart.bounds.expandByPoint(entry.center)
+				}
+			} else {
+				kept.pushSplat(entry.center, entry.scales, entry.quaternion, entry.opacity, entry.color)
+				nextBounds.expandByPoint(entry.center)
+			}
 		}
 		part.packed = kept
 		part.bounds = nextBounds
@@ -4728,7 +4860,7 @@ function segmentSceneSplat(hasGround = true) {
 	const largestNamedObject = Math.max(1, ...[...blobParts.values()]
 		.filter(part => !part.name.startsWith("obj-detached-"))
 		.map(part => part.packed.numSplats))
-	const detachedCullLimit = Math.max(120, largestNamedObject * 0.025)
+	const detachedCullLimit = Math.max(120, largestNamedObject * segmentationTuning.detachedCullPct)
 	for (const part of blobParts.values()) {
 		if (!part.name.startsWith("obj-detached-")) continue
 		if (part.packed.numSplats > detachedCullLimit) continue
@@ -4736,6 +4868,156 @@ function segmentSceneSplat(hasGround = true) {
 		if (moved) {
 			wispCulled += moved
 			console.log(`[segment] detached wisp prune ${part.name} → ${moved} gaussian(s) returned to ground`)
+		}
+	}
+	let scarPatchSplats = 0
+	let scarRemnantsCulled = 0
+	if (hasGround && groundSurf && blobParts.size) {
+		const SCAR_DILATE_CELLS = segmentationTuning.scarDilation // square width: 1 = 1×1, 2 = 2×2, 3 = 3×3 scar cells
+		const SCAR_BASE_HEIGHT_BAND = segmentationTuning.scarBaseHeight // only splats this far above an object's lowest point can create scar cells
+		const SCAR_BASE_SURFACE_BAND = segmentationTuning.scarBaseSurface // and only if they are still near the terrain surface
+		const SCAR_RAISED_CULL = segmentationTuning.scarRaisedCull // lower = remove more raised object-color remnants from ground
+		const SCAR_NEARBY_COLOR_RADIUS = 8 // larger = sample terrain colour farther away from the scar
+		const SCAR_TARGET_SPLATS = Math.round(lerp(0, 36, segmentationTuning.scarFill)) // higher = denser/more opaque-looking fill
+		const SCAR_MIN_SPLATS = Math.round(lerp(0, 12, segmentationTuning.scarFill)) // minimum overpaint per scar cell, even when ground remains
+		const SCAR_MAX_SPLATS = 32 // cap to avoid runaway fill cost
+		const SCAR_SCALE_MIN = lerp(0.22, 0.72, segmentationTuning.scarFill) // larger = each filler splat covers more cell area
+		const SCAR_SCALE_JITTER = lerp(0.08, 0.38, segmentationTuning.scarFill)
+		const SCAR_HEIGHT = 0.025 // raise if filler z-fights or hides under surrounding ground
+		const SCAR_HEIGHT_JITTER = 0.012
+		const SCAR_THICKNESS = 0.018
+		const SCAR_OPACITY = lerp(0.55, 0.98, segmentationTuning.scarFill)
+		const SCAR_SHADE_MIN = 0.95
+		const SCAR_SHADE_JITTER = 0.1
+		const SCAR_CELL_MARGIN = 0.05 // keeps random filler centers inside each terrain cell
+		const scarDilateSize = Math.max(1, Math.floor(SCAR_DILATE_CELLS))
+		const scarDilateBefore = Math.floor((scarDilateSize - 1) / 2)
+		const scarDilateAfter = scarDilateSize - 1 - scarDilateBefore
+		const scarCells = new Uint8Array(gw * gh)
+		const footprintCells = new Set()
+		for (const part of blobParts.values()) {
+			if (!part.packed.numSplats || part.bounds.isEmpty()) continue
+			const baseTop = part.bounds.min.y + SCAR_BASE_HEIGHT_BAND
+			part.packed.forEachSplat((_i, center) => {
+				const cell = cellOfXZ(center.x, center.z)
+				if (center.y > baseTop) return
+				if (center.y > groundSurf[cell] + SCAR_BASE_SURFACE_BAND) return
+				footprintCells.add(cell)
+			})
+		}
+		for (const cell of footprintCells) {
+			const cx = cell % gw
+			const cz = Math.floor(cell / gw)
+			for (let dz = -scarDilateBefore; dz <= scarDilateAfter; dz++) {
+				for (let dx = -scarDilateBefore; dx <= scarDilateAfter; dx++) {
+					const nx = cx + dx, nz = cz + dz
+					if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+					scarCells[nz * gw + nx] = 1
+				}
+			}
+		}
+		if (scarCells.some(Boolean)) {
+			const rebuiltGround = new PackedSplats()
+			const rebuiltBounds = new THREE.Box3()
+			const scarCellCount = new Int32Array(gw * gh)
+			const scarCellHeight = new Float32Array(gw * gh)
+			const scarCellColor = Array.from({ length: gw * gh }, () => [0, 0, 0])
+			ground.packed.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
+				const cell = cellOfXZ(center.x, center.z)
+				if (scarCells[cell] && center.y > groundSurf[cell] + SCAR_RAISED_CULL) {
+					scarRemnantsCulled++
+					return
+				}
+				rebuiltGround.pushSplat(center, scales, quaternion, opacity, color)
+				rebuiltBounds.expandByPoint(center)
+				scarCellCount[cell]++
+				scarCellHeight[cell] += center.y
+				if (color) {
+					const acc = scarCellColor[cell]
+					acc[0] += color.r
+					acc[1] += color.g
+					acc[2] += color.b
+				}
+			})
+			ground.packed = rebuiltGround
+			ground.bounds = rebuiltBounds
+			const patchCenter = new THREE.Vector3()
+			const patchScales = new THREE.Vector3()
+			const patchQuat = new THREE.Quaternion()
+			const patchColor = new THREE.Color()
+			const cellW = spanX / gw
+			const cellD = spanZ / gh
+			const fallbackColor = new THREE.Color(world.baseGroundColor || baseGroundColor)
+			const hash01 = (cx, cz, k, salt = 0) => {
+				const v = Math.sin((cx + 1) * 173.9 + (cz + 1) * 269.5 + (k + 1) * 97.1 + salt * 41.7) * 43758.5453
+				return v - Math.floor(v)
+			}
+			const terrainSampleForCell = (cx, cz) => {
+				for (let r = 1; r <= SCAR_NEARBY_COLOR_RADIUS; r++) {
+					const acc = [0, 0, 0, 0, 0]
+					for (let dz = -r; dz <= r; dz++) {
+						for (let dx = -r; dx <= r; dx++) {
+							const nx = cx + dx, nz = cz + dz
+							if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+							const cell = nz * gw + nx
+							if (scarCells[cell]) continue
+							const count = scarCellCount[cell]
+							if (!count) continue
+							const c = scarCellColor[cell]
+							acc[0] += c[0]
+							acc[1] += c[1]
+							acc[2] += c[2]
+							acc[3] += scarCellHeight[cell]
+							acc[4] += count
+						}
+					}
+					if (acc[4]) return {
+						color: patchColor.setRGB(acc[0] / acc[4], acc[1] / acc[4], acc[2] / acc[4]).clone(),
+						height: acc[3] / acc[4],
+					}
+				}
+				return null
+			}
+			let scarSkippedSkyCells = 0
+			for (let cz = 0; cz < gh; cz++) {
+				for (let cx = 0; cx < gw; cx++) {
+					const cell = cz * gw + cx
+					if (!scarCells[cell]) continue
+					const sample = terrainSampleForCell(cx, cz)
+					if (!sample) {
+						scarSkippedSkyCells++
+						continue
+					}
+					const color = sample.color || fallbackColor
+					const need = Math.min(SCAR_MAX_SPLATS, Math.max(SCAR_MIN_SPLATS, SCAR_TARGET_SPLATS - scarCellCount[cell]))
+					for (let k = 0; k < need; k++) {
+						const ox = SCAR_CELL_MARGIN + hash01(cx, cz, k, 1) * (1 - SCAR_CELL_MARGIN * 2)
+						const oz = SCAR_CELL_MARGIN + hash01(cx, cz, k, 2) * (1 - SCAR_CELL_MARGIN * 2)
+						const scale = SCAR_SCALE_MIN + hash01(cx, cz, k, 3) * SCAR_SCALE_JITTER
+						const shade = SCAR_SHADE_MIN + hash01(cx, cz, k, 4) * SCAR_SHADE_JITTER
+						patchScales.set(cellW * scale, SCAR_THICKNESS, cellD * scale)
+						patchQuat.setFromAxisAngle(localUp, hash01(cx, cz, k, 5) * Math.PI)
+						patchColor.setRGB(Math.min(1, color.r * shade), Math.min(1, color.g * shade), Math.min(1, color.b * shade))
+						patchCenter.set(
+							minX + (cx + ox) * cellW,
+							sample.height + SCAR_HEIGHT + hash01(cx, cz, k, 6) * SCAR_HEIGHT_JITTER,
+							minZ + (cz + oz) * cellD,
+						)
+						ground.packed.pushSplat(patchCenter, patchScales, patchQuat, SCAR_OPACITY, patchColor)
+						ground.bounds.expandByPoint(patchCenter)
+						scarPatchSplats++
+					}
+				}
+			}
+			if (scarSkippedSkyCells) console.log(`[segment] ground scar flatten skipped ${scarSkippedSkyCells} sky/unanchored scar cell(s)`)
+		}
+		if (scarPatchSplats || scarRemnantsCulled) console.log(`[segment] ground scar flatten → ${scarPatchSplats} filler + ${scarRemnantsCulled} raised remnant gaussian(s) under object footprint(s)`)
+	}
+	if (ground.packed.numSplats) {
+		const removed = pruneObjectPartWisps(ground, null, { keepOnlyMain: true })
+		if (removed) {
+			wispCulled += removed
+			console.log(`[segment] floor wisp prune → ${removed} disconnected gaussian(s) deleted from ground`)
 		}
 	}
 
@@ -4850,6 +5132,7 @@ async function generateWorld(prompt) {
 		splatting = false
 		applyOverlayVisibility()
 		setUiTab("view")
+		frameGeneratedSplats()
 		saveBuildToHistory(world.prompt)
 		showProgress(1, 1, "Done")
 		window.setTimeout(hideProgress, 1000)
@@ -4860,6 +5143,59 @@ async function generateWorld(prompt) {
 		generating = false
 		splatting = false
 		syncGenerateButton()
+	}
+}
+
+async function retuneCurrentSceneSegmentation() {
+	const bytes = splatStore.get("scene")
+	const subject = sessionSubjects.find(s => s.kind === "scene" || s.name === "scene")
+	if (!bytes || !subject) {
+		setStatus("No raw scene splat available to retune")
+		return
+	}
+	if (generating || splatting) {
+		segmentationTuneQueued = true
+		return
+	}
+	if (segmentationTuneRunning) {
+		segmentationTuneQueued = true
+		return
+	}
+	segmentationTuneRunning = true
+	segmentationTuneQueued = false
+	try {
+		deselectSplat()
+		setStatus("Retuning segmentation…")
+		const hasGround = subject.hasGround !== false
+		world.resetGenerated()
+		const box = wholeSceneBox()
+		const sourceMeshes = hasGround ? world.allBlockoutMeshes() : [...world.primitives]
+		const fit = fitSettingsFor("scene")
+		await seatSubject(bytes.slice(), box, "scene", sourceMeshes, {
+			kind: "scene",
+			yawTurns: subject.yawTurns ?? OBJECT_YAW_TURNS,
+			yawDeg: Number.isFinite(subject.yawDeg) ? subject.yawDeg : fit.yawDeg,
+			yOffset: sceneFit.yOffset,
+			fillXZ: false,
+			colors: primitiveColors(sourceMeshes),
+		})
+		try { segmentSceneSplat(hasGround) }
+		catch (error) { console.warn("retune segment:", error) }
+		world.state = "generated"
+		splatting = false
+		setUiTab("view")
+		frameGeneratedSplats()
+		applyOverlayVisibility()
+		setStatus("")
+	} catch (error) {
+		console.warn("retune segmentation:", error)
+		setStatus(error.message || "Retune failed")
+	} finally {
+		segmentationTuneRunning = false
+		if (segmentationTuneQueued) {
+			segmentationTuneQueued = false
+			window.setTimeout(() => retuneCurrentSceneSegmentation(), 0)
+		}
 	}
 }
 
@@ -5695,6 +6031,7 @@ async function generateExpanded(prompt) {
 		splatting = false // unlock the View gate before switching to it
 		applyOverlayVisibility()
 		setUiTab("view")
+		frameGeneratedSplats()
 		sessionSubjects = world.generated
 			.map(g => ({
 				name: g.mesh.userData.genName,
@@ -5746,6 +6083,41 @@ function frameRawSplat(mesh) {
 		bounds.expandByPoint(center)
 		count++
 	})
+	if (!count || bounds.isEmpty()) return
+	const sphere = bounds.getBoundingSphere(new THREE.Sphere())
+	orbit.target.copy(sphere.center)
+	orbit.radius = Math.max(0.001, sphere.radius * 2.75)
+	updateCamera()
+}
+
+function expandByTransformedBox(out, box, matrix) {
+	if (!box || box.isEmpty()) return
+	for (const x of [box.min.x, box.max.x]) {
+		for (const y of [box.min.y, box.max.y]) {
+			for (const z of [box.min.z, box.max.z]) {
+				out.expandByPoint(scratch.set(x, y, z).applyMatrix4(matrix))
+			}
+		}
+	}
+}
+
+function frameGeneratedSplats() {
+	const bounds = new THREE.Box3()
+	let count = 0
+	for (const { mesh } of world.generated) {
+		if (!mesh?.visible && uiTab === "view") continue
+		mesh.updateWorldMatrix(true, false)
+		if (mesh.userData.contentBox && !mesh.userData.contentBox.isEmpty()) {
+			expandByTransformedBox(bounds, mesh.userData.contentBox, mesh.matrixWorld)
+			count++
+			continue
+		}
+		mesh.packedSplats?.forEachSplat((_i, center) => {
+			if (![center.x, center.y, center.z].every(Number.isFinite)) return
+			bounds.expandByPoint(mesh.localToWorld(center.clone()))
+			count++
+		})
+	}
 	if (!count || bounds.isEmpty()) return
 	const sphere = bounds.getBoundingSphere(new THREE.Sphere())
 	orbit.target.copy(sphere.center)
@@ -5921,6 +6293,7 @@ async function uploadSplats(files) {
 		world.state = "generated"
 		splatting = false
 		setUiTab("view")
+		frameGeneratedSplats()
 		applyOverlayVisibility()
 		setStatus(`Loaded ${seatedCount} uploaded splat${seatedCount === 1 ? "" : "s"}`)
 		showProgress(uploads.length, uploads.length, "Done")
@@ -6174,6 +6547,7 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 	world.state = "generated"
 	splatting = false // unlock the View gate before switching to it
 	setUiTab("view")
+	frameGeneratedSplats()
 	applyOverlayVisibility()
 	showProgress(total, total, "Done")
 	window.setTimeout(hideProgress, 1000)

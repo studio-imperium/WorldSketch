@@ -72,7 +72,10 @@ export async function captureWorldContext(renderer, scene, world, objects) {
 	})
 
 	const floorSubject = world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground]
-	const subject = [...floorSubject, ...world.primitives]
+	const rawSubject = [...floorSubject, ...world.primitives]
+	const temporarySubjects = []
+	const subject = rawSubject.map(mesh => makeGroundCaptureTop(mesh, temporarySubjects) ?? mesh)
+	const rawSubjectSet = new Set(rawSubject)
 	const subjectSet = new Set(subject)
 	const hidden = []
 	const shown = []
@@ -82,6 +85,11 @@ export async function captureWorldContext(renderer, scene, world, objects) {
 		mesh.visible = true
 	}
 	for (const mesh of [...(world.groundTiles ?? []), ...(world.groundSlopePreviews ?? [])]) {
+		if (rawSubjectSet.has(mesh) && mesh.userData.isGround && !mesh.userData.isGroundSlopePreview) {
+			hidden.push([mesh, mesh.visible])
+			mesh.visible = false
+			continue
+		}
 		if (subjectSet.has(mesh)) continue
 		hidden.push([mesh, mesh.visible])
 		mesh.visible = false
@@ -104,6 +112,11 @@ export async function captureWorldContext(renderer, scene, world, objects) {
 		edge.removeFromParent()
 	}
 	restoreMaterials(swaps)
+	for (const mesh of temporarySubjects) {
+		mesh.geometry.dispose()
+		mesh.material.dispose()
+		mesh.removeFromParent()
+	}
 	for (const [mesh, visible] of hidden) mesh.visible = visible
 	for (const [mesh, visible] of shown) mesh.visible = visible
 	for (const object of overlays) object.visible = true
@@ -242,19 +255,55 @@ export function unprojectGroundIso(source, cols, rows, dstW, dstH) {
 // black background, with the dedicated `view` camera. Everything else — other block-out
 // meshes, all splats, the sky dome, outlines, helpers, the placement preview — is hidden
 // so Tripo only sees the subject on black. The shared scene camera is never touched.
+function makeGroundCaptureTop(mesh, temporarySubjects) {
+	// Ground tiles are thin boxes for editor picking, but generation captures need only
+	// the painted TOP surface. If the side/back faces keep the same paint texture, an
+	// isometric capture can show a second projected copy of the floor behind the real one.
+	if (!mesh?.userData?.isGround || mesh.userData.isGroundSlopePreview) return null
+	const source = Array.isArray(mesh.material) ? mesh.material[0] : mesh.material
+	const material = new THREE.MeshBasicMaterial({
+		color: source?.color?.clone?.() ?? new THREE.Color(0xffffff),
+		map: source?.map ?? null,
+		side: THREE.DoubleSide,
+		depthTest: true,
+		depthWrite: true,
+		alphaTest: source?.alphaTest ?? 0,
+	})
+	const top = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), material)
+	top.name = `${mesh.name || mesh.userData.id || "ground"}_capture_top`
+	top.position.copy(mesh.position)
+	top.position.y += Math.abs(mesh.scale.y) * 0.5 + 0.002
+	top.rotation.copy(mesh.rotation)
+	top.rotateX(-Math.PI / 2)
+	top.scale.set(mesh.scale.x, mesh.scale.z, 1)
+	top.userData = { ...mesh.userData, isGroundCaptureTop: true }
+	mesh.parent?.add(top)
+	temporarySubjects.push(top)
+	return top
+}
+
 async function captureSubject(renderer, scene, world, subject, view, includeMaterialMap = true, includeEdges = true, semanticGroups = null) {
 	const target = new THREE.WebGLRenderTarget(captureSize, captureSize, { colorSpace: THREE.SRGBColorSpace })
-	const subjectSet = new Set(subject)
+	const temporarySubjects = []
+	const normalizedSubject = subject.map(mesh => makeGroundCaptureTop(mesh, temporarySubjects) ?? mesh)
+	const originalSubjectSet = new Set(subject)
+	const subjectSet = new Set(normalizedSubject)
 
 	const hidden = []
 	const shown = []
-	for (const mesh of subject) {
+	for (const mesh of normalizedSubject) {
 		if (mesh.visible) continue
 		shown.push([mesh, mesh.visible])
 		mesh.visible = true
 	}
 	for (const mesh of world.allBlockoutMeshes()) {
-		if (subjectSet.has(mesh)) continue
+		if (originalSubjectSet.has(mesh)) {
+			if (mesh.userData.isGround) {
+				hidden.push([mesh, mesh.visible])
+				mesh.visible = false
+			}
+			continue
+		}
 		hidden.push([mesh, mesh.visible])
 		mesh.visible = false
 	}
@@ -278,11 +327,11 @@ async function captureSubject(renderer, scene, world, subject, view, includeMate
 		}
 	})
 
-	const swaps = applyFlatMaterials(subject)
+	const swaps = applyFlatMaterials(normalizedSubject)
 	const prevClear = renderer.getClearColor(new THREE.Color()).clone()
 	const prevAlpha = renderer.getClearAlpha()
 
-	const edges = includeEdges ? addEdges(subject, world) : []
+	const edges = includeEdges ? addEdges(normalizedSubject, world) : []
 	const guide = await captureTarget(renderer, scene, view, target)
 	for (const edge of edges) {
 		edge.geometry.dispose()
@@ -294,6 +343,11 @@ async function captureSubject(renderer, scene, world, subject, view, includeMate
 		: null
 
 	restoreMaterials(swaps)
+	for (const mesh of temporarySubjects) {
+		mesh.geometry.dispose()
+		mesh.material.dispose()
+		mesh.removeFromParent()
+	}
 	for (const object of overlays) object.visible = true
 	if (spark) spark.visible = sparkVisible
 	for (const [mesh, visible] of hidden) mesh.visible = visible
