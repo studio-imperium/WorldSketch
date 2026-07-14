@@ -260,11 +260,30 @@ body.tab-draw .draw-overlay {
 	cursor: cell;
 }
 
-/* No inline notifications/progress under the prompt bar — the disabled buttons and
-   the View tab's spinner carry the in-flight signal. */
-.gen-progress,
-.status {
+/* No inline progress under the prompt bar — the disabled buttons and the View tab's
+   spinner carry the in-flight signal. */
+.gen-progress {
 	display: none !important;
+}
+
+/* Errors DO need a surface (a failed generation used to die silently into the console):
+   the status line floats as a dismissable toast under the tabs, outside the prompt bar.
+   NOTE: not named `.status` — daisyUI v5 ships a Status-dot component on that class. */
+.status-toast {
+	position: absolute;
+	top: 4.4rem;
+	left: 50%;
+	transform: translateX(-50%);
+	margin: 0;
+	padding: 0.5rem 1rem;
+	border-radius: 0.85rem;
+	background: rgba(15, 23, 42, 0.85);
+	color: #fff;
+	font-size: 0.82rem;
+	max-width: min(46rem, 80vw);
+	text-align: center;
+	cursor: pointer;
+	z-index: 5;
 }
 
 /* Frames: each tab keeps its own list of independent frames (sketches / builds /
@@ -438,16 +457,6 @@ body.tab-draw .draw-overlay {
 .viewer-ui .btn:disabled {
 	opacity: 0.45;
 	cursor: wait;
-}
-
-.status {
-	order: 3;
-	box-sizing: border-box;
-	width: 100%;
-	margin: 0;
-	color: #69717d;
-	line-height: 1.25;
-	text-align: center;
 }
 
 /* World generation progress — sits under the generate button. The fill advances
@@ -1560,4 +1569,159 @@ input[type="color"] {
 
 .settings-item.active {
 	background: color-mix(in srgb, #5b6ee1 18%, #fff);
+}
+
+/* --- Camera bar: fly mode + shot path (bottom-right) ------------------------- */
+
+.cam-bar {
+	position: absolute;
+	right: 1rem;
+	bottom: 1rem;
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+	padding: 0.3rem;
+	background: #fff;
+	border: 1px solid rgba(15, 23, 42, 0.08);
+	border-radius: 0.85rem;
+	box-shadow: 0 0.45rem 1.4rem rgba(15, 23, 42, 0.16), 0 0.08rem 0.18rem rgba(15, 23, 42, 0.12);
+}
+
+body.tab-draw .cam-bar {
+	display: none;
+}
+
+.cam-btn {
+	border: 0;
+	background: transparent;
+	width: 2.2rem;
+	height: 2.2rem;
+	border-radius: 0.6rem;
+	color: #69717d;
+	cursor: pointer;
+	display: grid;
+	place-items: center;
+}
+
+.cam-btn:hover {
+	background: #f1f3f5;
+	color: #1f2328;
+}
+
+.cam-btn.active {
+	background: #5b6ee1;
+	color: #fff;
+}
+
+.cam-btn:disabled {
+	opacity: 0.35;
+	cursor: default;
+}
+
+.cam-btn:disabled:hover {
+	background: transparent;
+	color: #69717d;
+}
+
+.cam-btn svg {
+	width: 1.15rem;
+	height: 1.15rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.9;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.cam-divider {
+	width: 1px;
+	height: 1.4rem;
+	background: rgba(15, 23, 42, 0.08);
+}
+
+.shot-chips {
+	display: flex;
+	align-items: center;
+	gap: 0.2rem;
+}
+
+.shot-chips:empty {
+	display: none;
+}
+
+.shot-chip {
+	position: relative;
+	border: 0;
+	background: #f1f3f5;
+	color: #1f2328;
+	min-width: 1.7rem;
+	height: 1.7rem;
+	padding: 0 0.4rem;
+	border-radius: 0.55rem;
+	font-size: 0.8rem;
+	font-weight: 600;
+	cursor: pointer;
+}
+
+.shot-chip:hover {
+	background: #e4e7eb;
+}
+
+.shot-del {
+	position: absolute;
+	top: -0.35rem;
+	right: -0.35rem;
+	width: 0.95rem;
+	height: 0.95rem;
+	border-radius: 50%;
+	background: #1f2328;
+	color: #fff;
+	font-size: 0.62rem;
+	line-height: 1;
+	display: none;
+	place-items: center;
+	cursor: pointer;
+}
+
+.shot-chip:hover .shot-del {
+	display: grid;
+}
+
+.fly-hint {
+	position: absolute;
+	bottom: 1.1rem;
+	left: 50%;
+	transform: translateX(-50%);
+	padding: 0.45rem 0.9rem;
+	border-radius: 999px;
+	background: rgba(15, 23, 42, 0.78);
+	color: #fff;
+	font-size: 0.78rem;
+	white-space: nowrap;
+	pointer-events: none;
+}
+
+.fly-hint.hidden {
+	display: none;
+}
+
+/* Flying: fade the editing chrome so the world fills the screen (the hint stays). */
+body.is-flying .view-tabs, body.is-flying .frames-panel, body.is-flying .side-rail,
+body.is-flying .bottom-dock, body.is-flying .settings-menu, body.is-flying .cam-bar {
+	opacity: 0.12;
+	pointer-events: none;
+	transition: opacity 0.25s ease;
+}
+
+/* Playing / recording a camera path: EXCLUSIVELY the world — every scrap of GUI (and
+   the cursor) disappears so the on-screen play and the exported video are identical.
+   Esc or a click on the world stops it. */
+body.is-cam-playing .ui {
+	opacity: 0;
+	pointer-events: none;
+	transition: opacity 0.25s ease;
+}
+
+body.is-cam-playing #canvas canvas {
+	cursor: none !important;
 }

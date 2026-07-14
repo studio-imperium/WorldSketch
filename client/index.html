@@ -4,6 +4,7 @@
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
 	<title>WorldSketch</title>
+	<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%235b6ee1' d='M12 1.6L21.5 7v10L12 22.4L2.5 17V7z'/%3E%3Cpath fill='%23fff' opacity='0.35' d='M12 1.6L21.5 7L12 12.4L2.5 7z'/%3E%3Cpath fill='%23000' opacity='0.15' d='M12 12.4L21.5 7v10L12 22.4z'/%3E%3C/svg%3E">
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300..700&display=swap" rel="stylesheet">
@@ -153,7 +154,6 @@
 					<div class="gen-progress-track"><span class="gen-progress-fill" id="progress_fill"></span></div>
 					<span class="gen-progress-label" id="progress_label"></span>
 				</div>
-				<p class="status hidden text-sm text-base-content/70" id="status"></p>
 				<form class="chat-bar" id="chat_form">
 					<input class="chat-input" id="chat_prompt" type="text" autocomplete="off" placeholder="Describe your scene...">
 					<button class="chat-send btn btn-square" id="generate_btn" type="submit" aria-label="Generate world" title="Generate">
@@ -176,6 +176,24 @@
 			</button>
 			</nav>
 		</div>
+		<div class="cam-bar" id="cam_bar" aria-label="Camera">
+			<button class="cam-btn" id="fly_btn" type="button" title="Fly the camera — WASD + mouse look, Esc to exit">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 14l11 -11"></path><path d="M21 3l-6.5 18a.55 .55 0 0 1 -1 0l-3.5 -7l-7 -3.5a.55 .55 0 0 1 0 -1l18 -6.5"></path></svg>
+			</button>
+			<span class="cam-divider" aria-hidden="true"></span>
+			<div class="shot-chips" id="shot_chips"></div>
+			<button class="cam-btn" id="shot_add_btn" type="button" title="Add a camera shot at the current view">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 20h-7a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2h1a2 2 0 0 0 2 -2a1 1 0 0 1 1 -1h6a1 1 0 0 1 1 1a2 2 0 0 0 2 2h1a2 2 0 0 1 2 2v3.5"></path><path d="M16 19h6"></path><path d="M19 16v6"></path><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
+			</button>
+			<button class="cam-btn" id="shot_play_btn" type="button" disabled title="Play the camera path through the shots">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg>
+			</button>
+			<button class="cam-btn" id="shot_export_btn" type="button" disabled title="Export the camera path as a video (records the play-through)">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 10l4.553 -2.276a1 1 0 0 1 1.447 .894v6.764a1 1 0 0 1 -1.447 .894l-4.553 -2.276v-4z"></path><path d="M3 6m0 2a2 2 0 0 1 2 -2h8a2 2 0 0 1 2 2v8a2 2 0 0 1 -2 2h-8a2 2 0 0 1 -2 -2z"></path></svg>
+			</button>
+		</div>
+		<div class="fly-hint hidden" id="fly_hint">WASD move &middot; mouse look &middot; Space / Q&ndash;E up-down &middot; Shift boost &middot; scroll speed &middot; Esc exit</div>
+		<p class="status-toast hidden" id="status" role="alert" title="Dismiss"></p>
 	</div>
 	<script type="module" src="/scripts/renderer.js"></script>
 </body>

@@ -182,6 +182,12 @@ const els = {
 	framesTitle: document.getElementById("frames_title"),
 	framesList: document.getElementById("frames_list"),
 	frameAdd: document.getElementById("frame_add_btn"),
+	flyBtn: document.getElementById("fly_btn"),
+	flyHint: document.getElementById("fly_hint"),
+	shotChips: document.getElementById("shot_chips"),
+	shotAdd: document.getElementById("shot_add_btn"),
+	shotPlay: document.getElementById("shot_play_btn"),
+	shotExport: document.getElementById("shot_export_btn"),
 	chatForm: document.getElementById("chat_form"),
 	chatPrompt: document.getElementById("chat_prompt"),
 	floorShot: document.getElementById("floor_shot_btn"),
@@ -1613,6 +1619,7 @@ const orbit = {
 }
 
 function updateCamera() {
+	if (camMode !== "orbit") return // fly/playback own the camera; orbit params still update silently
 	orbit.phi = Math.max(0.12, Math.min(Math.PI * 0.49, orbit.phi))
 	// Raw inspection changes only the camera: the uploaded splat itself remains untouched.
 	// Its native scale can be far outside the editor's normal 4..128 orbit range.
@@ -1645,6 +1652,273 @@ function updateOrbit(event) {
 	orbit.theta -= dx * 0.006
 	orbit.phi -= dy * 0.006
 	updateCamera()
+}
+
+// --- First-person fly camera + camera path shots ---------------------------------
+// Fly: pointer-lock WASD like a game (Space/Q–E vertical, Shift boost, scroll speed).
+// Shots: saved camera poses in the cam bar; Play flies the camera through them
+// Spline-style — centripetal Catmull-Rom for position, quaternion slerp for the look,
+// eased per segment so each shot settles before leaving. Shots persist with the
+// frames state, so a composed path survives reloads.
+
+let camMode = "orbit" // "orbit" | "fly" | "anim" — anything but "orbit" owns the camera
+const fly = {
+	keys: new Set(),
+	yaw: 0,
+	pitch: 0,
+	vel: new THREE.Vector3(),
+	speed: floorSize * 0.9, // cruise: crossing a plot takes ~1s
+}
+const camShots = []
+let nextShotId = 0
+let camAnim = null
+const SHOT_SEGMENT_MS = 2000
+
+const PLAY_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4v16l13 -8z"></path></svg>'
+const STOP_ICON = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7a2 2 0 0 1 2 -2h10a2 2 0 0 1 2 2v10a2 2 0 0 1 -2 2h-10a2 2 0 0 1 -2 -2z"></path></svg>'
+
+function enterFly() {
+	if (camMode === "fly" || uiTab === "draw" || rawSplatPreview) return
+	stopCamPlayback()
+	camMode = "fly"
+	const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ")
+	fly.yaw = euler.y
+	fly.pitch = euler.x
+	fly.vel.set(0, 0, 0)
+	fly.keys.clear()
+	camera.near = 0.03
+	camera.far = 400
+	camera.updateProjectionMatrix()
+	els.flyBtn?.blur() // Space must fly up, not re-click the still-focused button
+	syncFlyUi()
+	// Pointer lock is the good path (raw deltas, hidden cursor), but fly must survive
+	// without it — some browsers/embeds refuse the lock; look then rides plain mouse
+	// moves, whose events carry the same movementX/Y deltas.
+	try {
+		renderer.domElement.requestPointerLock()?.catch?.(() => {})
+	} catch { /* unsupported — unlocked fly still works */ }
+}
+
+function exitFly() {
+	if (camMode !== "fly") return
+	camMode = "orbit"
+	fly.keys.clear()
+	if (document.pointerLockElement === renderer.domElement) document.exitPointerLock()
+	orbitFromCamera()
+	syncFlyUi()
+}
+
+function syncFlyUi() {
+	els.flyBtn?.classList.toggle("active", camMode === "fly")
+	els.flyHint?.classList.toggle("hidden", camMode !== "fly")
+	document.body.classList.toggle("is-flying", camMode === "fly")
+}
+
+// The browser releases the lock itself on Esc — treat any lock loss mid-flight as the
+// exit signal. (Unlocked fly exits through the Escape branch of the fly key handler.)
+document.addEventListener("pointerlockchange", () => {
+	if (!document.pointerLockElement && camMode === "fly") exitFly()
+})
+
+function flyLook(event) {
+	fly.yaw -= event.movementX * 0.0022
+	fly.pitch = Math.max(-1.55, Math.min(1.55, fly.pitch - event.movementY * 0.0022))
+	camera.quaternion.setFromEuler(new THREE.Euler(fly.pitch, fly.yaw, 0, "YXZ"))
+}
+
+function updateFlyCamera(dt) {
+	const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
+	const right = new THREE.Vector3().crossVectors(forward, camera.up).normalize()
+	const wish = new THREE.Vector3()
+	if (fly.keys.has("KeyW")) wish.add(forward)
+	if (fly.keys.has("KeyS")) wish.sub(forward)
+	if (fly.keys.has("KeyD")) wish.add(right)
+	if (fly.keys.has("KeyA")) wish.sub(right)
+	if (fly.keys.has("Space") || fly.keys.has("KeyE")) wish.y += 1
+	if (fly.keys.has("ControlLeft") || fly.keys.has("ControlRight") || fly.keys.has("KeyQ")) wish.y -= 1
+	if (wish.lengthSq() > 0) {
+		const boost = fly.keys.has("ShiftLeft") || fly.keys.has("ShiftRight") ? 3 : 1
+		wish.normalize().multiplyScalar(fly.speed * boost)
+	}
+	fly.vel.lerp(wish, 1 - Math.exp(-dt * 12)) // short ease so starts/stops feel flown, not teleported
+	camera.position.addScaledVector(fly.vel, dt)
+}
+
+document.addEventListener("keydown", event => {
+	if (camMode !== "fly") return
+	if (event.code === "Escape") {
+		exitFly()
+		return
+	}
+	fly.keys.add(event.code)
+	if (event.code === "Space") event.preventDefault() // page scroll
+})
+
+document.addEventListener("keyup", event => fly.keys.delete(event.code))
+
+// Rebuild the orbit rig around wherever flying/playback left the camera, so leaving
+// those modes doesn't snap the view: pivot where the view ray meets the ground, or
+// one plot ahead when looking at the horizon or up.
+function orbitFromCamera() {
+	const forward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion)
+	const reach = forward.y < -0.05
+		? Math.min(floorSize * 8, Math.max(4, -camera.position.y / forward.y))
+		: floorSize
+	orbit.target.copy(camera.position).addScaledVector(forward, reach)
+	const sph = new THREE.Spherical().setFromVector3(new THREE.Vector3().subVectors(camera.position, orbit.target))
+	orbit.radius = sph.radius
+	orbit.theta = sph.theta
+	orbit.phi = sph.phi
+	updateCamera()
+}
+
+function addCamShot() {
+	camShots.push({
+		id: ++nextShotId,
+		position: camera.position.toArray(),
+		quaternion: camera.quaternion.toArray(),
+	})
+	renderShotChips()
+	persistFramesSoon()
+}
+
+function deleteCamShot(id) {
+	const i = camShots.findIndex(s => s.id === id)
+	if (i < 0) return
+	camShots.splice(i, 1)
+	if (camShots.length < 2) stopCamPlayback()
+	renderShotChips()
+	persistFramesSoon()
+}
+
+function applyCamShot(shot) {
+	camera.position.fromArray(shot.position)
+	camera.quaternion.fromArray(shot.quaternion)
+	if (camMode === "fly") {
+		const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, "YXZ")
+		fly.yaw = euler.y
+		fly.pitch = euler.x
+	} else {
+		orbitFromCamera()
+	}
+}
+
+function renderShotChips() {
+	if (!els.shotChips) return
+	els.shotChips.replaceChildren()
+	camShots.forEach((shot, i) => {
+		const chip = document.createElement("button")
+		chip.className = "shot-chip"
+		chip.type = "button"
+		chip.textContent = String(i + 1)
+		chip.title = `Jump to shot ${i + 1}`
+		chip.addEventListener("click", () => {
+			stopCamPlayback()
+			applyCamShot(shot)
+		})
+		const del = document.createElement("span") // buttons can't nest — span with a click
+		del.className = "shot-del"
+		del.textContent = "×"
+		del.title = "Delete this shot"
+		del.addEventListener("click", event => {
+			event.stopPropagation()
+			deleteCamShot(shot.id)
+		})
+		chip.appendChild(del)
+		els.shotChips.appendChild(chip)
+	})
+	if (els.shotPlay) els.shotPlay.disabled = camShots.length < 2
+	if (els.shotExport) els.shotExport.disabled = camShots.length < 2
+}
+
+const easeInOutCubic = t => (t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2)
+
+function playCamPath() {
+	if (camMode === "anim") {
+		stopCamPlayback()
+		return
+	}
+	if (camShots.length < 2) return
+	if (camMode === "fly") exitFly()
+	camAnim = {
+		start: performance.now(),
+		duration: (camShots.length - 1) * SHOT_SEGMENT_MS,
+		curve: new THREE.CatmullRomCurve3(camShots.map(s => new THREE.Vector3().fromArray(s.position)), false, "centripetal", 0.5),
+		quats: camShots.map(s => new THREE.Quaternion().fromArray(s.quaternion)),
+	}
+	camMode = "anim"
+	document.body.classList.add("is-cam-playing")
+	if (els.shotPlay) {
+		els.shotPlay.blur() // keep Space/Enter from toggling playback invisibly later
+		els.shotPlay.innerHTML = STOP_ICON
+		els.shotPlay.title = "Stop the camera path"
+	}
+}
+
+function stopCamPlayback() {
+	if (camMode !== "anim") return
+	camMode = "orbit"
+	camAnim = null
+	document.body.classList.remove("is-cam-playing")
+	if (els.shotPlay) {
+		els.shotPlay.innerHTML = PLAY_ICON
+		els.shotPlay.title = "Play the camera path through the shots"
+	}
+	if (camRecorder) {
+		const rec = camRecorder
+		camRecorder = null // stopping flushes the last chunk, then onstop downloads the file
+		rec.stop()
+	}
+	orbitFromCamera()
+}
+
+// Export = record the play-through. The recording is taken straight off the WebGL
+// canvas (captureStream), so it is exclusively the rendered world — DOM UI, hints and
+// the cursor physically cannot appear in the file, matching the GUI-free playback.
+let camRecorder = null
+
+function exportCamPath() {
+	if (camShots.length < 2 || camMode === "anim") return
+	if (typeof MediaRecorder === "undefined" || !renderer.domElement.captureStream) {
+		setStatus("Video export isn't supported in this browser")
+		return
+	}
+	const stream = renderer.domElement.captureStream(60)
+	const mime = ["video/webm;codecs=vp9", "video/webm"].find(m => MediaRecorder.isTypeSupported(m))
+	const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 12_000_000 } : undefined)
+	const chunks = []
+	rec.ondataavailable = event => {
+		if (event.data.size) chunks.push(event.data)
+	}
+	rec.onstop = () => {
+		for (const track of stream.getTracks()) track.stop()
+		downloadBlob(new Blob(chunks, { type: rec.mimeType || "video/webm" }), `flythrough-${Date.now()}.webm`)
+	}
+	rec.start()
+	camRecorder = rec
+	playCamPath()
+	if (camMode !== "anim") { // playback refused to start — don't leave a recorder running
+		camRecorder = null
+		rec.onstop = () => stream.getTracks().forEach(track => track.stop())
+		rec.stop()
+	}
+}
+
+function updateCamAnim(now) {
+	if (!camAnim) return
+	// Clamp below as well as above: the first rAF timestamp after Play can sit BEFORE
+	// the performance.now() captured at start (rAF stamps are vsync-aligned), and a
+	// negative t would index the spline at points[-1] and crash the render loop.
+	const t = Math.min(1, Math.max(0, (now - camAnim.start) / camAnim.duration))
+	const segs = camAnim.quats.length - 1
+	// CatmullRomCurve3.getPoint maps its parameter per segment, so (i + eased) / segs
+	// samples segment i at the eased local weight — position and look stay in step.
+	const x = Math.min(t * segs, segs - 1e-6)
+	const i = Math.floor(x)
+	const eased = easeInOutCubic(x - i)
+	camera.position.copy(camAnim.curve.getPoint((i + eased) / segs))
+	camera.quaternion.slerpQuaternions(camAnim.quats[i], camAnim.quats[i + 1], eased)
+	if (t >= 1) stopCamPlayback()
 }
 
 // --- Primitive transform drags (scale / roll) -------------------------------
@@ -2105,6 +2379,11 @@ function setViewTool(tool) {
 // --- Pointer routing --------------------------------------------------------
 
 function pointerDown(event) {
+	if (camMode === "fly") return // pointer-locked flight: clicks are not scene input
+	if (camMode === "anim") {
+		stopCamPlayback() // any click on the world cancels the flythrough
+		return
+	}
 	// Right-drag is always camera orbit, regardless of the active Build/View tool.
 	// Route it before any tool hit-testing so it can never paint, place, select, or
 	// transform scene content.
@@ -2218,6 +2497,11 @@ renderer.domElement.addEventListener("pointerdown", pointerDown)
 renderer.domElement.addEventListener("contextmenu", event => event.preventDefault())
 
 renderer.domElement.addEventListener("pointermove", event => {
+	if (camMode === "fly") {
+		flyLook(event)
+		return
+	}
+	if (camMode === "anim") return
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
@@ -2247,6 +2531,11 @@ renderer.domElement.addEventListener("pointerup", event => {
 
 renderer.domElement.addEventListener("wheel", event => {
 	event.preventDefault()
+	if (camMode === "fly") { // scroll tunes cruise speed instead of zoom
+		fly.speed = Math.max(floorSize * 0.05, Math.min(floorSize * 8, fly.speed * (event.deltaY > 0 ? 0.9 : 1.1)))
+		return
+	}
+	if (camMode === "anim") return
 	orbit.radius *= event.deltaY > 0 ? 1.08 : 0.92
 	updateCamera()
 }, { passive: false })
@@ -3345,6 +3634,7 @@ function serializeFramesState() {
 		// Undo/redo stacks (frame.history) stay session-local — 30 snapshots per frame
 		// is too heavy to rewrite on every edit.
 		build: frames.build.map(f => ({ id: f.id, name: f.name, snapshot: f.snapshot })),
+		camShots: camShots.map(s => ({ position: [...s.position], quaternion: [...s.quaternion] })),
 	}
 }
 
@@ -3382,6 +3672,13 @@ async function restoreFramesState() {
 	if (drawFrame) activateDrawFrame(drawFrame)
 	const buildFrame = frames.build.find(f => f.id === saved.activeBuildId) ?? frames.build.at(-1)
 	activeFrameId.build = buildFrame.id
+	camShots.length = 0
+	for (const s of saved.camShots ?? []) {
+		if (Array.isArray(s?.position) && Array.isArray(s?.quaternion)) {
+			camShots.push({ id: ++nextShotId, position: s.position, quaternion: s.quaternion })
+		}
+	}
+	renderShotChips()
 	await applyBuildSnapshot(buildFrame.snapshot ?? emptyBuildSnapshot())
 	renderFramesPanel()
 	syncViewGate()
@@ -3391,8 +3688,10 @@ async function restoreFramesState() {
 // --- Generation -------------------------------------------------------------
 
 function setStatus(message) {
-	els.status.textContent = message
-	els.status.classList.toggle("hidden", !message)
+	const text = String(message ?? "")
+	// Server errors can be whole HTML pages — keep the toast a toast.
+	els.status.textContent = text.length > 220 ? text.slice(0, 220) + "…" : text
+	els.status.classList.toggle("hidden", !text)
 }
 
 function showProgress(done, total, label) {
@@ -7267,6 +7566,13 @@ for (const button of els.toolButtons) button.addEventListener("click", () => set
 for (const button of els.viewToolButtons) button.addEventListener("click", () => setViewTool(button.dataset.viewTool))
 for (const button of els.viewTabs) button.addEventListener("click", () => setUiTab(button.dataset.viewTab))
 els.frameAdd?.addEventListener("click", addFrameForActiveTab)
+
+els.flyBtn?.addEventListener("click", enterFly)
+els.shotAdd?.addEventListener("click", addCamShot)
+els.shotPlay?.addEventListener("click", playCamPath)
+els.shotExport?.addEventListener("click", exportCamPath)
+
+els.status?.addEventListener("click", () => setStatus("")) // the error toast dismisses on click
 renderPalette()
 els.brushSlider.addEventListener("input", () => applyBrushScale(Number(els.brushSlider.value)))
 
@@ -7370,6 +7676,7 @@ document.addEventListener("keydown", event => {
 		const settingsOpen = !els.settingsPopover.classList.contains("hidden")
 		if (els.colorPop && !els.colorPop.classList.contains("hidden")) toggleColorPop(false)
 		else if (settingsOpen) toggleSettings(false)
+		else if (camMode === "anim") stopCamPlayback()
 		else if (rawSplatPreview) {
 			world.resetGenerated()
 			setStatus("")
@@ -7406,10 +7713,16 @@ window.addEventListener("resize", () => {
 	resizeSketchCanvas()
 })
 
-function animate() {
+let lastAnimateTime = performance.now()
+
+function animate(now = performance.now()) {
+	const dt = Math.min(0.05, (now - lastAnimateTime) / 1000) // clamp: a background tab must not teleport the fly camera
+	lastAnimateTime = now
 	// The Draw overlay covers the 3D viewport completely — skip all GPU work there
 	// (Spark otherwise re-sorts and draws every splat each frame for nothing).
 	if (uiTab !== "draw") {
+		if (camMode === "fly") updateFlyCamera(dt)
+		else if (camMode === "anim") updateCamAnim(now)
 		sky.position.copy(camera.position)
 		if (pendingPlotHeight) { // floor-lift drags coalesce to one height change per frame
 			const p = pendingPlotHeight
