@@ -7,7 +7,7 @@ const captureSize = 1024
 const background = new THREE.Color(0x000000)
 // Light edges so the silhouette reads against the black background (dark edges would
 // vanish on it). The flat-material pass keeps true colours for the material-ID map.
-const edgeMaterial = new THREE.LineBasicMaterial({ color: 0xdcdcdc, transparent: true, opacity: 0.85 })
+const edgeMaterial = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 })
 
 // TRUE isometric: 45° azimuth + ~35.26° elevation (the (1,1,1) view), rendered with an
 // ORTHOGRAPHIC camera so all three axes are equally foreshortened and there is no
@@ -40,15 +40,18 @@ export function captureFloor(renderer, scene, world, floorMeshes = null, box = n
 // Alongside the visual guide, optionally render a semantic ID diagram in which every
 // connected object group is one artificial solid colour. The image editor uses that
 // second image as an inventory/mask reference, never as appearance guidance.
-export function captureWorld(renderer, scene, world, box, objectGroups = null) {
+export async function captureWorld(renderer, scene, world, box, objectGroups = null, viewAngles = null) {
 	// An unpainted drawable sheet is void, not a floor. Excluding it here prevents the
 	// image editor from receiving even an invisible floor mesh as part of the subject.
 	const floor = world.groundInkBounds?.()
 		? (world.floorCaptureMeshes?.() ?? world.groundTiles ?? [world.ground])
 		: []
-	// Whole-scene blocks are volumetric scaffolding, not literal cuboids in the final art.
-	// Omit per-cube edge overlays so touching same-colour blocks read as one coarse mass.
-	return captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box), false, false, objectGroups)
+	// Whole-scene blocks are volumetric scaffolding, but the white wireframe makes the
+	// actual block boundaries explicit for the image model.
+	const theta = Number.isFinite(viewAngles?.theta) ? viewAngles.theta : ISO_THETA
+	const phi = Number.isFinite(viewAngles?.phi) ? viewAngles.phi : ISO_PHI
+	const capture = await captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box, { theta, phi }), false, true, objectGroups)
+	return { ...capture, theta, phi }
 }
 
 // Capture the WHOLE world in context (every block-out object + the painted floor) from
@@ -143,15 +146,17 @@ export async function captureWorldContext(renderer, scene, world, objects) {
 // A true isometric (orthographic) camera framing `box`. Distance only sets the clip
 // range (orthographic projection is scale-independent of distance); the frustum is
 // sized to the box's bounding sphere so the whole object fits with a small margin.
-function isoCamera(box) {
+function isoCamera(box, angles = null) {
 	const center = box.getCenter(new THREE.Vector3())
 	const size = box.getSize(new THREE.Vector3())
 	const radius = Math.max(0.3, 0.5 * Math.hypot(size.x, size.y, size.z)) // bounding-sphere radius
 	const half = radius * 1.12 // frame with a small margin
 	const dist = Math.max(8, radius * 6)
+	const theta = Number.isFinite(angles?.theta) ? angles.theta : ISO_THETA
+	const phi = Number.isFinite(angles?.phi) ? angles.phi : ISO_PHI
 	const camera = new THREE.OrthographicCamera(-half, half, half, -half, Math.max(0.01, dist - radius * 4), dist + radius * 4)
 	camera.up.set(0, 1, 0)
-	const offset = new THREE.Vector3().setFromSpherical(new THREE.Spherical(dist, ISO_PHI, ISO_THETA))
+	const offset = new THREE.Vector3().setFromSpherical(new THREE.Spherical(dist, phi, theta))
 	if (MIRROR_CAPTURE_X) offset.x = -offset.x // mirror the viewpoint across X
 	camera.position.copy(center).add(offset)
 	camera.lookAt(center)

@@ -124,10 +124,15 @@ let devControlsVisible = false
 let rawSplatPreview = null
 let rawOrbitSnapshot = null
 const segmentationTuneDefaults = {
-	voxelCells: 120,
+	voxelCells: 96,
 	minBlob: 200,
 	bridgeCut: 0.25,
+	colorSplit: 0.6,
 	floorBand: 0.9,
+	baseDetachStrength: 0.55,
+	baseDetachHeight: 1.2,
+	baseDetachRadius: 2,
+	baseColumnMinHeight: 1.6,
 	wispAggression: 0.72,
 	detachedCullPct: 0.025,
 	scarDilation: 1,
@@ -1825,20 +1830,22 @@ function paintAtEvent(event) {
 }
 
 // --- View-tab splat tools -----------------------------------------------------
-// View owns its own move/scale/rotate: they act on the generated SplatMesh transforms
+// View owns its own lasso/scale/rotate: they act on the generated SplatMesh transforms
 // only, so nothing feeds back into the Build block-out. Splat scaling stays UNIFORM —
 // Spark collapses non-uniform mesh scales to an average, while a uniform scale is safe.
 // Selection raycasts invisible proxy boxes (children of each splat mesh, sized to its
 // content bounds), because gaussian clouds have no geometry a raycaster could hit.
 
-let viewTool = "orbit" // "orbit" | "move" | "scale" | "rotate"
+let viewTool = "orbit" // "orbit" | "lasso" | "scale" | "rotate"
 let selectedSplatMesh = null
+const selectedSplatMeshes = new Set()
 
 const splatProxyMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false })
 const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: 0x5b6ee1, transparent: true, opacity: 0.9 })
 const splatDragPlane = new THREE.Plane()
 const splatRotQuat = new THREE.Quaternion()
 const splatDragPoint = new THREE.Vector3()
+let viewLassoRect = null
 
 function ensureSplatProxies() {
 	for (const { mesh } of world.generated) {
@@ -1871,16 +1878,33 @@ function ensureSplatProxies() {
 }
 
 function selectSplat(mesh) {
-	if (selectedSplatMesh === mesh) return
+	if (selectedSplatMeshes.size === 1 && selectedSplatMesh === mesh) return
 	deselectSplat()
 	selectedSplatMesh = mesh
-	const outline = mesh?.userData.splatProxy?.userData.outline
-	if (outline) outline.visible = true
+	if (mesh) {
+		selectedSplatMeshes.add(mesh)
+		const outline = mesh.userData.splatProxy?.userData.outline
+		if (outline) outline.visible = true
+	}
+}
+
+function selectSplats(meshes) {
+	deselectSplat()
+	for (const mesh of meshes) {
+		if (!mesh) continue
+		selectedSplatMeshes.add(mesh)
+		const outline = mesh.userData.splatProxy?.userData.outline
+		if (outline) outline.visible = true
+	}
+	selectedSplatMesh = selectedSplatMeshes.values().next().value ?? null
 }
 
 function deselectSplat() {
-	const outline = selectedSplatMesh?.userData.splatProxy?.userData.outline
-	if (outline) outline.visible = false
+	for (const mesh of selectedSplatMeshes) {
+		const outline = mesh.userData.splatProxy?.userData.outline
+		if (outline) outline.visible = false
+	}
+	selectedSplatMeshes.clear()
 	selectedSplatMesh = null
 }
 
@@ -1890,18 +1914,116 @@ function raycastSplatProxies(event) {
 	return proxies.length ? raycast(event, proxies) : null
 }
 
+function ensureViewLassoRect() {
+	if (viewLassoRect) return viewLassoRect
+	viewLassoRect = document.createElement("div")
+	viewLassoRect.className = "view-lasso-rect"
+	document.body.appendChild(viewLassoRect)
+	return viewLassoRect
+}
+
+function setViewLassoRectVisible(visible) {
+	if (!viewLassoRect && !visible) return
+	ensureViewLassoRect().style.display = visible ? "block" : "none"
+}
+
+function updateViewLassoRect(d) {
+	const el = ensureViewLassoRect()
+	const x0 = Math.min(d.startX, d.currentX)
+	const y0 = Math.min(d.startY, d.currentY)
+	const x1 = Math.max(d.startX, d.currentX)
+	const y1 = Math.max(d.startY, d.currentY)
+	el.style.left = `${x0}px`
+	el.style.top = `${y0}px`
+	el.style.width = `${Math.max(1, x1 - x0)}px`
+	el.style.height = `${Math.max(1, y1 - y0)}px`
+}
+
+function splatProxyScreenRect(mesh) {
+	const proxy = mesh.userData.splatProxy
+	if (!proxy) return null
+	proxy.updateWorldMatrix(true, false)
+	const box = new THREE.Box3().setFromObject(proxy)
+	if (box.isEmpty()) return null
+	const point = new THREE.Vector3()
+	const rect = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
+	for (const x of [box.min.x, box.max.x]) {
+		for (const y of [box.min.y, box.max.y]) {
+			for (const z of [box.min.z, box.max.z]) {
+				point.set(x, y, z).project(camera)
+				const sx = (point.x * 0.5 + 0.5) * window.innerWidth
+				const sy = (-point.y * 0.5 + 0.5) * window.innerHeight
+				rect.minX = Math.min(rect.minX, sx)
+				rect.maxX = Math.max(rect.maxX, sx)
+				rect.minY = Math.min(rect.minY, sy)
+				rect.maxY = Math.max(rect.maxY, sy)
+			}
+		}
+	}
+	return rect
+}
+
+function rectsIntersect(a, b) {
+	return a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY
+}
+
+function startViewLasso(event) {
+	drag = {
+		mode: "splat-lasso",
+		pointerId: event.pointerId,
+		startX: event.clientX,
+		startY: event.clientY,
+		currentX: event.clientX,
+		currentY: event.clientY,
+	}
+	updateViewLassoRect(drag)
+	setViewLassoRectVisible(true)
+	renderer.domElement.setPointerCapture(event.pointerId)
+}
+
+function updateViewLasso(event) {
+	drag.currentX = event.clientX
+	drag.currentY = event.clientY
+	updateViewLassoRect(drag)
+}
+
+function finishViewLasso() {
+	setViewLassoRectVisible(false)
+	const x0 = Math.min(drag.startX, drag.currentX)
+	const y0 = Math.min(drag.startY, drag.currentY)
+	const x1 = Math.max(drag.startX, drag.currentX)
+	const y1 = Math.max(drag.startY, drag.currentY)
+	if (Math.hypot(x1 - x0, y1 - y0) < 4) {
+		deselectSplat()
+		return
+	}
+	ensureSplatProxies()
+	const lasso = { minX: x0, minY: y0, maxX: x1, maxY: y1 }
+	const meshes = []
+	for (const { mesh } of world.generated) {
+		if (mesh.userData.genKind === "remainder") continue
+		const rect = splatProxyScreenRect(mesh)
+		if (rect && rectsIntersect(lasso, rect)) meshes.push(mesh)
+	}
+	selectSplats(meshes)
+}
+
 function startSplatDrag(event, hit) {
 	const mesh = hit.object.parent
-	selectSplat(mesh)
+	if (viewTool === "lasso" && !selectedSplatMeshes.has(mesh)) selectSplat(mesh)
+	else if (viewTool !== "lasso") selectSplat(mesh)
 	const pivot = hit.object.getWorldPosition(new THREE.Vector3())
 	mesh.updateWorldMatrix(true, false)
 	const scaleAnchorLocal = splatScaleAnchorLocal(mesh, pivot)
 	const scaleAnchorWorld = mesh.localToWorld(scaleAnchorLocal.clone())
+	const group = viewTool === "lasso" ? [...selectedSplatMeshes] : [mesh]
 	drag = {
 		mode: viewTool === "rotate" ? "splat-rotate" : viewTool === "scale" ? "splat-scale" : "splat-move",
 		pointerId: event.pointerId,
 		mesh,
+		group,
 		startPos: mesh.position.clone(),
+		startGroupPositions: group.map(m => [m, m.position.clone()]),
 		startQuat: mesh.quaternion.clone(),
 		startScale: mesh.scale.clone(),
 		pivot,
@@ -1932,18 +2054,21 @@ function splatScaleAnchorLocal(mesh, fallbackWorld) {
 // Drag on the horizontal plane through the grab point; hold Shift to move vertically.
 function updateSplatMove(event) {
 	if (event.shiftKey) {
-		drag.mesh.position.set(drag.startPos.x, drag.startPos.y + (drag.startY - event.clientY) * 0.02, drag.startPos.z)
+		const dy = (drag.startY - event.clientY) * 0.02
+		for (const [mesh, start] of drag.startGroupPositions ?? [[drag.mesh, drag.startPos]]) {
+			mesh.position.set(start.x, start.y + dy, start.z)
+		}
 		return
 	}
 	splatDragPlane.set(localUp, -drag.startPoint.y)
 	pointerFromEvent(event)
 	raycaster.setFromCamera(pointer, camera)
 	if (!raycaster.ray.intersectPlane(splatDragPlane, splatDragPoint)) return
-	drag.mesh.position.set(
-		drag.startPos.x + splatDragPoint.x - drag.startPoint.x,
-		drag.startPos.y,
-		drag.startPos.z + splatDragPoint.z - drag.startPoint.z,
-	)
+	const dx = splatDragPoint.x - drag.startPoint.x
+	const dz = splatDragPoint.z - drag.startPoint.z
+	for (const [mesh, start] of drag.startGroupPositions ?? [[drag.mesh, drag.startPos]]) {
+		mesh.position.set(start.x + dx, start.y, start.z + dz)
+	}
 }
 
 // Uniform scale from the selected splat's bottom centre, so the object grows up/out
@@ -1971,7 +2096,8 @@ function setViewTool(tool) {
 	viewTool = tool
 	for (const button of els.viewToolButtons) button.classList.toggle("active", button.dataset.viewTool === tool)
 	if (tool === "orbit") deselectSplat()
-	renderer.domElement.classList.toggle("is-splat-move", tool === "move")
+	renderer.domElement.classList.toggle("is-splat-move", false)
+	renderer.domElement.classList.toggle("is-splat-lasso", tool === "lasso")
 	renderer.domElement.classList.toggle("is-splat-scale", tool === "scale")
 	renderer.domElement.classList.toggle("is-splat-rotate", tool === "rotate")
 }
@@ -1997,8 +2123,17 @@ function pointerDown(event) {
 		return
 	}
 	if (uiTab === "view") {
-		// Move/scale/rotate act on the splat under the cursor; anywhere else (or the orbit
+		// Lasso/scale/rotate act on the splat under the cursor; anywhere else (or the orbit
 		// tool) the drag is the camera. Block-out editing stays a Build-only thing.
+		if (viewTool === "lasso") {
+			const hit = raycastSplatProxies(event)
+			if (hit && selectedSplatMeshes.has(hit.object.parent)) {
+				startSplatDrag(event, hit)
+				return
+			}
+			startViewLasso(event)
+			return
+		}
 		if (viewTool !== "orbit") {
 			const hit = raycastSplatProxies(event)
 			if (hit) {
@@ -2086,6 +2221,7 @@ renderer.domElement.addEventListener("pointermove", event => {
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
+	else if (drag?.mode === "splat-lasso") updateViewLasso(event)
 	else if (drag?.mode === "splat-move") updateSplatMove(event)
 	else if (drag?.mode === "splat-scale") updateSplatScale(event)
 	else if (drag?.mode === "splat-rotate") updateSplatRotate(event)
@@ -2096,6 +2232,7 @@ renderer.domElement.addEventListener("pointermove", event => {
 renderer.domElement.addEventListener("pointerup", event => {
 	if (drag?.pointerId === event.pointerId) {
 		if (drag.mode === "gizmo") finishGizmoDrag()
+		if (drag.mode === "splat-lasso") finishViewLasso()
 		if (drag.mode === "orbit" && drag.pendingCell && Math.hypot(event.clientX - drag.downX, event.clientY - drag.downY) < 5) {
 			addPlotAt(drag.pendingCell) // a clean click on an empty cell → new plot
 		}
@@ -3316,7 +3453,12 @@ const segmentationTuneControls = [
 	{ group: "Grouping", key: "voxelCells", label: "Voxel cells", min: 64, max: 320, step: 8, format: v => `${Math.round(v)}` },
 	{ group: "Grouping", key: "minBlob", label: "Min blob", min: 40, max: 1000, step: 20, format: v => `${Math.round(v)} pts` },
 	{ group: "Grouping", key: "bridgeCut", label: "Bridge cut", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Grouping", key: "colorSplit", label: "Color split", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
 	{ group: "Ground Split", key: "floorBand", label: "Floor band", min: 0.2, max: 1.8, step: 0.02, format: v => `${v.toFixed(2)}u` },
+	{ group: "Ground Split", key: "baseDetachStrength", label: "Base detach", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Ground Split", key: "baseDetachHeight", label: "Detach height", min: 0.2, max: 3.5, step: 0.05, format: v => `${v.toFixed(2)}u` },
+	{ group: "Ground Split", key: "baseDetachRadius", label: "Detach radius", min: 0, max: 5, step: 1, format: v => `${Math.round(v)} cell` + (Math.round(v) === 1 ? "" : "s") },
+	{ group: "Ground Split", key: "baseColumnMinHeight", label: "Column height", min: 0.4, max: 5, step: 0.05, format: v => `${v.toFixed(2)}u` },
 	{ group: "Wisp Culling", key: "wispAggression", label: "Object/floor wisps", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
 	{ group: "Wisp Culling", key: "detachedCullPct", label: "Detached specks", min: 0, max: 0.12, step: 0.0025, format: v => `${(v * 100).toFixed(2)}%` },
 	{ group: "Scar Patching", key: "scarFill", label: "Fill strength", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
@@ -3494,6 +3636,17 @@ const ISO_PROJ_RIGHT = [1 / Math.sqrt(2), 0, -1 / Math.sqrt(2)] // capture camer
 const ISO_PROJ_UP = [-1 / Math.sqrt(6), 2 / Math.sqrt(6), -1 / Math.sqrt(6)]
 const YAW_GRID = 32
 
+function captureProjectionBasis(theta = FRONT_THETA, phi = FRONT_PHI) {
+	const eye = new THREE.Vector3().setFromSpherical(new THREE.Spherical(1, phi, theta))
+	const right = new THREE.Vector3(0, 1, 0).cross(eye).normalize()
+	const up = new THREE.Vector3().crossVectors(eye, right).normalize()
+	return {
+		right: [right.x, right.y, right.z],
+		up: [up.x, up.y, up.z],
+		yawOffsetDeg: THREE.MathUtils.radToDeg(theta - FRONT_THETA),
+	}
+}
+
 async function guideOccupancy(blob) {
 	if (!blob || typeof createImageBitmap !== "function") return null
 	let bitmap
@@ -3539,7 +3692,63 @@ function unitChroma(r, g, b) {
 	return l > 1e-6 ? [v[0] / l, v[1] / l, v[2] / l, l] : [0, 0, 0, 0]
 }
 
-async function estimateSceneYaw(bytes, meshes, guide = null) {
+// Painted-ground colour sampler for the yaw estimator. Distinctive painted features (a
+// pond, mud paths) sit at KNOWN world positions on the paint canvas, so the true yaw is
+// the one that lands the splat's near-floor colours on them — far stronger evidence than
+// any silhouette heuristic. "Distinctive" = quantized colour differs from the dominant
+// (base terrain) colour; a monochrome ground returns null (no directional signal).
+function paintedGroundSampler() {
+	if (!world.groundInkBounds()) return null
+	const S = 256
+	const canvas = document.createElement("canvas")
+	canvas.width = canvas.height = S
+	const ctx = canvas.getContext("2d", { willReadFrequently: true })
+	ctx.clearRect(0, 0, S, S)
+	ctx.drawImage(world.paint.canvas, 0, 0, S, S)
+	const data = ctx.getImageData(0, 0, S, S).data
+	const binOf = o => ((data[o] >> 5) << 6) | ((data[o + 1] >> 5) << 3) | (data[o + 2] >> 5)
+	const bins = new Map()
+	for (let o = 0; o < data.length; o += 4) {
+		if (data[o + 3] <= 32) continue
+		const k = binOf(o)
+		bins.set(k, (bins.get(k) ?? 0) + 1)
+	}
+	if (!bins.size) return null
+	let dominant = -1, dominantCount = 0, painted = 0
+	for (const [k, c] of bins) { painted += c; if (c > dominantCount) { dominantCount = c; dominant = k } }
+	if (painted - dominantCount < painted * 0.04) return null
+	let waterCells = 0
+	for (let o = 0; o < data.length; o += 4) {
+		if (data[o + 3] > 32 && data[o + 2] > data[o] + 20 && data[o + 2] >= data[o + 1]) waterCells++
+	}
+	const half = GROUND_SHEET_SIZE / 2
+	const cellAt = (wx, wz) => {
+		const i = Math.floor(((wx + half) / GROUND_SHEET_SIZE) * S)
+		const j = Math.floor(((wz + half) / GROUND_SHEET_SIZE) * S)
+		if (i < 0 || i >= S || j < 0 || j >= S) return -1
+		const o = (j * S + i) * 4
+		return data[o + 3] <= 32 ? -1 : o
+	}
+	return {
+		waterCells,
+		sample(wx, wz) {
+			const o = cellAt(wx, wz)
+			if (o < 0) return null
+			return { r: data[o], g: data[o + 1], b: data[o + 2], distinct: binOf(o) !== dominant }
+		},
+		// Painted water = blue over red (hue order survives style transfer; brightness does not).
+		isWater(wx, wz) {
+			const o = cellAt(wx, wz)
+			if (o < 0) return null
+			return data[o + 2] > data[o] + 20 && data[o + 2] >= data[o + 1]
+		},
+	}
+}
+
+async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = null) {
+	const basis = captureAngles ? captureProjectionBasis(captureAngles.theta, captureAngles.phi) : { right: ISO_PROJ_RIGHT, up: ISO_PROJ_UP, yawOffsetDeg: 0 }
+	const projRight = basis.right
+	const projUp = basis.up
 	// The drawable ground sheet's geometry is always the full 48u canvas, not the actual
 	// painted outline, so it would swamp the normalized comparison. Real blocks provide
 	// the reliable position/colour anchors for both grounded and object-only scenes.
@@ -3562,8 +3771,8 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 				geo.min.y + (b / 2) * (geo.max.y - geo.min.y),
 				geo.min.z + (c / 2) * (geo.max.z - geo.min.z),
 			).applyMatrix4(mesh.matrixWorld)
-			const pu = corner.x * ISO_PROJ_RIGHT[0] + corner.y * ISO_PROJ_RIGHT[1] + corner.z * ISO_PROJ_RIGHT[2]
-			const pv = corner.x * ISO_PROJ_UP[0] + corner.y * ISO_PROJ_UP[1] + corner.z * ISO_PROJ_UP[2]
+			const pu = corner.x * projRight[0] + corner.y * projRight[1] + corner.z * projRight[2]
+			const pv = corner.x * projUp[0] + corner.y * projUp[1] + corner.z * projUp[2]
 			blockUV.push([pu, pv, key, vol / 27])
 			rect[0] = Math.min(rect[0], pu); rect[1] = Math.max(rect[1], pu)
 			rect[2] = Math.min(rect[2], pv); rect[3] = Math.max(rect[3], pv)
@@ -3585,8 +3794,8 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 				c & 2 ? domain.max.y : domain.min.y,
 				c & 4 ? domain.max.z : domain.min.z,
 			)
-			const u = corner.x * ISO_PROJ_RIGHT[0] + corner.y * ISO_PROJ_RIGHT[1] + corner.z * ISO_PROJ_RIGHT[2]
-			const v = corner.x * ISO_PROJ_UP[0] + corner.y * ISO_PROJ_UP[1] + corner.z * ISO_PROJ_UP[2]
+			const u = corner.x * projRight[0] + corner.y * projRight[1] + corner.z * projRight[2]
+			const v = corner.x * projUp[0] + corner.y * projUp[1] + corner.z * projUp[2]
 			bu0 = Math.min(bu0, u); bu1 = Math.max(bu1, u)
 			bv0 = Math.min(bv0, v); bv1 = Math.max(bv1, v)
 		}
@@ -3639,17 +3848,57 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 	const floorY = hq(0.25)
 	const aboveY = floorY + 0.08 * Math.max(1e-6, hq(0.99) - floorY)
 
-	const candidates = [0, 90, 180, 270]
-	let bestYaw = null, bestScore = -Infinity
+	// Painted-ground WATER correlation setup: reproduce the fit's mapping (uniform scale
+	// from unrotated spans, mirror before rotation, rotation about the target centre) so
+	// each candidate predicts where every near-floor gaussian LANDS in the world. Water is
+	// the one painted feature whose hue order (blue over red) survives the image model and
+	// Tripo, so it discriminates both yaw AND handedness razor-sharply, where mud paths
+	// and grass share warm chroma and mislead. (Run 0158: Tripo returned a MIRRORED
+	// reconstruction — no yaw matched until the water term exposed the flip.)
+	const groundSampler = world.groundInkBounds() ? paintedGroundSampler() : null
+	let groundGeom = null
+	if (groundSampler) {
+		const xs = pts.map(p => p[0]).sort((a, b) => a - b)
+		const zs = pts.map(p => p[2]).sort((a, b) => a - b)
+		const gq = (arr, f) => arr[Math.min(arr.length - 1, (f * (arr.length - 1)) | 0)]
+		const x0 = gq(xs, 0.003), x1 = gq(xs, 0.997), z0 = gq(zs, 0.003), z1 = gq(zs, 0.997)
+		const target = wholeSceneBox()
+		const coolPts = pts.filter(([, y, , r, g, b]) => y <= aboveY && r + g + b > 90 && b > r + 8 && g >= r)
+		groundGeom = coolPts.length >= 150 && groundSampler.waterCells >= 100 ? {
+			cx: (x0 + x1) / 2, cz: (z0 + z1) / 2,
+			spanX: Math.max(1e-6, x1 - x0), spanZ: Math.max(1e-6, z1 - z0),
+			tcx: (target.min.x + target.max.x) / 2, tcz: (target.min.z + target.max.z) / 2,
+			tSpanX: target.max.x - target.min.x, tSpanZ: target.max.z - target.min.z,
+			coolPts,
+		} : null
+	}
+
+	const baseCandidates = [0, 90, 180, 270]
+	const offset = basis.yawOffsetDeg
+	// With ground evidence, sweep finely: Tripo's content normalization is NOT guaranteed
+	// to be quarter-aligned to the capture (0158's true yaw was ~343°, no candidate near
+	// it). Without it, only the classic quarter(±capture offset) candidates are decidable.
+	const yawCandidates = [...new Set([
+		...baseCandidates,
+		...baseCandidates.map(yaw => yaw + offset),
+		...baseCandidates.map(yaw => yaw - offset),
+		...(groundGeom ? Array.from({ length: 72 }, (_, i) => i * 5) : []),
+	].map(yaw => Math.round((((yaw % 360) + 360) % 360) * 1000) / 1000))]
+	// Handedness is only decidable with ground evidence; a mirrored candidate must beat
+	// the best regular one by a real margin before we accept the flip.
+	const mirrorCandidates = groundGeom ? [false, true] : [false]
+	let bestYaw = null, bestMirror = false, bestScore = -Infinity
 	const scores = []
-	for (const yaw of candidates) {
+	for (const mirror of mirrorCandidates) {
+	for (const yaw of yawCandidates) {
 		const th = (yaw * Math.PI) / 180, co = Math.cos(th), si = Math.sin(th)
+		const mz = mirror ? -1 : 1
 		const uv = []
 		for (const [x, y, z, r, g, b] of pts) {
-			const wx = x * co + z * si, wz = -x * si + z * co
+			const wx = x * co + mz * z * si, wz = -x * si + mz * z * co
 			uv.push([
-				wx * ISO_PROJ_RIGHT[0] + y * ISO_PROJ_RIGHT[1] + wz * ISO_PROJ_RIGHT[2],
-				wx * ISO_PROJ_UP[0] + y * ISO_PROJ_UP[1] + wz * ISO_PROJ_UP[2],
+				wx * projRight[0] + y * projRight[1] + wz * projRight[2],
+				wx * projUp[0] + y * projUp[1] + wz * projUp[2],
 				r, g, b, y,
 			])
 		}
@@ -3697,6 +3946,22 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 				s[0] += x; s[1] += y; s[2]++
 			}
 		}
+		// Water correlation: fraction of the splat's cool near-floor points that this
+		// seating lands on painted water. Sharp peak at the true (yaw, mirror); collapses
+		// at every wrong one.
+		let groundHit = 0, groundTot = 0
+		if (groundGeom) {
+			const swap = Math.abs(Math.round(yaw / 90)) % 2
+			const gs = 0.5 * ((swap ? groundGeom.tSpanZ : groundGeom.tSpanX) / groundGeom.spanX
+				+ (swap ? groundGeom.tSpanX : groundGeom.tSpanZ) / groundGeom.spanZ)
+			for (const [x, , z] of groundGeom.coolPts) {
+				const dx = gs * (x - groundGeom.cx), dz = mz * gs * (z - groundGeom.cz)
+				const water = groundSampler.isWater(groundGeom.tcx + dx * co + dz * si, groundGeom.tcz - dx * si + dz * co)
+				if (water == null) continue
+				groundTot++
+				if (water) groundHit++
+			}
+		}
 		let inter = 0
 		for (const cell of splatOcc) if (occupancyTarget.has(cell)) inter++
 		const iou = inter / Math.max(1, occupancyTarget.size + splatOcc.size - inter)
@@ -3716,12 +3981,20 @@ async function estimateSceneYaw(bytes, meshes, guide = null) {
 		// by terrain that shares the blocks' palette — preferred exactly those yaws).
 		const rectMin = Math.max(12, n * 0.0008)
 		const covered = rectCounts.filter(count => count >= rectMin).length
-		const score = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0)
-		scores.push(`${yaw}°:${score.toFixed(3)}(blocks ${covered}/${normRects.length} iou ${iou.toFixed(3)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(3) : "—"})`)
-		if (score > bestScore) { bestScore = score; bestYaw = yaw }
+		// The water term outweighs block coverage when there is enough painted-water
+		// evidence: coverage saturates on scenes with one large object (a canopy covers
+		// most rects at EVERY yaw), while landed-on-water cannot be impersonated.
+		const groundFrac = groundTot >= 100 ? groundHit / groundTot : null
+		const groundTermScore = groundFrac == null ? 0 : 2.5 * normRects.length * groundFrac
+		// A mirrored seating is exotic; demand a decisive margin before accepting it.
+		const score = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0) + groundTermScore - (mirror ? 0.06 * normRects.length : 0)
+		scores.push(`${mirror ? "M" : ""}${yaw}°:${score.toFixed(2)}(blk ${covered}/${normRects.length} iou ${iou.toFixed(2)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(2) : "—"} wat ${groundFrac == null ? "—" : `${groundFrac.toFixed(2)}×${groundTot}`})`)
+		if (score > bestScore) { bestScore = score; bestYaw = yaw; bestMirror = mirror }
 	}
-	console.log(`[fit] scene yaw estimate → ${bestYaw}° (${scores.join(" ")})`)
-	return bestYaw
+	}
+	const top = [...scores].sort((a, b) => Number(b.split(":")[1].split("(")[0]) - Number(a.split(":")[1].split("(")[0])).slice(0, 8)
+	console.log(`[fit] scene yaw estimate → ${bestMirror ? "MIRROR+" : ""}${bestYaw}° over ${scores.length} candidates (top: ${top.join(" ")})`)
+	return { yawDeg: bestYaw, mirrorZ: bestMirror }
 }
 
 // Two objects are "equal" when their blocks match in relative position, size, spin and
@@ -3801,6 +4074,10 @@ function segmentSceneSplat(hasGround = true) {
 	const BRIDGE_MIN_NEIGHBORS = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 4) // bridge cutting: higher splits more thin links
 	const BRIDGE_MIN_DENSITY = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 8) // higher peels sparse bridges more aggressively
 	const CORE_MIN_VOXELS = Math.round(30 + clamp01(segmentationTuning.bridgeCut) * 120) // a peeled component must be substantial before it can split a blob
+	const COLOR_SPLIT = clamp01(segmentationTuning.colorSplit ?? 0) // higher = sharper colour boundaries can stop voxel connectivity
+	const COLOR_SPLIT_THRESHOLD = lerp(0.72, 0.025, COLOR_SPLIT * COLOR_SPLIT) // chromaticity distance; brightness-independent; 100% is intentionally harsh
+	const COLOR_SPLIT_DARK_MEAN = lerp(26, 0, COLOR_SPLIT) // at high strength, even dark colour changes can cut components
+	const COLOR_SPLIT_GROUND_PAD = 1.25 // colour cuts matter most around contact/ground-level material changes
 
 	// Pass 1: positions + XZ bounds.
 	const n = packed.numSplats
@@ -3908,7 +4185,7 @@ function segmentSceneSplat(hasGround = true) {
 
 	// Flood fill (26-connected voxel components) over everything ABOVE the floor band.
 	const VOFF = 128 // voxel index offset keeps negative heights positive
-	const voxels = new Map() // packed voxel key -> { idx, blob, kx, ky, kz }
+	const voxels = new Map() // packed voxel key -> { idx, blob, kx, ky, kz, sr, sg, sb, y, chroma, nearGround }
 	for (let i = 0; i < n; i++) {
 		if (hasGround && pys[i] <= floorLevel[cellOfXZ(pxs[i], pzs[i])] + FLOOR_BAND) continue
 		const kx = Math.floor((pxs[i] - minX) / VOX)
@@ -3916,10 +4193,36 @@ function segmentSceneSplat(hasGround = true) {
 		const ky = Math.floor(pys[i] / VOX) + VOFF
 		const key = (kx * 2048 + kz) * 2048 + ky
 		let v = voxels.get(key)
-		if (!v) voxels.set(key, v = { idx: [], blob: -1, kx, ky, kz })
+		if (!v) voxels.set(key, v = { idx: [], blob: -1, kx, ky, kz, sr: 0, sg: 0, sb: 0, y: 0, chroma: null, nearGround: false })
 		v.idx.push(i)
+		v.sr += prgb[i * 3]
+		v.sg += prgb[i * 3 + 1]
+		v.sb += prgb[i * 3 + 2]
+		v.y += pys[i]
+	}
+	for (const v of voxels.values()) {
+		const inv = 1 / Math.max(1, v.idx.length)
+		const r = v.sr * inv
+		const g = v.sg * inv
+		const b = v.sb * inv
+		const sum = r + g + b
+		const mean = sum / 3
+		v.chroma = sum > 1e-6 ? [r / sum, g / sum, b / sum, mean] : [1 / 3, 1 / 3, 1 / 3, mean]
+		if (hasGround) {
+			const x = minX + (v.kx + 0.5) * VOX
+			const z = minZ + (v.kz + 0.5) * VOX
+			v.nearGround = v.y * inv <= surfLevel[cellOfXZ(x, z)] + FLOOR_BAND + COLOR_SPLIT_GROUND_PAD
+		}
+	}
+	const canFloodConnect = (a, b) => {
+		if (!COLOR_SPLIT) return true
+		if (hasGround && COLOR_SPLIT < 0.95 && !(a.nearGround || b.nearGround)) return true
+		if (a.chroma[3] < COLOR_SPLIT_DARK_MEAN && b.chroma[3] < COLOR_SPLIT_DARK_MEAN) return true
+		const d = Math.hypot(a.chroma[0] - b.chroma[0], a.chroma[1] - b.chroma[1], a.chroma[2] - b.chroma[2])
+		return d <= COLOR_SPLIT_THRESHOLD
 	}
 	const blobs = [] // { count, cols:Set<packed kx,kz> }
+	let colorCuts = 0
 	for (const [key, seedVox] of voxels) {
 		if (seedVox.blob >= 0) continue
 		const id = blobs.length
@@ -3938,6 +4241,10 @@ function segmentSceneSplat(hasGround = true) {
 						const nk = ((cur.kx + dx) * 2048 + (cur.kz + dz)) * 2048 + (cur.ky + dy)
 						const nb = voxels.get(nk)
 						if (nb && nb.blob < 0) {
+							if (!canFloodConnect(cur, nb)) {
+								colorCuts++
+								continue
+							}
 							nb.blob = id
 							stack.push(nk)
 						}
@@ -3946,6 +4253,7 @@ function segmentSceneSplat(hasGround = true) {
 			}
 		}
 	}
+	if (colorCuts) console.log(`[segment] color split → ${colorCuts} voxel link(s) cut (strength ${Math.round(COLOR_SPLIT * 100)}%, threshold ${COLOR_SPLIT_THRESHOLD.toFixed(3)})`)
 	// Bridge cutting: two SEPARATE objects often flood-fill into one blob through a thin
 	// bridge — a chain of grass tufts between them, a contact seam, one diagonal voxel
 	// kiss. Bridge voxels have few in-blob neighbours; real surfaces are dense sheets.
@@ -4149,6 +4457,104 @@ function segmentSceneSplat(hasGround = true) {
 			}
 		}
 		if (turfGaussians) console.log(`[segment] turf trim → ${turfGaussians} standing-terrain gaussian(s) returned to ground`)
+	}
+
+	// ---- Base detach -------------------------------------------------------------------
+	// Single-view splats often smear the base of vertical objects into the horizontal
+	// terrain. That creates a same-blob "skirt" that moves with trees/towers. Unlike
+	// colour splitting, this uses shape: tall columns prove object mass, while low
+	// neighbouring columns close to the local surface are terrain and should stay ground.
+	if (hasGround && bigBlobIds.length && segmentationTuning.baseDetachStrength > 0) {
+		const strength = clamp01(segmentationTuning.baseDetachStrength)
+		const detachHeight = segmentationTuning.baseDetachHeight
+		const detachRadius = Math.max(0, Math.round(segmentationTuning.baseDetachRadius))
+		const columnMinHeight = segmentationTuning.baseColumnMinHeight
+		const columnPad = lerp(0.45, 0.05, strength)
+		const lowPad = lerp(0.65, 0.12, strength)
+		const minLowPatch = Math.round(lerp(36, 4, strength))
+		const bigSet = new Set(bigBlobIds)
+		const colStats = new Map() // blobId -> Map(colKey -> { minY, maxY, voxs })
+		for (const v of voxels.values()) {
+			if (!bigSet.has(v.blob)) continue
+			let cols = colStats.get(v.blob)
+			if (!cols) colStats.set(v.blob, cols = new Map())
+			const key = v.kx * 4096 + v.kz
+			let c = cols.get(key)
+			if (!c) cols.set(key, c = { minY: Infinity, maxY: -Infinity, voxs: [] })
+			for (const gi of v.idx) {
+				if (pys[gi] < c.minY) c.minY = pys[gi]
+				if (pys[gi] > c.maxY) c.maxY = pys[gi]
+			}
+			c.voxs.push(v)
+		}
+		let detachedGaussians = 0
+		let detachedColumns = 0
+		for (const [blobId, cols] of colStats) {
+			const tallCols = new Set()
+			for (const [key, c] of cols) {
+				const kx = Math.floor(key / 4096), kz = key % 4096
+				const colX = minX + (kx + 0.5) * VOX
+				const colZ = minZ + (kz + 0.5) * VOX
+				const surface = surfLevel[cellOfXZ(colX, colZ)]
+				if (c.maxY - surface >= columnMinHeight && c.maxY - c.minY >= columnMinHeight * 0.7) tallCols.add(key)
+			}
+			if (!tallCols.size) continue
+			const nearTall = key => {
+				const kx = Math.floor(key / 4096), kz = key % 4096
+				for (let dx = -detachRadius; dx <= detachRadius; dx++) {
+					for (let dz = -detachRadius; dz <= detachRadius; dz++) {
+						if (Math.max(Math.abs(dx), Math.abs(dz)) > detachRadius) continue
+						if (tallCols.has((kx + dx) * 4096 + (kz + dz))) return true
+					}
+				}
+				return false
+			}
+			const lowSkirt = new Set()
+			for (const [key, c] of cols) {
+				if (tallCols.has(key) || !nearTall(key)) continue
+				const kx = Math.floor(key / 4096), kz = key % 4096
+				const colX = minX + (kx + 0.5) * VOX
+				const colZ = minZ + (kz + 0.5) * VOX
+				const surface = surfLevel[cellOfXZ(colX, colZ)]
+				if (c.maxY <= surface + detachHeight + lowPad && c.maxY - c.minY <= detachHeight + columnPad) lowSkirt.add(key)
+			}
+			const seen = new Set()
+			const finalDetach = new Set()
+			for (const seed of lowSkirt) {
+				if (seen.has(seed)) continue
+				const comp = []
+				const stack = [seed]
+				seen.add(seed)
+				while (stack.length) {
+					const cur = stack.pop()
+					comp.push(cur)
+					const kx = Math.floor(cur / 4096), kz = cur % 4096
+					for (let dx = -1; dx <= 1; dx++) {
+						for (let dz = -1; dz <= 1; dz++) {
+							const nk = (kx + dx) * 4096 + (kz + dz)
+							if (lowSkirt.has(nk) && !seen.has(nk)) { seen.add(nk); stack.push(nk) }
+						}
+					}
+				}
+				if (comp.length >= minLowPatch) for (const key of comp) finalDetach.add(key)
+			}
+			for (const key of finalDetach) {
+				const c = cols.get(key)
+				for (const v of c.voxs) {
+					for (const gi of v.idx) {
+						if (blobOf[gi] === blobId) {
+							blobOf[gi] = -1
+							detachedGaussians++
+						}
+					}
+					blobs[blobId].count -= v.idx.length
+					v.blob = -1
+				}
+				blobs[blobId].cols.delete(key)
+				detachedColumns++
+			}
+		}
+		if (detachedGaussians) console.log(`[segment] base detach → ${detachedGaussians} skirt gaussian(s) across ${detachedColumns} column(s) returned to ground`)
 	}
 
 	// ---- Blob ↔ guide-group matching --------------------------------------------------
@@ -5087,7 +5493,17 @@ async function generateWorld(prompt) {
 		const objectGroups = computeObjects(world.primitives)
 		const objectCount = objectGroups.length
 		const tCap = performance.now()
-		const capture = await captureWorld(renderer, scene, world, box, sceneSemanticImage ? objectGroups : null)
+		// Capture from the isometric corner NEAREST the user's current view, not the raw
+		// orbit angles: quarter-turn offsets keep the whole proven seating geometry intact
+		// (the yaw estimator's candidate set stays exact and fit.js's 90°/270° extent swap
+		// is exact, not approximate), while an arbitrary azimuth/elevation seeds Tripo with
+		// a viewpoint the seating pipeline can only approximate.
+		const QUARTER = Math.PI / 2
+		const viewAngles = {
+			theta: FRONT_THETA + Math.round((orbit.theta - FRONT_THETA) / QUARTER) * QUARTER,
+			phi: FRONT_PHI,
+		}
+		const capture = await captureWorld(renderer, scene, world, box, sceneSemanticImage ? objectGroups : null, viewAngles)
 		const captureMs = performance.now() - tCap
 
 		splatStore.clear()
@@ -5110,18 +5526,21 @@ async function generateWorld(prompt) {
 		// block-out footprint would stretch/compress every object along with the floor.
 		// Estimate every one-shot scene's quarter-turn from its content. The config yaw is
 		// only a fallback when a scene is too monochrome or symmetric to disambiguate.
-		const sceneYawDeg = await estimateSceneYaw(bytes, subjectMeshes, capture.guide)
-			?? (hasGround ? sceneFit.yawDeg : objectFit.yawDeg)
+		const captureYawDeg = captureProjectionBasis(capture.theta, capture.phi).yawOffsetDeg
+		const sceneEstimate = await estimateSceneYaw(bytes, subjectMeshes, capture.guide, capture)
+		const sceneYawDeg = sceneEstimate?.yawDeg ?? ((hasGround ? sceneFit.yawDeg : objectFit.yawDeg) + captureYawDeg)
+		const sceneMirrorZ = sceneEstimate?.mirrorZ ?? false
 		await seatSubject(bytes.slice(), box, "scene", subjectMeshes, {
 			kind: "scene",
 			yawTurns: OBJECT_YAW_TURNS,
 			yawDeg: sceneYawDeg,
+			mirrorZ: sceneMirrorZ,
 			yOffset: sceneFit.yOffset,
 			fillXZ: false,
 			colors: primitiveColors(subjectMeshes),
 		})
 		splatStore.set("scene", bytes)
-		sessionSubjects = [{ name: "scene", kind: "scene", plotId: null, yawTurns: OBJECT_YAW_TURNS, fitHeight: false, hasGround, yawDeg: sceneYawDeg }]
+		sessionSubjects = [{ name: "scene", kind: "scene", plotId: null, yawTurns: OBJECT_YAW_TURNS, fitHeight: false, hasGround, yawDeg: sceneYawDeg, mirrorZ: sceneMirrorZ, captureTheta: capture.theta, capturePhi: capture.phi }]
 		// Carve the one splat into per-object pieces so View can move them; a segmentation
 		// failure must never sink the (paid) generation — the monolith is a fine fallback.
 		try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment:", error) }
@@ -5175,6 +5594,7 @@ async function retuneCurrentSceneSegmentation() {
 			kind: "scene",
 			yawTurns: subject.yawTurns ?? OBJECT_YAW_TURNS,
 			yawDeg: Number.isFinite(subject.yawDeg) ? subject.yawDeg : fit.yawDeg,
+			mirrorZ: Boolean(subject.mirrorZ),
 			yOffset: sceneFit.yOffset,
 			fillXZ: false,
 			colors: primitiveColors(sourceMeshes),
@@ -5214,7 +5634,7 @@ function floorSeamClipBoxes(boxes) {
 	return boxes?.map(floorSeamBox) ?? null
 }
 
-async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, colors = null, plotId = null, clipBoxes = null, paletteStrength = null, paletteLightness = null, fileName = `${name}.splat` } = {}) {
+async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, colors = null, plotId = null, clipBoxes = null, paletteStrength = null, paletteLightness = null, mirrorZ = false, fileName = `${name}.splat` } = {}) {
 	const raw = new SplatMesh({ fileBytes: bytes, fileName })
 	await raw.initialized
 	const fit = fitSettingsFor(kind)
@@ -5235,6 +5655,7 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 	const fitted = await fitSplatToBox(raw, fitBox, {
 		yawTurns,
 		yawDeg,
+		mirrorZ,
 		yOffset,
 		fitHeight,
 		fillXZ: fillXZ || isFloor, // dedicated floor splats may fit X/Z exactly; scenes pass false to preserve proportions
@@ -6494,18 +6915,26 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 		const fit = fitSettingsFor(s.kind)
 		try {
 			let yawDeg = fit.yawDeg
+			let mirrorZ = false
 			if (s.kind === "scene") {
-				// Debug override: ?forceYaw=N seats a restored scene at exactly N degrees so
-				// yaw-estimator changes can be validated against a known-good pose for free.
-				const forcedYaw = new URLSearchParams(location.search).get("forceYaw")
+				// Debug overrides: ?forceYaw=N (+ optional ?forceMirror=1) seat a restored
+				// scene at exactly that pose so estimator changes can be validated for free.
+				const params = new URLSearchParams(location.search)
+				const forcedYaw = params.get("forceYaw")
 				if (forcedYaw != null && Number.isFinite(Number(forcedYaw))) {
 					yawDeg = Number(forcedYaw)
+					mirrorZ = params.get("forceMirror") === "1"
 				} else {
 					let guide = null
-					try { guide = (await captureWorld(renderer, scene, world, box)).guide }
+					const captureAngles = {
+						theta: Number.isFinite(s.captureTheta) ? s.captureTheta : FRONT_THETA,
+						phi: Number.isFinite(s.capturePhi) ? s.capturePhi : FRONT_PHI,
+					}
+					try { guide = (await captureWorld(renderer, scene, world, box, null, captureAngles)).guide }
 					catch (error) { console.warn("capture restored yaw guide:", error) }
-					yawDeg = await estimateSceneYaw(splatBytes, sourcePrimitives, guide)
-						?? (Number.isFinite(s.yawDeg) ? s.yawDeg : fit.yawDeg)
+					const estimate = await estimateSceneYaw(splatBytes, sourcePrimitives, guide, captureAngles)
+					yawDeg = estimate?.yawDeg ?? (Number.isFinite(s.yawDeg) ? s.yawDeg : fit.yawDeg)
+					mirrorZ = estimate?.mirrorZ ?? Boolean(s.mirrorZ)
 				}
 			}
 			const seated = await seatSubject(splatBytes, box, s.name, sourcePrimitives, {
@@ -6514,6 +6943,7 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 				// Re-estimate restored one-shot scenes so orientation fixes apply to existing
 				// paid generations. Stored/config yaw remains the ambiguity fallback.
 				yawDeg,
+				mirrorZ,
 				yOffset: fit.yOffset,
 				fitHeight: Boolean(s.fitHeight) && s.kind !== "scene",
 				// A scene's floor and objects are one cloud; keep a uniform fit on restore too.
@@ -6944,7 +7374,10 @@ document.addEventListener("keydown", event => {
 			world.resetGenerated()
 			setStatus("")
 		}
-		else if (uiTab === "view" && selectedSplatMesh) deselectSplat()
+		else if (uiTab === "view" && (selectedSplatMeshes.size || drag?.mode === "splat-lasso")) {
+			setViewLassoRectVisible(false)
+			deselectSplat()
+		}
 	}
 })
 

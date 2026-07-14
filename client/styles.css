@@ -174,8 +174,8 @@ body.tab-view .view-dock {
 	display: flex;
 }
 
-body.tab-view canvas.is-splat-move {
-	cursor: move;
+body.tab-view canvas.is-splat-lasso {
+	cursor: crosshair;
 }
 
 body.tab-view canvas.is-splat-scale {
@@ -184,6 +184,16 @@ body.tab-view canvas.is-splat-scale {
 
 body.tab-view canvas.is-splat-rotate {
 	cursor: grab;
+}
+
+.view-lasso-rect {
+	position: fixed;
+	z-index: 60;
+	pointer-events: none;
+	border: 1.5px solid #ffffff;
+	background: rgba(91, 110, 225, 0.16);
+	box-shadow: 0 0 0 1px rgba(91, 110, 225, 0.9);
+	display: none;
 }
 
 /* Draw tab: a full-screen, pannable sketch canvas — the faint grid marks 16x16 plots.

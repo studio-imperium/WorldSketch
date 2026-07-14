@@ -110,7 +110,7 @@ func callGenerate(base, uploadedPath string, image []byte, settings config.Tripo
 		"guidance_scale": atofDefault(settings.Guidance, 3),
 		"num_gaussians":  atoiDefault(settings.Gaussians, 262144),
 		"output_format":  format,
-		"preprocess":     true,
+		"preprocess":     false,
 	})
 	if err != nil {
 		return nil, err

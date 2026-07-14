@@ -423,7 +423,11 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	// underground reconstruction noise (worn paths sit lower than the grass around them).
 	const reliefDip = Math.max(0.05, opts.reliefDip ?? 0.35)
 	const yaw = yawDeg ? new THREE.Quaternion().setFromAxisAngle(UP, (yawDeg * Math.PI) / 180) : IDENTITY_QUAT
-	const transformMatrix = new THREE.Matrix4().compose(new THREE.Vector3(), yaw, new THREE.Vector3(sx, -sy, sz))
+	// Handedness correction: a reconstruction whose horizontal frame is MIRRORED relative
+	// to the capture can never be seated by yaw alone — negate Z (before the yaw) to flip
+	// it back. The covariance bake below uses the same linear map, so ellipsoids follow.
+	const mirrorZ = opts.mirrorZ ? -1 : 1
+	const transformMatrix = new THREE.Matrix4().compose(new THREE.Vector3(), yaw, new THREE.Vector3(sx, -sy, sz * mirrorZ))
 	const linear = matrix3FromMatrix4(transformMatrix)
 	const transformedOffset = new THREE.Vector3()
 	const insideClip = point => !clipBoxes || clipBoxes.some(b => b.containsPoint(point))
@@ -439,7 +443,7 @@ export async function fitSplatToBox(source, box, opts = {}) {
 			color.b = nb
 		}
 		transformedOffset
-			.set(sx * (center.x - centerX), -sy * center.y, sz * (center.z - centerZ))
+			.set(sx * (center.x - centerX), -sy * center.y, mirrorZ * sz * (center.z - centerZ))
 			.applyQuaternion(yaw)
 		const nextX = targetCenterX + transformedOffset.x
 		const nextY = posY + yOffset + transformedOffset.y
