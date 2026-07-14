@@ -50,8 +50,57 @@ export async function captureWorld(renderer, scene, world, box, objectGroups = n
 	// actual block boundaries explicit for the image model.
 	const theta = Number.isFinite(viewAngles?.theta) ? viewAngles.theta : ISO_THETA
 	const phi = Number.isFinite(viewAngles?.phi) ? viewAngles.phi : ISO_PHI
-	const capture = await captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box, { theta, phi }), false, true, objectGroups)
-	return { ...capture, theta, phi }
+	// Stroke the painted ground's ink boundary in white for the capture only: the image
+	// model follows a drawn line far better than prose, and without it the terrain outline
+	// kept getting simplified into tidy ovals. The live texture is restored afterwards.
+	const swapped = []
+	let outlined = null
+	if (floor.length && world.paint?.canvas && world.paint?.texture) {
+		outlined = new THREE.CanvasTexture(outlinedGroundCanvas(world.paint.canvas))
+		outlined.flipY = world.paint.texture.flipY
+		outlined.colorSpace = world.paint.texture.colorSpace
+		outlined.wrapS = world.paint.texture.wrapS
+		outlined.wrapT = world.paint.texture.wrapT
+		for (const mesh of floor) {
+			if (mesh.material?.map === world.paint.texture) {
+				swapped.push(mesh)
+				mesh.material.map = outlined
+				mesh.material.needsUpdate = true
+			}
+		}
+	}
+	try {
+		const capture = await captureSubject(renderer, scene, world, [...floor, ...world.primitives], isoCamera(box, { theta, phi }), false, true, objectGroups)
+		return { ...capture, theta, phi }
+	} finally {
+		for (const mesh of swapped) {
+			mesh.material.map = world.paint.texture
+			mesh.material.needsUpdate = true
+		}
+		outlined?.dispose()
+	}
+}
+
+// A copy of the paint canvas with the drawn ink's boundary stroked in white: a white
+// silhouette of the ink is stamped at eight offsets (a cheap dilation), then the real
+// painting is drawn back on top, leaving a crisp white rim exactly along the outline.
+function outlinedGroundCanvas(src) {
+	const out = document.createElement("canvas")
+	out.width = src.width
+	out.height = src.height
+	const ctx = out.getContext("2d")
+	const mask = document.createElement("canvas")
+	mask.width = src.width
+	mask.height = src.height
+	const mctx = mask.getContext("2d")
+	mctx.drawImage(src, 0, 0)
+	mctx.globalCompositeOperation = "source-in"
+	mctx.fillStyle = "#ffffff"
+	mctx.fillRect(0, 0, mask.width, mask.height)
+	const d = Math.max(4, Math.round(src.width / 256))
+	for (const [dx, dy] of [[d, 0], [-d, 0], [0, d], [0, -d], [d, d], [d, -d], [-d, d], [-d, -d]]) ctx.drawImage(mask, dx, dy)
+	ctx.drawImage(src, 0, 0)
+	return out
 }
 
 // Capture the WHOLE world in context (every block-out object + the painted floor) from

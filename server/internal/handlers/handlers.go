@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"os"
+	"path/filepath"
 	"worldsketch/server/internal/config"
 	"worldsketch/server/internal/httpx"
 	"worldsketch/server/internal/imagegen"
@@ -31,6 +33,50 @@ func Register(mux *http.ServeMux) {
 	mux.HandleFunc("/api/plan", Plan)
 	mux.HandleFunc("/api/plan-objects", PlanObjects)
 	mux.HandleFunc("/api/config", Config)
+	mux.HandleFunc("/api/scene-boxes", SceneBoxes)
+}
+
+// SceneBoxes returns Gemini-detected 2D object boxes over a generated scene image.
+// The result is cached beside the output (scene-boxes.json) so replays cost nothing.
+func SceneBoxes(w http.ResponseWriter, r *http.Request) {
+	index := strings.TrimSpace(r.URL.Query().Get("output"))
+	if index == "" || strings.ContainsAny(index, "/\\.") {
+		http.Error(w, "bad output index", http.StatusBadRequest)
+		return
+	}
+	dir := storage.OutputSubdir(index)
+	cache := filepath.Join(dir, "scene-boxes.json")
+	if data, err := os.ReadFile(cache); err == nil && json.Valid(data) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+		return
+	}
+	img, err := os.ReadFile(filepath.Join(dir, "scene-output.png"))
+	if err != nil {
+		http.Error(w, "no scene image for that output", http.StatusNotFound)
+		return
+	}
+	model := config.Env("WS_GEMINI_BOXES_MODEL", "gemini-2.5-flash")
+	tBoxes := time.Now()
+	raw, err := imagegen.GeminiText(prompts.SceneBoxes(), img, model, 0)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	raw = strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(strings.TrimSpace(raw), "```json"), "```"))
+	var boxes []map[string]any
+	if err := json.Unmarshal([]byte(raw), &boxes); err != nil {
+		log.Printf("scene-boxes: %v (raw: %.300s)", err, raw)
+		http.Error(w, "unparseable box response", http.StatusBadGateway)
+		return
+	}
+	data, _ := json.Marshal(boxes)
+	log.Printf("[timing] boxes    model=%s n=%d took=%s", model, len(boxes), time.Since(tBoxes).Round(time.Millisecond))
+	if err := os.WriteFile(cache, data, 0o644); err != nil {
+		log.Printf("scene-boxes cache: %v", err)
+	}
+	w.Header().Set("Content-Type", "application/json")
+	_, _ = w.Write(data)
 }
 
 func NewOutput(w http.ResponseWriter, r *http.Request) {

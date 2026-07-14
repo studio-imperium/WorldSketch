@@ -128,6 +128,10 @@ const segmentationTuneDefaults = {
 	minBlob: 200,
 	bridgeCut: 0.25,
 	colorSplit: 0.6,
+	terrainBias: 0.45,
+	skirtGuardMinRise: 4.2,
+	preCullIntensity: 1.0,
+	postCullIntensity: 1.0,
 	floorBand: 0.9,
 	baseDetachStrength: 0.55,
 	baseDetachHeight: 1.2,
@@ -135,6 +139,7 @@ const segmentationTuneDefaults = {
 	baseColumnMinHeight: 1.6,
 	wispAggression: 0.72,
 	detachedCullPct: 0.025,
+	backfillDensity: 10,
 	scarDilation: 1,
 	scarBaseHeight: 0.85,
 	scarBaseSurface: 1.1,
@@ -2121,6 +2126,18 @@ const splatRotQuat = new THREE.Quaternion()
 const splatDragPoint = new THREE.Vector3()
 let viewLassoRect = null
 
+// Gemini-detected 2D boxes over the generated scene image ({label, box_2d:[y0,x0,y1,x1]}
+// in 0-1000 image coords). Fetched once per generation, persisted with the build, and
+// used by segmentation as objectness evidence + a per-piece wisp clip.
+let sceneImageBoxes = null
+window.__wsSetImageBoxes = boxes => {
+	sceneImageBoxes = boxes
+	const subject = sessionSubjects.find(s => s.kind === "scene")
+	if (subject) subject.imageBoxes = boxes
+	scheduleSegmentationRetune()
+	return `image boxes set (${boxes?.length ?? 0})`
+}
+
 function ensureSplatProxies() {
 	for (const { mesh } of world.generated) {
 		// Uncertain/unmatched reconstruction material stays visible as scene context, but
@@ -2275,7 +2292,10 @@ function finishViewLasso() {
 	const lasso = { minX: x0, minY: y0, maxX: x1, maxY: y1 }
 	const meshes = []
 	for (const { mesh } of world.generated) {
-		if (mesh.userData.genKind === "remainder") continue
+		// Only OBJECT pieces are lassoable: the terrain (floor/scene-ground) and the
+		// static remainder span the whole scene, so any lasso would grab them and drag
+		// the ground along with the intended prop.
+		if (mesh.userData.genKind !== "object") continue
 		const rect = splatProxyScreenRect(mesh)
 		if (rect && rectsIntersect(lasso, rect)) meshes.push(mesh)
 	}
@@ -3753,13 +3773,18 @@ const segmentationTuneControls = [
 	{ group: "Grouping", key: "minBlob", label: "Min blob", min: 40, max: 1000, step: 20, format: v => `${Math.round(v)} pts` },
 	{ group: "Grouping", key: "bridgeCut", label: "Bridge cut", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
 	{ group: "Grouping", key: "colorSplit", label: "Color split", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Grouping", key: "terrainBias", label: "Terrain bias", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Ground Split", key: "skirtGuardMinRise", label: "Skirt guard height", min: 0, max: 8, step: 0.1, format: v => `${v.toFixed(1)}u` },
 	{ group: "Ground Split", key: "floorBand", label: "Floor band", min: 0.2, max: 1.8, step: 0.02, format: v => `${v.toFixed(2)}u` },
 	{ group: "Ground Split", key: "baseDetachStrength", label: "Base detach", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
 	{ group: "Ground Split", key: "baseDetachHeight", label: "Detach height", min: 0.2, max: 3.5, step: 0.05, format: v => `${v.toFixed(2)}u` },
 	{ group: "Ground Split", key: "baseDetachRadius", label: "Detach radius", min: 0, max: 5, step: 1, format: v => `${Math.round(v)} cell` + (Math.round(v) === 1 ? "" : "s") },
 	{ group: "Ground Split", key: "baseColumnMinHeight", label: "Column height", min: 0.4, max: 5, step: 0.05, format: v => `${v.toFixed(2)}u` },
+	{ group: "Cull Intensity", key: "preCullIntensity", label: "Pre-segmentation", min: 0, max: 2, step: 0.05, format: v => `${Math.round(v * 100)}%` },
+	{ group: "Cull Intensity", key: "postCullIntensity", label: "Post-segmentation", min: 0, max: 2, step: 0.05, format: v => `${Math.round(v * 100)}%` },
 	{ group: "Wisp Culling", key: "wispAggression", label: "Object/floor wisps", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
 	{ group: "Wisp Culling", key: "detachedCullPct", label: "Detached specks", min: 0, max: 0.12, step: 0.0025, format: v => `${(v * 100).toFixed(2)}%` },
+	{ group: "Scar Patching", key: "backfillDensity", label: "Backfill density", min: 0, max: 20, step: 1, format: v => `${Math.round(v)} pts` },
 	{ group: "Scar Patching", key: "scarFill", label: "Fill strength", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
 	{ group: "Scar Patching", key: "scarDilation", label: "Patch cells", min: 1, max: 6, step: 1, format: v => `${Math.round(v)}×${Math.round(v)}` },
 	{ group: "Scar Patching", key: "scarBaseHeight", label: "Base height", min: 0.1, max: 3.0, step: 0.05, format: v => `${v.toFixed(2)}u` },
@@ -4016,11 +4041,23 @@ function paintedGroundSampler() {
 	let dominant = -1, dominantCount = 0, painted = 0
 	for (const [k, c] of bins) { painted += c; if (c > dominantCount) { dominantCount = c; dominant = k } }
 	if (painted - dominantCount < painted * 0.04) return null
-	let waterCells = 0
-	for (let o = 0; o < data.length; o += 4) {
-		if (data[o + 3] > 32 && data[o + 2] > data[o] + 20 && data[o + 2] >= data[o + 1]) waterCells++
-	}
+	let waterCells = 0, waterSumX = 0, waterSumZ = 0
 	const half = GROUND_SHEET_SIZE / 2
+	for (let o = 0; o < data.length; o += 4) {
+		if (data[o + 3] > 32 && data[o + 2] > data[o] + 20 && data[o + 2] >= data[o + 1]) {
+			waterCells++
+			const px = (o / 4) % S, pz = Math.floor(o / 4 / S)
+			waterSumX += (px + 0.5) / S * GROUND_SHEET_SIZE - half
+			waterSumZ += (pz + 0.5) / S * GROUND_SHEET_SIZE - half
+		}
+	}
+	const waterCenter = waterCells ? [waterSumX / waterCells, waterSumZ / waterCells] : null
+	const binColor = k => [((k >> 6) & 7) * 32 + 16, ((k >> 3) & 7) * 32 + 16, (k & 7) * 32 + 16]
+	const dominantColor = dominant < 0 ? null : binColor(dominant)
+	// Every painted colour covering >3% of the ink (base terrain, paths, dirt patches):
+	// splat material in these hues is GROUND, so guide-block colours matching them make
+	// unreliable anchors (a brown stump anchor pulled toward a brown painted path).
+	const prominentColors = [...bins.entries()].filter(([, c]) => c > painted * 0.03).map(([k]) => binColor(k))
 	const cellAt = (wx, wz) => {
 		const i = Math.floor(((wx + half) / GROUND_SHEET_SIZE) * S)
 		const j = Math.floor(((wz + half) / GROUND_SHEET_SIZE) * S)
@@ -4030,6 +4067,9 @@ function paintedGroundSampler() {
 	}
 	return {
 		waterCells,
+		waterCenter,
+		dominantColor,
+		prominentColors,
 		sample(wx, wz) {
 			const o = cellAt(wx, wz)
 			if (o < 0) return null
@@ -4129,7 +4169,7 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 	// is world-inverted — the same flip fit.js bakes with its negative Y scale).
 	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
 	const count = bytes.length >> 5
-	const stride = Math.max(1, Math.floor(count / 20000))
+	const stride = Math.max(1, Math.floor(count / 40000))
 	const pts = []
 	for (let i = 0; i < count; i += stride) {
 		const o = i << 5
@@ -4155,21 +4195,94 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 	// and grass share warm chroma and mislead. (Run 0158: Tripo returned a MIRRORED
 	// reconstruction — no yaw matched until the water term exposed the flip.)
 	const groundSampler = world.groundInkBounds() ? paintedGroundSampler() : null
-	let groundGeom = null
+	let mapGeom = null // the fit's raw→world mapping (uniform scale, mirror-then-yaw about the target centre)
+	let groundGeom = null // water term inputs
+	let anchorClumps = null // world-space colour-anchor term inputs
+	const FTP_G = 64 // footprint-registration grid resolution
+	let inkGrid = null, inkCells = 0, floorPts = [], footprintUsable = false
 	if (groundSampler) {
 		const xs = pts.map(p => p[0]).sort((a, b) => a - b)
 		const zs = pts.map(p => p[2]).sort((a, b) => a - b)
 		const gq = (arr, f) => arr[Math.min(arr.length - 1, (f * (arr.length - 1)) | 0)]
 		const x0 = gq(xs, 0.003), x1 = gq(xs, 0.997), z0 = gq(zs, 0.003), z1 = gq(zs, 0.997)
 		const target = wholeSceneBox()
-		const coolPts = pts.filter(([, y, , r, g, b]) => y <= aboveY && r + g + b > 90 && b > r + 8 && g >= r)
-		groundGeom = coolPts.length >= 150 && groundSampler.waterCells >= 100 ? {
+		mapGeom = {
 			cx: (x0 + x1) / 2, cz: (z0 + z1) / 2,
 			spanX: Math.max(1e-6, x1 - x0), spanZ: Math.max(1e-6, z1 - z0),
 			tcx: (target.min.x + target.max.x) / 2, tcz: (target.min.z + target.max.z) / 2,
 			tSpanX: target.max.x - target.min.x, tSpanZ: target.max.z - target.min.z,
-			coolPts,
-		} : null
+		}
+		// Footprint registration: the drawn ground outline is the strongest orientation
+		// signal in the scene (the new prompt makes the artwork reproduce it faithfully,
+		// and an irregular island is rotation- AND mirror-sensitive everywhere, unlike a
+		// central pond, which carries no rotation signal at all — run 0170 seated ~25° off
+		// on exactly that failure). Rasterize the painted ink over the target box and
+		// score each candidate by floor-silhouette IoU against it.
+		inkGrid = new Uint8Array(FTP_G * FTP_G)
+		{
+			const padX = mapGeom.tSpanX * 0.05, padZ = mapGeom.tSpanZ * 0.05
+			mapGeom.fx0 = mapGeom.tcx - mapGeom.tSpanX / 2 - padX
+			mapGeom.fz0 = mapGeom.tcz - mapGeom.tSpanZ / 2 - padZ
+			mapGeom.fw = mapGeom.tSpanX + 2 * padX
+			mapGeom.fh = mapGeom.tSpanZ + 2 * padZ
+			for (let gz = 0; gz < FTP_G; gz++) {
+				for (let gx = 0; gx < FTP_G; gx++) {
+					const wx = mapGeom.fx0 + (gx + 0.5) / FTP_G * mapGeom.fw
+					const wz = mapGeom.fz0 + (gz + 0.5) / FTP_G * mapGeom.fh
+					if (groundSampler.sample(wx, wz)) { inkGrid[gz * FTP_G + gx] = 1; inkCells++ }
+				}
+			}
+		}
+		{
+			const all = pts.filter(([, y]) => y <= aboveY)
+			const step = Math.max(1, Math.floor(all.length / 4000))
+			for (let i = 0; i < all.length; i += step) floorPts.push(all[i])
+		}
+		footprintUsable = inkCells >= 80 && floorPts.length >= 500
+		const coolPts = pts.filter(([, y, , r, g, b]) => y <= aboveY && r + g + b > 90 && b > r + 8 && g >= r)
+		if (coolPts.length >= 150 && groundSampler.waterCells >= 100) {
+			let mx = 0, mz2 = 0
+			for (const [x, , z] of coolPts) { mx += x; mz2 += z }
+			groundGeom = { coolPts, coolMean: [mx / coolPts.length, mz2 / coolPts.length] }
+		}
+		// Colour-anchor clumps: the splat's DISTINCTIVE colour masses (a red mushroom cap,
+		// a yellow flower) must land near the same-coloured guide blocks. This survives
+		// scenes whose pond is too small for placement drift (run 0163: water term 0.00 at
+		// every yaw, blocks/iou saturated, seating flipped). Colours near the painted
+		// terrain's dominant chroma (bush green ≈ grass) carry no signal and are skipped.
+		const paintedChromas = (groundSampler.prominentColors ?? []).map(c => unitChroma(...c))
+		const matchesPainted = cc => paintedChromas.some(pcc => (cc[3] < 12) === (pcc[3] < 12) && (cc[3] < 12 || cc[0] * pcc[0] + cc[1] * pcc[1] + cc[2] * pcc[2] > 0.85))
+		const classes = [] // { dir:[3]|null(neutral), targets:[[x,z]], pts:[[x,z]] }
+		for (const mesh of meshes) {
+			const hex = mesh.userData.baseColor ?? mesh.material.color.getHexString()
+			const cc = unitChroma(parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16))
+			const neutral = cc[3] < 12 // grey blocks anchor on NEUTRALITY instead of a chroma direction
+			if (!neutral && cc[3] < 25) continue // weak chroma: neither a colour nor a grey landmark
+			if (matchesPainted(cc)) continue // ≈ a painted terrain colour — ground would pollute it
+			mesh.updateWorldMatrix(true, false)
+			const wp = new THREE.Vector3().setFromMatrixPosition(mesh.matrixWorld)
+			const existing = classes.find(k => (k.dir == null) === neutral && (neutral || k.dir[0] * cc[0] + k.dir[1] * cc[1] + k.dir[2] * cc[2] > 0.9))
+			if (existing) existing.targets.push([wp.x, wp.z])
+			else classes.push({ dir: neutral ? null : [cc[0], cc[1], cc[2]], targets: [[wp.x, wp.z]], pts: [] })
+		}
+		for (const [x, y, z, r, g, b] of pts) {
+			if (y <= aboveY || r + g + b < 105) continue // floor material and shadows carry no anchor evidence
+			const pc = unitChroma(r, g, b)
+			for (const k of classes) {
+				if (k.dir == null
+					? pc[3] < 18 && (r + g + b) / 3 > 80 && (r + g + b) / 3 < 215 // neutral: mid-bright grey
+					: pc[3] >= 12 && pc[0] * k.dir[0] + pc[1] * k.dir[1] + pc[2] * k.dir[2] > 0.8) { k.pts.push([x, z]); break }
+			}
+		}
+		const usable = classes.filter(k => k.pts.length >= 100)
+		for (const k of usable) {
+			// Component-wise median: robust against a minority of stray same-hue points.
+			const xs2 = k.pts.map(p => p[0]).sort((a, b) => a - b)
+			const zs2 = k.pts.map(p => p[1]).sort((a, b) => a - b)
+			k.median = [xs2[xs2.length >> 1], zs2[zs2.length >> 1]]
+			k.weight = Math.min(1, k.pts.length / 600)
+		}
+		if (usable.length) anchorClumps = usable
 	}
 
 	const baseCandidates = [0, 90, 180, 270]
@@ -4181,13 +4294,13 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 		...baseCandidates,
 		...baseCandidates.map(yaw => yaw + offset),
 		...baseCandidates.map(yaw => yaw - offset),
-		...(groundGeom ? Array.from({ length: 72 }, (_, i) => i * 5) : []),
+		...(groundGeom || anchorClumps ? Array.from({ length: 72 }, (_, i) => i * 5) : []),
 	].map(yaw => Math.round((((yaw % 360) + 360) % 360) * 1000) / 1000))]
 	// Handedness is only decidable with ground evidence; a mirrored candidate must beat
 	// the best regular one by a real margin before we accept the flip.
-	const mirrorCandidates = groundGeom ? [false, true] : [false]
+	const mirrorCandidates = groundGeom || anchorClumps ? [false, true] : [false]
 	let bestYaw = null, bestMirror = false, bestScore = -Infinity
-	const scores = []
+	const candidatesOut = []
 	for (const mirror of mirrorCandidates) {
 	for (const yaw of yawCandidates) {
 		const th = (yaw * Math.PI) / 180, co = Math.cos(th), si = Math.sin(th)
@@ -4249,16 +4362,59 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 		// seating lands on painted water. Sharp peak at the true (yaw, mirror); collapses
 		// at every wrong one.
 		let groundHit = 0, groundTot = 0
-		if (groundGeom) {
+		let anchorWorldTerm = null
+		let waterProx = null
+		let footprintIoU = null
+		if (mapGeom) {
 			const swap = Math.abs(Math.round(yaw / 90)) % 2
-			const gs = 0.5 * ((swap ? groundGeom.tSpanZ : groundGeom.tSpanX) / groundGeom.spanX
-				+ (swap ? groundGeom.tSpanX : groundGeom.tSpanZ) / groundGeom.spanZ)
-			for (const [x, , z] of groundGeom.coolPts) {
-				const dx = gs * (x - groundGeom.cx), dz = mz * gs * (z - groundGeom.cz)
-				const water = groundSampler.isWater(groundGeom.tcx + dx * co + dz * si, groundGeom.tcz - dx * si + dz * co)
-				if (water == null) continue
-				groundTot++
-				if (water) groundHit++
+			const gs = 0.5 * ((swap ? mapGeom.tSpanZ : mapGeom.tSpanX) / mapGeom.spanX
+				+ (swap ? mapGeom.tSpanX : mapGeom.tSpanZ) / mapGeom.spanZ)
+			const toWorld = (x, z) => {
+				const dx = gs * (x - mapGeom.cx), dz = mz * gs * (z - mapGeom.cz)
+				return [mapGeom.tcx + dx * co + dz * si, mapGeom.tcz - dx * si + dz * co]
+			}
+			if (groundGeom) {
+				for (const [x, , z] of groundGeom.coolPts) {
+					const [wx, wz] = toWorld(x, z)
+					const water = groundSampler.isWater(wx, wz)
+					if (water == null) continue
+					groundTot++
+					if (water) groundHit++
+				}
+			}
+			// Small ponds drift past their own radius (run 0163: overlap 0.00 at EVERY
+			// yaw), so back the overlap up with centroid proximity — it degrades smoothly
+			// instead of cliffing to zero.
+			if (groundGeom && groundSampler.waterCenter) {
+				const [wx, wz] = toWorld(groundGeom.coolMean[0], groundGeom.coolMean[1])
+				const d = Math.hypot(wx - groundSampler.waterCenter[0], wz - groundSampler.waterCenter[1])
+				waterProx = Math.max(0, 1 - d / (0.3 * Math.max(mapGeom.tSpanX, mapGeom.tSpanZ)))
+			}
+			if (footprintUsable) {
+				const occ = new Uint8Array(FTP_G * FTP_G)
+				for (const [x, , z] of floorPts) {
+					const [wx, wz] = toWorld(x, z)
+					const gx = Math.floor((wx - mapGeom.fx0) / mapGeom.fw * FTP_G)
+					const gz = Math.floor((wz - mapGeom.fz0) / mapGeom.fh * FTP_G)
+					if (gx >= 0 && gx < FTP_G && gz >= 0 && gz < FTP_G) occ[gz * FTP_G + gx] = 1
+				}
+				let inter = 0, occCells = 0
+				for (let c = 0; c < FTP_G * FTP_G; c++) {
+					if (occ[c]) { occCells++; if (inkGrid[c]) inter++ }
+				}
+				footprintIoU = inter / Math.max(1, inkCells + occCells - inter)
+			}
+			if (anchorClumps) {
+				const reach = 0.4 * Math.max(mapGeom.tSpanX, mapGeom.tSpanZ)
+				let sum = 0, wsum = 0
+				for (const k of anchorClumps) {
+					const [wx, wz] = toWorld(k.median[0], k.median[1])
+					let best = Infinity
+					for (const [tx, tz] of k.targets) best = Math.min(best, Math.hypot(wx - tx, wz - tz))
+					sum += k.weight * Math.max(0, 1 - best / reach)
+					wsum += k.weight
+				}
+				if (wsum > 0) anchorWorldTerm = sum / wsum
 			}
 		}
 		let inter = 0
@@ -4283,16 +4439,29 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 		// The water term outweighs block coverage when there is enough painted-water
 		// evidence: coverage saturates on scenes with one large object (a canopy covers
 		// most rects at EVERY yaw), while landed-on-water cannot be impersonated.
-		const groundFrac = groundTot >= 100 ? groundHit / groundTot : null
+		const overlapFrac = groundTot >= 100 ? groundHit / groundTot : null
+		const groundFrac = overlapFrac == null && waterProx == null ? null : Math.max(overlapFrac ?? 0, 0.8 * (waterProx ?? 0))
 		const groundTermScore = groundFrac == null ? 0 : 2.5 * normRects.length * groundFrac
+		const anchorTermScore = anchorWorldTerm == null ? 0 : 1.5 * normRects.length * anchorWorldTerm
 		// A mirrored seating is exotic; demand a decisive margin before accepting it.
-		const score = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0) + groundTermScore - (mirror ? 0.06 * normRects.length : 0)
-		scores.push(`${mirror ? "M" : ""}${yaw}°:${score.toFixed(2)}(blk ${covered}/${normRects.length} iou ${iou.toFixed(2)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(2) : "—"} wat ${groundFrac == null ? "—" : `${groundFrac.toFixed(2)}×${groundTot}`})`)
-		if (score > bestScore) { bestScore = score; bestYaw = yaw; bestMirror = mirror }
+		const baseScore = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0) + groundTermScore + anchorTermScore - (mirror ? 0.06 * normRects.length : 0)
+		candidatesOut.push({ yaw, mirror, baseScore, ftp: footprintIoU, dbg: `${mirror ? "M" : ""}${yaw}°(blk ${covered}/${normRects.length} iou ${iou.toFixed(2)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(2) : "—"} wat ${groundFrac == null ? "—" : groundFrac.toFixed(2)} anc ${anchorWorldTerm == null ? "—" : anchorWorldTerm.toFixed(2)} ftp ${footprintIoU == null ? "—" : footprintIoU.toFixed(2)})` })
 	}
 	}
-	const top = [...scores].sort((a, b) => Number(b.split(":")[1].split("(")[0]) - Number(a.split(":")[1].split("(")[0])).slice(0, 8)
-	console.log(`[fit] scene yaw estimate → ${bestMirror ? "MIRROR+" : ""}${bestYaw}° over ${scores.length} candidates (top: ${top.join(" ")})`)
+	// Footprint IoU carries the drawn ground's outline — the densest orientation signal —
+	// but its ABSOLUTE spread is small (fit overhang + haze flatten it), so min-max
+	// normalize it across the sweep before weighting: the candidate the outline prefers
+	// must win against saturated block/iou terms (run 0171: outline said 315°, blocks 40°).
+	const ftpVals = candidatesOut.filter(c => c.ftp != null).map(c => c.ftp)
+	const ftpMin = Math.min(...ftpVals), ftpMax = Math.max(...ftpVals)
+	for (const c of candidatesOut) {
+		const ftpNorm = c.ftp != null && ftpMax > ftpMin ? (c.ftp - ftpMin) / (ftpMax - ftpMin) : 0
+		c.score = c.baseScore + 1.5 * normRects.length * ftpNorm
+		if (c.score > bestScore) { bestScore = c.score; bestYaw = c.yaw; bestMirror = c.mirror }
+	}
+	const top = [...candidatesOut].sort((a, b) => b.score - a.score).slice(0, 8).map(c => `${c.score.toFixed(1)}:${c.dbg}`)
+	console.log(`[fit] scene yaw estimate → ${bestMirror ? "MIRROR+" : ""}${bestYaw}° over ${candidatesOut.length} candidates (top: ${top.join(" ")})`)
+	window.__wsLastYaw = { yawDeg: bestYaw, mirrorZ: bestMirror, top: top.slice(0, 4) }
 	return { yawDeg: bestYaw, mirrorZ: bestMirror }
 }
 
@@ -4365,11 +4534,18 @@ function segmentSceneSplat(hasGround = true) {
 	const VOX_TARGET_CELLS = segmentationTuning.voxelCells
 	const VOX_MIN = 0.01
 	const VOX_MAX = 0.25
-	const MIN_BLOB = segmentationTuning.minBlob // smaller blobs (grass tufts) fold back into the ground
+	// Master culling intensities (100% = the tuned defaults). PRE scales the stages that
+	// fold raw material into the ground BEFORE objects are decided (tuft folding, turf
+	// trim, base detach, image-box gate); POST scales the strippers that clean pieces
+	// AFTER segmentation (skirt guard band, skin cull band, wisp prune, speck cull,
+	// image-box clip tightness).
+	const PRE_CULL = Math.max(0, segmentationTuning.preCullIntensity ?? 1)
+	const POST_CULL = Math.max(0, segmentationTuning.postCullIntensity ?? 1)
+	const MIN_BLOB = Math.max(40, segmentationTuning.minBlob * PRE_CULL) // smaller blobs (grass tufts) fold back into the ground
 	const ERODE = 2 // floor-map min-filter radius in cells; raise for very wide flat-bottomed objects faking an elevated floor
 	const SKIN_FLATNESS = 0.45 // pancake test: thinnest axis under this fraction of the median axis
 	const SKIN_UPRIGHT = 0.75 // ...and lying flat (|vertical component of thin axis| above this) → ground skin, stays behind
-	const SKIN_BAND_PAD = 0.4 // how far above FLOOR_BAND the skin cull still applies
+	const SKIN_BAND_PAD = 0.4 * POST_CULL // how far above FLOOR_BAND the skin cull still applies
 	const BRIDGE_MIN_NEIGHBORS = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 4) // bridge cutting: higher splits more thin links
 	const BRIDGE_MIN_DENSITY = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 8) // higher peels sparse bridges more aggressively
 	const CORE_MIN_VOXELS = Math.round(30 + clamp01(segmentationTuning.bridgeCut) * 120) // a peeled component must be substantial before it can split a blob
@@ -4405,6 +4581,53 @@ function segmentSceneSplat(hasGround = true) {
 	const spanY = Math.max(1e-3, maxY - minY)
 	const spanZ = Math.max(1e-3, maxZ - minZ)
 	const VOX = Math.max(VOX_MIN, Math.min(VOX_MAX, Math.max(spanX, spanY, spanZ) / VOX_TARGET_CELLS))
+
+	// ---- Image-box projection (AI-assisted evidence) -----------------------------------
+	// Project every seated gaussian into the generated image's frame (the capture ortho
+	// camera is fully known: stored capture angles + the wholeSceneBox framing), so
+	// Gemini's detected object boxes become usable per-gaussian evidence: material inside
+	// an object's box is that object; material outside EVERY box is haze/wisp. Boxes are
+	// content-aligned (detected on the OUTPUT image), so image-model placement drift is
+	// irrelevant — unlike the abandoned block-mask projection.
+	let imgU = null, imgV = null // 0-1000 image coords per gaussian
+	let imageObjectBoxes = null, imageTerrainBox = null, imageFeatureBoxes = []
+	if (sceneImageBoxes?.length) {
+		const subject = sessionSubjects.find(s => s.kind === "scene")
+		const basis = captureProjectionBasis(
+			Number.isFinite(subject?.captureTheta) ? subject.captureTheta : FRONT_THETA,
+			Number.isFinite(subject?.capturePhi) ? subject.capturePhi : FRONT_PHI,
+		)
+		const frameBox = wholeSceneBox()
+		const c = frameBox.getCenter(new THREE.Vector3())
+		const size = frameBox.getSize(new THREE.Vector3())
+		const half = Math.max(0.3, 0.5 * Math.hypot(size.x, size.y, size.z)) * 1.12
+		const uc = c.x * basis.right[0] + c.y * basis.right[1] + c.z * basis.right[2]
+		const vc = c.x * basis.up[0] + c.y * basis.up[1] + c.z * basis.up[2]
+		imgU = new Float32Array(n)
+		imgV = new Float32Array(n)
+		for (let i = 0; i < n; i++) {
+			const u = pxs[i] * basis.right[0] + pys[i] * basis.right[1] + pzs[i] * basis.right[2]
+			const v = pxs[i] * basis.up[0] + pys[i] * basis.up[1] + pzs[i] * basis.up[2]
+			imgU[i] = ((u - uc) / (2 * half) + 0.5) * 1000
+			imgV[i] = (1 - ((v - vc) / (2 * half) + 0.5)) * 1000
+		}
+		// Ground features (pond, paths) are part of the terrain even when the detector
+		// boxes them; only true props count as objectness evidence.
+		const groundish = /terrain|pond|water|lake|path|road|shadow|ground/
+		imageObjectBoxes = sceneImageBoxes.filter(b => Array.isArray(b.box_2d) && !groundish.test((b.label ?? "").toLowerCase()))
+		imageTerrainBox = sceneImageBoxes.find(b => (b.label ?? "").toLowerCase() === "terrain" && Array.isArray(b.box_2d))?.box_2d ?? null
+		imageFeatureBoxes = sceneImageBoxes.filter(b => Array.isArray(b.box_2d) && /pond|water|lake|puddle|path|road/.test((b.label ?? "").toLowerCase())).map(b => b.box_2d)
+		console.log(`[segment] image boxes → ${imageObjectBoxes.length} object box(es)${imageTerrainBox ? " + terrain" : ""} projected onto ${n} gaussians`)
+	}
+	const IMG_BOX_PAD = 40 // 0-1000 units of slack for fit/composition misalignment
+	const inImageBox = (i, box, pad = IMG_BOX_PAD) =>
+		imgV[i] >= box[0] - pad && imgU[i] >= box[1] - pad && imgV[i] <= box[2] + pad && imgU[i] <= box[3] + pad
+	const imageObjectness = indices => {
+		if (!imageObjectBoxes) return null
+		let inBox = 0
+		for (const i of indices) if (imageObjectBoxes.some(b => inImageBox(i, b.box_2d))) inBox++
+		return inBox / Math.max(1, indices.length)
+	}
 
 	// Local floor height map: per-cell low percentile of gaussian heights. A MAP, not a
 	// single plane — the drawn ground has real relief. Sparse cells inherit the median.
@@ -4680,8 +4903,8 @@ function segmentSceneSplat(hasGround = true) {
 		// small groups. 1.0/1.2 keeps every object assignment correct on all regression
 		// scenes at the cost of a moderate grass skirt on objects standing in lumpy
 		// terrain. Correct identity wins.
-		const TURF_SPAN = 1.0 // thinner vertical extent than any believable object wall
-		const TURF_TOP = 1.2 // ...and no higher than this above the raw local surface
+		const TURF_SPAN = 1.0 * PRE_CULL // thinner vertical extent than any believable object wall
+		const TURF_TOP = 1.2 * PRE_CULL // ...and no higher than this above the raw local surface
 		// Extra safety for squat isolated objects: turf patches smaller than this many
 		// connected columns are left with their blob.
 		const MIN_TURF_PATCH = 25
@@ -4764,7 +4987,7 @@ function segmentSceneSplat(hasGround = true) {
 	// colour splitting, this uses shape: tall columns prove object mass, while low
 	// neighbouring columns close to the local surface are terrain and should stay ground.
 	if (hasGround && bigBlobIds.length && segmentationTuning.baseDetachStrength > 0) {
-		const strength = clamp01(segmentationTuning.baseDetachStrength)
+		const strength = clamp01(segmentationTuning.baseDetachStrength * PRE_CULL)
 		const detachHeight = segmentationTuning.baseDetachHeight
 		const detachRadius = Math.max(0, Math.round(segmentationTuning.baseDetachRadius))
 		const columnMinHeight = segmentationTuning.baseColumnMinHeight
@@ -4923,18 +5146,48 @@ function segmentSceneSplat(hasGround = true) {
 			}
 		}
 		for (const s of stats.values()) { s.cx /= Math.max(1, s.n); s.cz /= Math.max(1, s.n) }
-		const terrainBlobIds = new Set()
+		// Surface-hugging blobs are NOT excluded from matching any more: a squat bush/rock
+		// is geometrically indistinguishable from a mound remnant, and the old hard
+		// prefilter silently ate real squat props (runs 0158–0162: every unmatched group
+		// traced back to it). Instead each blob carries a continuous "terrainish" score:
+		// matching costs extra (a mound must EARN a group on position+size+mass+palette),
+		// unclaimed terrainish blobs fold into ground with no dropped-blob penalty (a mound
+		// costs nothing to leave), and everything else behaves exactly as before.
+		const terrainish = new Map()
 		if (hasGround) {
 			for (const id of bigBlobIds) {
 				const s = stats.get(id)
-				const height = s.maxY - s.minY
 				const near = s.nearSurf / Math.max(1, s.n)
 				const elevated = s.aboveSurf / Math.max(1, s.n)
-				if ((near > 0.82 && elevated < 0.2) || (near > 0.6 && elevated < 0.12 && height < 2.2)) terrainBlobIds.add(id)
+				const t = Math.min(1, Math.max(0, (near - 0.55) / 0.3)) * Math.min(1, Math.max(0, (0.22 - elevated) / 0.22))
+				terrainish.set(id, t)
 			}
-			if (terrainBlobIds.size) console.log(`[segment] terrain prefilter → ${terrainBlobIds.size} surface-hugging blob(s) folded into ground before matching`)
 		}
-		const matchBlobIds = bigBlobIds.filter(id => !terrainBlobIds.has(id))
+		const hardTerrain = id => {
+			if (!hasGround) return false
+			const s = stats.get(id)
+			const height = s.maxY - s.minY
+			const near = s.nearSurf / Math.max(1, s.n)
+			const elevated = s.aboveSurf / Math.max(1, s.n)
+			return (near > 0.82 && elevated < 0.2) || (near > 0.6 && elevated < 0.12 && height < 2.2)
+		}
+		const TERRAIN_BIAS = clamp01(segmentationTuning.terrainBias ?? 0.45)
+		const matchBlobIds = [...bigBlobIds]
+		const terrainBlobIds = new Set() // filled AFTER assignment with unclaimed terrainish blobs
+		// Per-blob image objectness: fraction of the blob that projects inside ANY detected
+		// object box. A dune mound impersonating a shrub projects onto empty sand (run 0170:
+		// both "claimed shrubs" scored 0%) — it must not win a group over paying this cost.
+		const boxObjness = new Map()
+		if (imageObjectBoxes?.length && imgU) {
+			const counts = new Map(matchBlobIds.map(id => [id, [0, 0]]))
+			for (let i = 0; i < n; i++) {
+				const c = counts.get(blobOf[i])
+				if (!c) continue
+				c[1]++
+				if (imageObjectBoxes.some(b => inImageBox(i, b.box_2d))) c[0]++
+			}
+			for (const [id, [inBox, tot]] of counts) boxObjness.set(id, inBox / Math.max(1, tot))
+		}
 
 		// GLOBALLY optimal one-to-one assignment (branch & bound over the few groups).
 		// Greedy failed in practice: a drifted tent sitting where the tree's cluster was
@@ -4992,7 +5245,9 @@ function segmentSceneSplat(hasGround = true) {
 					// invented (a glowing magic wisp) — it must not impersonate a real object.
 					// A group that genuinely asked for a saturated colour keeps its claim.
 					const hallucTerm = meanChroma > 70 && paletteAffinity(g.palette, mr, mg, mb) < 0.5 ? 0.5 : 0
-					out.set(`${id}:${g.gi}`, dxz * 1.0 + sizeTerm * 0.3 + massTerm * 0.3 + colourTerm * 0.8 + hallucTerm)
+					const terrainTerm = (terrainish.get(id) ?? 0) * TERRAIN_BIAS
+					const boxTerm = boxObjness.has(id) ? 0.8 * (1 - boxObjness.get(id)) : 0
+					out.set(`${id}:${g.gi}`, dxz * 1.0 + sizeTerm * 0.3 + massTerm * 0.3 + colourTerm * 0.8 + hallucTerm + terrainTerm + boxTerm)
 				}
 			}
 			return out
@@ -5008,7 +5263,7 @@ function segmentSceneSplat(hasGround = true) {
 			for (const id of matchBlobIds) {
 				const s = stats.get(id)
 				const cs = colSum.get(id).map(v => (v / Math.max(1, s.n)) | 0)
-				console.log(`[segment]   blob ${id}: ${s.n} pts @ (${s.cx.toFixed(1)}, ${s.cz.toFixed(1)}) h ${(s.maxY - s.minY).toFixed(1)} rgb(${cs.join(",")}) | ${groups.map(g => `g${g.gi + 1}:${costOf.get(`${id}:${g.gi}`).toFixed(2)}`).join(" ")}`)
+				console.log(`[segment]   blob ${id}: ${s.n} pts @ (${s.cx.toFixed(1)}, ${s.cz.toFixed(1)}) h ${(s.maxY - s.minY).toFixed(1)} rgb(${cs.join(",")})${boxObjness.has(id) ? ` obj ${Math.round(boxObjness.get(id) * 100)}%` : ""} | ${groups.map(g => `g${g.gi + 1}:${costOf.get(`${id}:${g.gi}`).toFixed(2)}`).join(" ")}`)
 			}
 		}
 		// A large content blob that NO assignment explains is expensive: dumping a whole
@@ -5022,7 +5277,7 @@ function segmentSceneSplat(hasGround = true) {
 		// groups — but short wide objects (a rock) hug the contaminated raw floor just
 		// as much, lost their protection, and the 4-object regression scene scrambled.
 		// Keep the penalty purely size-based until a signal separates rocks from mounds.
-		const droppedPenalty = id => 0.6 * Math.min(1, stats.get(id).n / Math.max(1, 0.04 * n))
+		const droppedPenalty = id => hardTerrain(id) ? 0 : 0.6 * Math.min(1, stats.get(id).n / Math.max(1, 0.04 * n))
 		const leafPenalty = () => {
 			let sum = 0
 			for (const id of matchBlobIds) {
@@ -5052,6 +5307,10 @@ function segmentSceneSplat(hasGround = true) {
 			const gi = searchGroups[gIdx].gi
 			for (const id of matchBlobIds) {
 				if (usedBlobs.has(id)) continue
+				// The image is authoritative about non-objects: a blob projecting onto empty
+				// terrain (< 8% inside any detected object box) cannot claim a group at all —
+				// leaving the group unmatched lets the colour carve recover the real content.
+				if (boxObjness.has(id) && boxObjness.get(id) < 0.08) continue
 				const c = activeCosts.get(`${id}:${gi}`)
 				if (c >= UNMATCHED_GROUP_COST) continue
 				usedBlobs.add(id); currentAssign.set(gi, id)
@@ -5082,15 +5341,175 @@ function segmentSceneSplat(hasGround = true) {
 			groupPrimary.set(gi, id)
 		}
 
+		// Colour-guided carve: an unmatched group whose palette is DISTINCT from its
+		// nearest assigned blob's group often reconstructs FUSED to that neighbour (run
+		// 0163: the grey stone painted against the bush came back as one blob). Carve out
+		// the donor's connected sub-clump whose colour the unmatched group explains
+		// decisively better than the donor's own palette. Unlike the old geometric carve
+		// (removed for slicing coherent objects on count disagreements), this fires only
+		// on colour evidence and leaves the donor intact when there is none.
+		for (const g of groups) {
+			if (groupPrimary.has(g.gi)) continue
+			let donorId = null, donorD = Infinity
+			for (const id of groupPrimary.values()) {
+				const s = stats.get(id)
+				if (!s) continue // blobs minted by an earlier carve have no stats entry
+				const d = Math.hypot(s.cx - g.center.x, s.cz - g.center.z)
+				if (d < donorD) { donorD = d; donorId = id }
+			}
+			if (donorId == null || donorD > 0.45 * sceneSpan) continue
+			const CV = Math.max(VOX * 2, 0.35)
+			const carveComponent = (pointFilter, donorGroup) => {
+				const cells = new Map()
+				for (let i = 0; i < n; i++) {
+					if (!pointFilter(i)) continue
+					const kx = Math.floor((pxs[i] - minX) / CV), ky = Math.floor(pys[i] / CV) + 256, kz = Math.floor((pzs[i] - minZ) / CV)
+					const key = (kx * 4096 + kz) * 4096 + ky
+					let c = cells.get(key)
+					if (!c) cells.set(key, c = { idx: [], sr: 0, sg: 0, sb: 0, kx, ky, kz, take: false })
+					c.idx.push(i)
+					c.sr += prgb[i * 3]; c.sg += prgb[i * 3 + 1]; c.sb += prgb[i * 3 + 2]
+				}
+				const gNeutral = g.palette.every(pal => pal[3] < 12)
+				const donorChromatic = donorGroup ? donorGroup.palette.every(pal => pal[3] >= 25) : false
+				for (const c of cells.values()) {
+					const m = 1 / Math.max(1, c.idx.length)
+					const aG = paletteAffinity(g.palette, c.sr * m, c.sg * m, c.sb * m)
+					let aD = donorGroup ? paletteAffinity(donorGroup.palette, c.sr * m, c.sg * m, c.sb * m) : 0
+					// A low-chroma cell has no reliable hue direction: a warm-grey rock "matches"
+					// brown at dot ~0.95. When the wanted group is NEUTRAL and the donor is
+					// saturated, neutrality itself is the discriminator — drop the donor claim.
+					if (gNeutral && donorChromatic && unitChroma(c.sr * m, c.sg * m, c.sb * m)[3] < 26) aD = 0
+					c.take = aG > 0.55 && aG > aD + 0.1
+				}
+				const seen = new Set()
+				let best = null, bestScore = 0
+				for (const [key, seed] of cells) {
+					if (!seed.take || seen.has(key)) continue
+					const comp = []
+					const stack = [key]
+					seen.add(key)
+					while (stack.length) {
+						const cur = stack.pop()
+						comp.push(cur)
+						const cc = cells.get(cur)
+						for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) for (let dz = -1; dz <= 1; dz++) {
+							const nk = ((cc.kx + dx) * 4096 + (cc.kz + dz)) * 4096 + (cc.ky + dy)
+							const nb = cells.get(nk)
+							if (nb?.take && !seen.has(nk)) { seen.add(nk); stack.push(nk) }
+						}
+					}
+					const pts = comp.reduce((sum, k) => sum + cells.get(k).idx.length, 0)
+					// The image knows where the missing object IS: weight components by how
+					// much of them projects into a detected object box, so a big same-colour
+					// fringe elsewhere cannot outbid the real (smaller) content.
+					let objFrac = 0
+					if (imageObjectBoxes?.length && imgU && !flipScene) {
+						let inBox = 0
+						for (const k of comp) for (const i of cells.get(k).idx) {
+							if (imageObjectBoxes.some(b => inImageBox(i, b.box_2d))) inBox++
+						}
+						objFrac = inBox / Math.max(1, pts)
+					}
+					const score = pts * (1 + 3 * objFrac)
+					if (score > bestScore) { bestScore = score; best = { comp, pts } }
+				}
+				return best ? { cells, comp: best.comp, pts: best.pts } : null
+			}
+			// Try every nearby fused-neighbour blob (nearest first — run 0163's stone fused
+			// into the SECOND-nearest neighbour), then the GROUND itself: a squat object
+			// often sits entirely below the floor band and never becomes a blob at all —
+			// its distinctly-coloured mass is still recoverable from the ground layer.
+			const reach = 0.45 * sceneSpan
+			const donorCandidates = [...new Set(groupPrimary.values())]
+				.filter(id => stats.has(id)) // carved blobs have no stats entry
+				.map(id => ({ id, d: Math.hypot(stats.get(id).cx - g.center.x, stats.get(id).cz - g.center.z) }))
+				.filter(c => c.d <= reach)
+				.sort((a, b) => a.d - b.d)
+			let carved = null
+			// Image-first: if a detected object box is still UNCLAIMED by every assigned
+			// blob, the missing object is exactly there — carve group-palette material
+			// (from ground or any piece) whose projection falls inside that box.
+			if (imageObjectBoxes?.length && imgU && !flipScene) {
+				const claimedIds = new Set(groupPrimary.values())
+				const unclaimedBoxes = imageObjectBoxes.filter(b => {
+					let inBox = 0, tot = 0
+					for (const id of claimedIds) {
+						const st = stats.get(id)
+						if (!st) continue
+						tot += st.n
+					}
+					for (let i = 0; i < n; i++) {
+						if (!claimedIds.has(blobOf[i])) continue
+						if (inImageBox(i, b.box_2d, 0)) inBox++
+					}
+					return tot === 0 || inBox / Math.max(1, tot) < 0.05
+				})
+				for (const b of unclaimedBoxes) {
+					const attempt = carveComponent(i => inImageBox(i, b.box_2d, 15) && (blobOf[i] < 0 || !claimedIds.has(blobOf[i])), null)
+					if (attempt && attempt.pts >= 120 && (!carved || attempt.pts > carved.pts)) carved = attempt
+				}
+				if (carved) console.log(`[segment] image-first carve pool → group ${g.gi + 1} found ${carved.pts} pt(s) inside an unclaimed box`)
+			}
+			for (const cand of donorCandidates) {
+				if (carved && carved.pts >= 150) break
+				const candGroup = groups.find(k => k.gi === blobGroup.get(cand.id))
+				const attempt = carveComponent(i => blobOf[i] === cand.id, candGroup)
+				if (attempt && attempt.pts >= 150 && (!carved || attempt.pts > carved.pts)) carved = attempt
+			}
+			if (!carved || carved.pts < 120) {
+				carved = carveComponent(i => blobOf[i] < 0 && Math.hypot(pxs[i] - g.center.x, pzs[i] - g.center.z) <= reach, null)
+			}
+			console.log(`[segment] carve probe g${g.gi + 1}: best component ${carved ? carved.pts : 0} pt(s) across ${donorCandidates.length} donor(s) + ground`)
+			if (!carved || carved.pts < 120) continue
+			const { cells, comp: bestComp } = carved
+			const carvedPts = carved.pts
+			const newId = blobs.length
+			blobs.push({ count: 0, cols: new Set() })
+			for (const key of bestComp) {
+				for (const i of cells.get(key).idx) {
+					if (blobOf[i] >= 0) blobs[blobOf[i]].count--
+					blobOf[i] = newId
+					blobs[newId].count++
+					blobs[newId].cols.add(Math.floor((pxs[i] - minX) / VOX) * 4096 + Math.floor((pzs[i] - minZ) / VOX))
+				}
+			}
+			blobGroup.set(newId, g.gi)
+			groupPrimary.set(g.gi, newId)
+			console.log(`[segment] colour carve → group ${g.gi + 1} took ${carvedPts} gaussian(s) out of its fused neighbour blob`)
+		}
+
 		// Disconnected reconstructed islands must stay independently movable. Older code
 		// attached nearby secondary blobs (crown shells, fragments) to a matched guide
 		// group, but that made visibly separate splat islands move as one object. Keep
 		// every substantial non-terrain blob as its own piece instead.
+		for (const id of matchBlobIds) {
+			if (!blobGroup.has(id) && hardTerrain(id)) terrainBlobIds.add(id)
+		}
+		if (terrainBlobIds.size) console.log(`[segment] terrain fold → ${terrainBlobIds.size} unclaimed surface-hugging blob(s) into ground after matching`)
+		const blobIndicesOf = id => {
+			const out = []
+			for (let i = 0; i < n; i++) if (blobOf[i] === id) out.push(i)
+			return out
+		}
 		const detachedObjectIds = matchBlobIds
 			.filter(id => {
-				if (blobGroup.has(id)) return false
+				if (blobGroup.has(id) || terrainBlobIds.has(id)) return false
 				const s = stats.get(id)
-				return !(hasGround && s.nearSurf / Math.max(1, s.n) > 0.7)
+				if (hasGround && s.nearSurf / Math.max(1, s.n) > 0.7) return false
+				// Image evidence: a blob that projects outside every detected object box is
+				// reconstruction haze / a glow effect, not a movable prop — fold it into the
+				// ground instead of promoting it to a detached piece. (Skipped for flipped
+				// scenes: the 180° piece correction breaks the image-frame correspondence.)
+				if (imageObjectBoxes && !flipScene) {
+					const objness = imageObjectness(blobIndicesOf(id))
+					if (objness != null && objness < Math.min(0.9, 0.3 * PRE_CULL)) {
+						console.log(`[segment] image-box gate → blob ${id} (${s.n} pts, ${Math.round(objness * 100)}% in object boxes) folded into ground`)
+						terrainBlobIds.add(id)
+						return false
+					}
+				}
+				return true
 			})
 			.sort((a, b) => stats.get(b).n - stats.get(a).n)
 
@@ -5127,6 +5546,7 @@ function segmentSceneSplat(hasGround = true) {
 		const detachedSet = new Set(detachedObjectIds)
 		const dropped = matchBlobIds.filter(id => !blobGroup.has(id) && !detachedSet.has(id)).length
 		console.log(`[segment] blob match → ${groupPrimary.size}/${groups.length} group(s) claimed, ${detachedObjectIds.length} detached object blob(s), ${dropped} unexplained + ${terrainBlobIds.size} terrain blob(s) folded into ground`)
+		window.__wsSegClaims = `${groupPrimary.size}/${groups.length} claimed, ${detachedObjectIds.length} detached, ${dropped} unexplained, ${terrainBlobIds.size} terrain-folded`
 	}
 
 	// Never force unassigned specks into the nearest floorless object. Reconstruction
@@ -5174,7 +5594,7 @@ function segmentSceneSplat(hasGround = true) {
 	// body overhead; grabbed turf, mound skin, and plate-edge cliff strips have open
 	// air. Support must come from points GENUINELY above the raw local surface, so a
 	// mound's own skin can never vouch for the skin below it.
-	const SURF_HUG = 1.2 // within this of the raw local surface = "surface-hugging"
+	const SURF_HUG = 1.2 * POST_CULL // within this of the raw local surface = "surface-hugging"
 	const SUPPORT_WINDOW = 2.0 // object mass within this far above rescues a hugger
 	const SUPPORT_REACH = 2 // ...searching this many floor cells around (covers wide bases)
 	// The definitive terrain-surface map: built ONLY from ground-labeled gaussians, so
@@ -5296,25 +5716,84 @@ function segmentSceneSplat(hasGround = true) {
 	// stump beats a missing stump). Tall objects lose only their grabbed fringe.
 	const cullMask = supportY ? new Uint8Array(n) : null
 	if (cullMask) {
+		// The guard exists for TALL objects (a tower's plate-edge strip, a tree's turf
+		// skirt). A squat, rounded prop (bush, rock, crate) hugs the surface all over —
+		// its own lower foliage reads "unsupported" and gets stranded in the ground when
+		// the object is moved (run 0159's bush left half its leaves behind). Pieces that
+		// barely rise above the local surface skip the guard entirely.
+		const GUARD_MIN_RISE = segmentationTuning.skirtGuardMinRise ?? 4.2
 		const totalOf = new Map([...blobParts.keys()].map(id => [id, 0]))
 		const cullOf = new Map([...blobParts.keys()].map(id => [id, 0]))
+		const riseOf = new Map([...blobParts.keys()].map(id => [id, 0]))
 		for (let i = 0; i < n; i++) {
 			const label = blobOf[i]
 			if (!blobParts.has(label)) continue
 			if (interiorClaimMask[i]) continue
 			totalOf.set(label, totalOf.get(label) + 1)
-			if (pys[i] <= groundSurf[cellOfXZ(pxs[i], pzs[i])] + SURF_HUG
-				&& !supportedFromAbove(label, pxs[i], pzs[i], pys[i])) {
+			const rise = pys[i] - groundSurf[cellOfXZ(pxs[i], pzs[i])]
+			if (rise > riseOf.get(label)) riseOf.set(label, rise)
+			if (rise <= SURF_HUG && !supportedFromAbove(label, pxs[i], pzs[i], pys[i])) {
 				cullMask[i] = 1
 				cullOf.set(label, cullOf.get(label) + 1)
 			}
 		}
 		for (const [label, culled] of cullOf) {
-			if (culled / Math.max(1, totalOf.get(label)) > 0.6) {
+			if (culled / Math.max(1, totalOf.get(label)) > 0.6 || riseOf.get(label) < GUARD_MIN_RISE) {
 				for (let i = 0; i < n; i++) if (blobOf[i] === label) cullMask[i] = 0
 			}
 		}
 	}
+
+	// Per-piece image box: the detected box that best covers the piece's projection.
+	// Gaussians of the piece that project OUTSIDE that (padded) box are wisps/haze the 3D
+	// heuristics missed — return them to the ground. Pieces with no confident box are
+	// left untouched, as are flipped scenes (image frame no longer corresponds).
+	const pieceImageBox = new Map()
+	if (imageObjectBoxes?.length && !flipScene) {
+		for (const [label] of blobParts) {
+			const counts = new Array(imageObjectBoxes.length).fill(0)
+			let total = 0
+			for (let i = 0; i < n; i++) {
+				if (blobOf[i] !== label) continue
+				total++
+				for (let b = 0; b < imageObjectBoxes.length; b++) {
+					if (inImageBox(i, imageObjectBoxes[b].box_2d, 0)) counts[b]++
+				}
+			}
+			let best = -1, bestCount = 0
+			for (let b = 0; b < imageObjectBoxes.length; b++) if (counts[b] > bestCount) { bestCount = counts[b]; best = b }
+			const coverage = bestCount / Math.max(1, total)
+			let cu = 0, cv = 0
+			for (let i = 0; i < n; i++) { if (blobOf[i] === label) { cu += imgU[i]; cv += imgV[i] } }
+			cu /= Math.max(1, total); cv /= Math.max(1, total)
+			const centers = imageObjectBoxes.map(b => `${b.label}@(${Math.round((b.box_2d[1] + b.box_2d[3]) / 2)},${Math.round((b.box_2d[0] + b.box_2d[2]) / 2)})`).join(" ")
+			console.log(`[segment] piece box → ${blobParts.get(label)?.name}: proj centroid (${Math.round(cu)},${Math.round(cv)}); best "${best >= 0 ? imageObjectBoxes[best].label : "—"}" covers ${Math.round(coverage * 100)}% of ${total} pts | boxes: ${centers}`)
+			if (best >= 0 && coverage >= 0.5) pieceImageBox.set(label, imageObjectBoxes[best].box_2d)
+		}
+	} else if (imageObjectBoxes?.length && flipScene) {
+		console.log("[segment] piece box clip skipped: scene was 180°-flipped after seating")
+	}
+	let imageBoxClipped = 0
+
+	// Ink footprint sampler, shared by the off-edge shadow cull below and the backfill
+	// gate: plain paint-canvas alpha, deliberately independent of colour content.
+	let onInk = null
+	if (hasGround && world.groundInkBounds() && world.paint?.canvas) {
+		const INK_S = 128
+		const probe = document.createElement("canvas")
+		probe.width = probe.height = INK_S
+		const pctx = probe.getContext("2d", { willReadFrequently: true })
+		pctx.drawImage(world.paint.canvas, 0, 0, INK_S, INK_S)
+		const inkAlpha = pctx.getImageData(0, 0, INK_S, INK_S).data
+		const inkHalf = GROUND_SHEET_SIZE / 2
+		onInk = (wx, wz) => {
+			const ii = Math.floor(((wx + inkHalf) / GROUND_SHEET_SIZE) * INK_S)
+			const jj = Math.floor(((wz + inkHalf) / GROUND_SHEET_SIZE) * INK_S)
+			if (ii < 0 || ii >= INK_S || jj < 0 || jj >= INK_S) return false
+			return inkAlpha[(jj * INK_S + ii) * 4 + 3] > 32
+		}
+	}
+	let offEdgeShadowCulled = 0
 
 	const skinNormal = new THREE.Vector3()
 	let skinCulled = 0
@@ -5330,6 +5809,21 @@ function segmentSceneSplat(hasGround = true) {
 		if (cullMask && part !== ground && cullMask[i]) {
 			part = ground
 			unsupportedCulled++
+		}
+		// Image-box wisp clip: this gaussian belongs to a piece whose visible extent is
+		// known from the generated image; material projecting outside it is not the object.
+		if (part !== ground && pieceImageBox.has(blobOf[i]) && !inImageBox(i, pieceImageBox.get(blobOf[i]), Math.max(5, (IMG_BOX_PAD + 20) * (2 - Math.min(2, POST_CULL))))) {
+			part = ground
+			imageBoxClipped++
+		}
+		// Water/path features are terrain even where an object's box overlaps them (a palm
+		// leaning over its pond): NEAR-FLOOR piece material projecting inside a detected
+		// pond/path box is the feature's rim, not the object — leave it with the ground.
+		if (part !== ground && imgU && !flipScene && imageFeatureBoxes.length
+			&& hasGround && center.y <= floorLevel[cellOfXZ(center.x, center.z)] + FLOOR_BAND + 0.8
+			&& imageFeatureBoxes.some(b => inImageBox(i, b, 10))) {
+			part = ground
+			imageBoxClipped++
 		}
 		// Razor-thin, lying-flat pancakes near floor level are ground SKIN, not object —
 		// leave them with the ground even when they sit inside the object's footprint
@@ -5353,6 +5847,15 @@ function segmentSceneSplat(hasGround = true) {
 				}
 			}
 		}
+		// Reconstructed DROP SHADOWS spill past the drawn terrain edge as dark smears in
+		// the ground layer. Outside the ink footprint there is no drawn ground at all, so
+		// dark material there is shadow/haze — drop it. Bright material (the terrain's own
+		// painted edge overhang) stays.
+		if (part === ground && onInk && color && !onInk(center.x, center.z)
+			&& (color.r + color.g + color.b) / 3 < 0.24) {
+			offEdgeShadowCulled++
+			return
+		}
 		part.packed.pushSplat(center, scales, quaternion, opacity, color)
 		part.bounds.expandByPoint(center)
 		if (hasGround && part === ground && color) {
@@ -5366,7 +5869,11 @@ function segmentSceneSplat(hasGround = true) {
 	})
 
 	let patchSplats = 0
-	if (hasGround && groundSurf && blobParts.size) {
+	const BACKFILL_TARGET = Math.round(segmentationTuning.backfillDensity ?? 10)
+	if (hasGround && groundSurf && blobParts.size && BACKFILL_TARGET > 0) {
+		// Fillers may only appear ON the drawn terrain (onInk built above): an object near
+		// the island edge has off-terrain cells inside its bounding rectangle, and filling
+		// those painted dark smears floating past the edge.
 		const patchCenter = new THREE.Vector3()
 		const patchScales = new THREE.Vector3()
 		const patchQuat = new THREE.Quaternion()
@@ -5408,10 +5915,11 @@ function segmentSceneSplat(hasGround = true) {
 			for (let cz = z0; cz <= z1; cz++) {
 				for (let cx = x0; cx <= x1; cx++) {
 					const cell = cz * gw + cx
-					const target = 10
+					const target = BACKFILL_TARGET
 					if (groundCellCount[cell] >= target) continue
+					if (onInk && !onInk(minX + (cx + 0.5) * cellW, minZ + (cz + 0.5) * cellD)) continue
 					const color = colorForCell(cx, cz)
-					const need = Math.min(12, target - groundCellCount[cell])
+					const need = Math.min(Math.max(4, target), target - groundCellCount[cell])
 					for (let k = 0; k < need; k++) {
 						const ox = 0.12 + hash01(cx, cz, k, 1) * 0.76
 						const oz = 0.12 + hash01(cx, cz, k, 2) * 0.76
@@ -5443,10 +5951,11 @@ function segmentSceneSplat(hasGround = true) {
 	// tiny disconnected islands from each final object. This must not feed back into
 	// blob matching, group creation, bounds used for patching, or detached-object splits.
 	const WISP_VOX = Math.min(0.25, Math.max(VOX * 1.5, 0.06))
-	const WISP_MIN_POINTS = Math.round(lerp(40, 280, segmentationTuning.wispAggression))
-	const WISP_REL_POINTS = lerp(0.005, 0.065, segmentationTuning.wispAggression)
-	const WISP_MIN_VOXELS = Math.round(lerp(8, 160, segmentationTuning.wispAggression))
-	const WISP_MIN_AVG_NEIGHBORS = lerp(1.5, 4.25, segmentationTuning.wispAggression)
+	const wispDrive = clamp01(segmentationTuning.wispAggression * POST_CULL)
+	const WISP_MIN_POINTS = Math.round(lerp(40, 280, wispDrive))
+	const WISP_REL_POINTS = lerp(0.005, 0.065, wispDrive)
+	const WISP_MIN_VOXELS = Math.round(lerp(8, 160, wispDrive))
+	const WISP_MIN_AVG_NEIGHBORS = lerp(1.5, 4.25, wispDrive)
 	const pruneObjectPartWisps = (part, removedPart = ground, { keepOnlyMain = false } = {}) => {
 		if (part.packed.numSplats < 160) return 0
 		const WOFF = 4096
@@ -5565,7 +6074,7 @@ function segmentSceneSplat(hasGround = true) {
 	const largestNamedObject = Math.max(1, ...[...blobParts.values()]
 		.filter(part => !part.name.startsWith("obj-detached-"))
 		.map(part => part.packed.numSplats))
-	const detachedCullLimit = Math.max(120, largestNamedObject * segmentationTuning.detachedCullPct)
+	const detachedCullLimit = Math.max(120, largestNamedObject * segmentationTuning.detachedCullPct * POST_CULL)
 	for (const part of blobParts.values()) {
 		if (!part.name.startsWith("obj-detached-")) continue
 		if (part.packed.numSplats > detachedCullLimit) continue
@@ -5751,9 +6260,16 @@ function segmentSceneSplat(hasGround = true) {
 	let pieces = seatPiece(ground, hasGround ? "floor" : "remainder")
 	for (const id of ranked) pieces += seatPiece(blobParts.get(id), "object")
 	const remainder = hasGround
-		? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin + ${unsupportedCulled} unsupported-surface + ${wispCulled} disconnected-wisp gaussian(s) left behind`
+		? `${blobs.length - bigBlobIds.length} tuft(s) folded into ground, ${skinCulled} floor-skin + ${unsupportedCulled} unsupported-surface + ${wispCulled} disconnected-wisp + ${imageBoxClipped} image-box-clipped + ${offEdgeShadowCulled} off-edge-shadow gaussian(s) left behind`
 		: `${ground.packed.numSplats} unmatched gaussian(s) kept as static remainder`
 	console.log(`[segment] content → ${pieces} piece(s) from ${n} gaussians (${bigBlobIds.length} object blob(s), ${splits} bridge split(s), voxel ${VOX.toFixed(3)}, ${remainder})`)
+	window.__wsSegLast = {
+		pieces: world.generated.filter(g => g.mesh.userData.genKind === "object").map(g => {
+			const c = g.mesh.userData.contentBox?.getCenter(new THREE.Vector3())
+			return { name: g.mesh.userData.genName, splats: g.mesh.packedSplats?.numSplats, at: c ? [Number(c.x.toFixed(1)), Number(c.z.toFixed(1))] : null }
+		}),
+		summary: window.__wsSegClaims ?? null,
+	}
 }
 
 // Whole-scene generation: ONE capture of the floor + all primitives goes directly to
@@ -5840,6 +6356,19 @@ async function generateWorld(prompt) {
 		})
 		splatStore.set("scene", bytes)
 		sessionSubjects = [{ name: "scene", kind: "scene", plotId: null, yawTurns: OBJECT_YAW_TURNS, fitHeight: false, hasGround, yawDeg: sceneYawDeg, mirrorZ: sceneMirrorZ, captureTheta: capture.theta, capturePhi: capture.phi }]
+		// AI box detection on the generated image (Gemini, server-cached): objectness
+		// evidence + wisp clipping for segmentation. Best-effort — never blocks the build.
+		sceneImageBoxes = null
+		if (output != null) {
+			try {
+				const res = await fetch(`/api/scene-boxes?output=${output}`)
+				if (res.ok) {
+					sceneImageBoxes = await res.json()
+					sessionSubjects[0].imageBoxes = sceneImageBoxes
+					console.log(`[segment] fetched ${sceneImageBoxes?.length ?? 0} image box(es) for output ${output}`)
+				}
+			} catch (error) { console.warn("scene boxes:", error.message || error) }
+		}
 		// Carve the one splat into per-object pieces so View can move them; a segmentation
 		// failure must never sink the (paid) generation — the monolith is a fine fallback.
 		try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment:", error) }
@@ -5884,6 +6413,7 @@ async function retuneCurrentSceneSegmentation() {
 	try {
 		deselectSplat()
 		setStatus("Retuning segmentation…")
+		sceneImageBoxes = subject.imageBoxes ?? sceneImageBoxes
 		const hasGround = subject.hasGround !== false
 		world.resetGenerated()
 		const box = wholeSceneBox()
@@ -7266,6 +7796,7 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 	// tested on an existing paid generation without generating it again.
 	const restoredScene = sessionSubjects.find(s => s.kind === "scene")
 	if (restoredScene) {
+		sceneImageBoxes = restoredScene.imageBoxes ?? null
 		try { segmentSceneSplat(restoredScene.hasGround !== false) }
 		catch (error) { console.warn("segment restored scene:", error) }
 	}
