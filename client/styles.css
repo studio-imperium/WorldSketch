@@ -155,7 +155,7 @@ body.tab-view .chat-dock {
 	display: none;
 }
 
-/* Move/scale/rotate for the generated splats — View's own tools, decoupled from Build. */
+/* Orbit plus one lasso/transform tool for the generated splats. */
 .view-dock {
 	display: none;
 	align-items: center;
@@ -168,8 +168,12 @@ body.tab-view .view-dock {
 	display: flex;
 }
 
+body.tab-view canvas.is-splat-lasso {
+	cursor: crosshair;
+}
+
 body.tab-view canvas.is-splat-move {
-	cursor: grab;
+	cursor: move;
 }
 
 body.tab-view canvas.is-splat-scale {
@@ -177,7 +181,55 @@ body.tab-view canvas.is-splat-scale {
 }
 
 body.tab-view canvas.is-splat-rotate {
-	cursor: grab;
+	cursor: alias;
+}
+
+.view-transform-overlay {
+	position: fixed;
+	inset: 0;
+	width: 100vw;
+	height: 100vh;
+	pointer-events: none;
+	overflow: visible;
+}
+
+.view-lasso-path {
+	fill: rgba(91, 110, 225, 0.1);
+	stroke: #5b6ee1;
+	stroke-width: 2;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+	stroke-dasharray: 5 4;
+}
+
+.view-selection-box {
+	fill: rgba(91, 110, 225, 0.06);
+	stroke: #5b6ee1;
+	stroke-width: 1.5;
+	stroke-dasharray: 6 4;
+}
+
+.view-rotate-stem {
+	stroke: #5b6ee1;
+	stroke-width: 1.5;
+}
+
+.view-rotate-handle {
+	fill: #5b6ee1;
+	stroke: #fff;
+	stroke-width: 2;
+}
+
+.view-move-handle {
+	fill: #fff;
+	stroke: #5b6ee1;
+	stroke-width: 2;
+}
+
+.view-scale-handle {
+	fill: #fff;
+	stroke: #5b6ee1;
+	stroke-width: 2;
 }
 
 /* No inline progress under the prompt bar — the disabled buttons and the View tab's

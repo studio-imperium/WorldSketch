@@ -151,6 +151,14 @@ const els = {
 	brushSizeDot: document.getElementById("brush_size_dot"),
 	generate: document.getElementById("generate_btn"),
 	viewToolButtons: [...document.querySelectorAll("[data-view-tool]")],
+	viewTransformOverlay: document.getElementById("view_transform_overlay"),
+	viewLassoPath: document.getElementById("view_lasso_path"),
+	viewSelectionFrame: document.getElementById("view_selection_frame"),
+	viewSelectionBox: document.getElementById("view_selection_box"),
+	viewRotateStem: document.getElementById("view_rotate_stem"),
+	viewRotateHandle: document.getElementById("view_rotate_handle"),
+	viewMoveHandle: document.getElementById("view_move_handle"),
+	viewScaleHandles: [...document.querySelectorAll("[data-view-scale-handle]")],
 	framesTitle: document.getElementById("frames_title"),
 	framesList: document.getElementById("frames_list"),
 	frameAdd: document.getElementById("frame_add_btn"),
@@ -1144,8 +1152,8 @@ function bindPickerDrag(el, apply) {
 // Two tabs over the same world. Build: the editable block-out (primitives + ground
 // tiles) with every generated splat hidden — all block-out editing lives here. View:
 // the generated splats. The tabs are DECOUPLED after generation: Build edits never
-// move existing splats (regenerate to reflect them), and View has its own move/rotate
-// tools that act on the splat meshes alone.
+// move existing splats (regenerate to reflect them), and View has its own lasso/group
+// transform workflow that acts on the splat meshes alone.
 
 const emptyViewHint = "Nothing generated yet — hit Generate and the View tab fills in"
 
@@ -1182,7 +1190,7 @@ function applyUiTab() {
 		world.setCollidersVisible(true) // debug overlay: wireframe block-out over the splats
 	} else {
 		// View renders splats ONLY — no blocks, no floor plate. True hiding (visible=false)
-		// so the block-out costs zero draw calls; View is read-only, nothing needs its raycast.
+		// keeps the block-out out of both drawing and the lasso's splat-only hit testing.
 		for (const mesh of world.allBlockoutMeshes()) {
 			setColliderStyle(mesh, false)
 			mesh.visible = false
@@ -1828,15 +1836,13 @@ function paintAtEvent(event) {
 	world.paintAt(hit, Boolean(drag?.erase))
 }
 
-// --- View-tab splat tools -----------------------------------------------------
-// View owns its own move/scale/rotate: they act on the generated SplatMesh transforms
-// only, so nothing feeds back into the Build block-out. Splat scaling stays UNIFORM —
-// Spark collapses non-uniform mesh scales to an average, while a uniform scale is safe.
-// Selection raycasts invisible proxy boxes (children of each splat mesh, sized to its
-// content bounds), because gaussian clouds have no geometry a raycaster could hit.
+// --- View-tab lasso + group transform ----------------------------------------
+// A freehand screen-space lasso selects the semantic SplatMesh pieces produced by the
+// one-shot segmentation pass. One contextual frame then owns all three transforms:
+// drag inside to move, a corner to scale uniformly, or the top handle to rotate. The
+// transforms act only on generated splats and never feed back into the Build block-out.
 
-let viewTool = "orbit" // "orbit" | "move" | "scale" | "rotate"
-let selectedSplatMesh = null
+let viewTool = "orbit" // "orbit" | "lasso"
 const selectedSplatMeshes = new Set()
 
 const splatProxyMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false })
@@ -1844,6 +1850,9 @@ const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: 0x5b6ee1, tr
 const splatDragPlane = new THREE.Plane()
 const splatRotQuat = new THREE.Quaternion()
 const splatDragPoint = new THREE.Vector3()
+const splatWorldBounds = new THREE.Box3()
+const splatBoxCorner = new THREE.Vector3()
+const viewHandleHitRadius = 15
 
 // Gemini-detected 2D boxes over the generated scene image ({label, box_2d:[y0,x0,y1,x1]}
 // in 0-1000 image coords). Fetched once per generation, persisted with the build, and
@@ -1886,15 +1895,16 @@ function ensureSplatProxies() {
 	}
 }
 
-function selectSplat(mesh) {
-	if (selectedSplatMeshes.size === 1 && selectedSplatMesh === mesh) return
-	deselectSplat()
-	selectedSplatMesh = mesh
-	if (mesh) {
+function setSplatSelection(meshes, append = false) {
+	ensureSplatProxies()
+	if (!append) deselectSplat()
+	for (const mesh of meshes) {
+		if (!mesh || mesh.userData.genKind !== "object") continue
 		selectedSplatMeshes.add(mesh)
 		const outline = mesh.userData.splatProxy?.userData.outline
 		if (outline) outline.visible = true
 	}
+	syncViewTransformOverlay()
 }
 
 function deselectSplat() {
@@ -1903,7 +1913,17 @@ function deselectSplat() {
 		if (outline) outline.visible = false
 	}
 	selectedSplatMeshes.clear()
-	selectedSplatMesh = null
+	syncViewTransformOverlay()
+}
+
+function pruneSplatSelection() {
+	const live = new Set(world.generated.map(record => record.mesh))
+	for (const mesh of selectedSplatMeshes) {
+		if (live.has(mesh)) continue
+		const outline = mesh.userData.splatProxy?.userData.outline
+		if (outline) outline.visible = false
+		selectedSplatMeshes.delete(mesh)
+	}
 }
 
 function raycastSplatProxies(event) {
@@ -1933,28 +1953,148 @@ function raycastSplatProxies(event) {
 	return best
 }
 
-function startSplatDrag(event, hit) {
-	const mesh = hit.object.parent
-	selectSplat(mesh)
-	const pivot = hit.object.getWorldPosition(new THREE.Vector3())
+function forEachSplatBoxCorner(mesh, visit) {
+	const box = mesh.userData.contentBox
+	if (!box || box.isEmpty()) return
 	mesh.updateWorldMatrix(true, false)
-	const scaleAnchorLocal = splatScaleAnchorLocal(mesh, pivot)
-	const scaleAnchorWorld = mesh.localToWorld(scaleAnchorLocal.clone())
-	const group = [mesh]
-	drag = {
-		mode: viewTool === "rotate" ? "splat-rotate" : viewTool === "scale" ? "splat-scale" : "splat-move",
-		pointerId: event.pointerId,
+	for (const x of [box.min.x, box.max.x]) {
+		for (const y of [box.min.y, box.max.y]) {
+			for (const z of [box.min.z, box.max.z]) {
+				splatBoxCorner.set(x, y, z)
+				mesh.localToWorld(splatBoxCorner)
+				visit(splatBoxCorner)
+			}
+		}
+	}
+}
+
+function projectSplatScreenBounds(mesh) {
+	const rect = renderer.domElement.getBoundingClientRect()
+	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+	forEachSplatBoxCorner(mesh, point => {
+		point.project(camera)
+		if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.z < -1.2 || point.z > 1.2) return
+		const x = rect.left + (point.x * 0.5 + 0.5) * rect.width
+		const y = rect.top + (-point.y * 0.5 + 0.5) * rect.height
+		minX = Math.min(minX, x)
+		minY = Math.min(minY, y)
+		maxX = Math.max(maxX, x)
+		maxY = Math.max(maxY, y)
+	})
+	return Number.isFinite(minX) ? { minX, minY, maxX, maxY } : null
+}
+
+function selectedSplatPivot(bottom = false) {
+	splatWorldBounds.makeEmpty()
+	for (const mesh of selectedSplatMeshes) {
+		forEachSplatBoxCorner(mesh, point => splatWorldBounds.expandByPoint(point))
+	}
+	if (splatWorldBounds.isEmpty()) return null
+	const pivot = splatWorldBounds.getCenter(new THREE.Vector3())
+	if (bottom) pivot.y = splatWorldBounds.min.y
+	return pivot
+}
+
+function viewSelectionGeometry() {
+	let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity
+	for (const mesh of selectedSplatMeshes) {
+		const bounds = projectSplatScreenBounds(mesh)
+		if (!bounds) continue
+		minX = Math.min(minX, bounds.minX)
+		minY = Math.min(minY, bounds.minY)
+		maxX = Math.max(maxX, bounds.maxX)
+		maxY = Math.max(maxY, bounds.maxY)
+	}
+	if (!Number.isFinite(minX)) return null
+	const pad = 9
+	minX -= pad
+	minY -= pad
+	maxX += pad
+	maxY += pad
+	const pivot = selectedSplatPivot(false)
+	const move = pivot ? objectScreenPosition(pivot) : { x: (minX + maxX) / 2, y: (minY + maxY) / 2 }
+	return {
+		minX, minY, maxX, maxY, move,
+		rotate: { x: (minX + maxX) / 2, y: minY - 30 },
+		corners: {
+			nw: { x: minX, y: minY }, ne: { x: maxX, y: minY },
+			se: { x: maxX, y: maxY }, sw: { x: minX, y: maxY },
+		},
+	}
+}
+
+function syncViewTransformOverlay() {
+	pruneSplatSelection()
+	const active = uiTab === "view" && viewTool === "lasso" && !rawSplatPreview
+	els.viewTransformOverlay?.classList.toggle("hidden", !active)
+	if (!active) {
+		els.viewSelectionFrame?.classList.add("hidden")
+		els.viewLassoPath?.classList.add("hidden")
+		return
+	}
+	const geometry = viewSelectionGeometry()
+	els.viewSelectionFrame?.classList.toggle("hidden", !geometry)
+	if (!geometry) return
+	const width = Math.max(1, geometry.maxX - geometry.minX)
+	const height = Math.max(1, geometry.maxY - geometry.minY)
+	els.viewSelectionBox.setAttribute("x", geometry.minX)
+	els.viewSelectionBox.setAttribute("y", geometry.minY)
+	els.viewSelectionBox.setAttribute("width", width)
+	els.viewSelectionBox.setAttribute("height", height)
+	els.viewRotateStem.setAttribute("x1", geometry.rotate.x)
+	els.viewRotateStem.setAttribute("y1", geometry.minY)
+	els.viewRotateStem.setAttribute("x2", geometry.rotate.x)
+	els.viewRotateStem.setAttribute("y2", geometry.rotate.y)
+	els.viewRotateHandle.setAttribute("cx", geometry.rotate.x)
+	els.viewRotateHandle.setAttribute("cy", geometry.rotate.y)
+	els.viewMoveHandle.setAttribute("cx", geometry.move.x)
+	els.viewMoveHandle.setAttribute("cy", geometry.move.y)
+	for (const handle of els.viewScaleHandles) {
+		const point = geometry.corners[handle.dataset.viewScaleHandle]
+		handle.setAttribute("x", point.x - 6)
+		handle.setAttribute("y", point.y - 6)
+	}
+}
+
+function viewTransformHit(event) {
+	const geometry = viewSelectionGeometry()
+	if (!geometry) return null
+	const point = { x: event.clientX, y: event.clientY }
+	if (Math.hypot(point.x - geometry.rotate.x, point.y - geometry.rotate.y) <= viewHandleHitRadius) return "rotate"
+	for (const corner of Object.values(geometry.corners)) {
+		if (Math.hypot(point.x - corner.x, point.y - corner.y) <= viewHandleHitRadius) return "scale"
+	}
+	if (point.x >= geometry.minX && point.x <= geometry.maxX && point.y >= geometry.minY && point.y <= geometry.maxY) return "move"
+	return null
+}
+
+function setViewTransformCursor(mode = null) {
+	renderer.domElement.classList.toggle("is-splat-move", mode === "move")
+	renderer.domElement.classList.toggle("is-splat-scale", mode === "scale")
+	renderer.domElement.classList.toggle("is-splat-rotate", mode === "rotate")
+}
+
+function startSplatGroupDrag(event, mode) {
+	const pivot = selectedSplatPivot(mode === "scale")
+	if (!pivot || !selectedSplatMeshes.size) return false
+	pointerFromEvent(event)
+	raycaster.setFromCamera(pointer, camera)
+	splatDragPlane.set(localUp, -pivot.y)
+	const startPoint = raycaster.ray.intersectPlane(splatDragPlane, splatDragPoint)
+		? splatDragPoint.clone()
+		: pivot.clone()
+	const members = [...selectedSplatMeshes].map(mesh => ({
 		mesh,
-		group,
-		startPos: mesh.position.clone(),
-		startGroupPositions: group.map(m => [m, m.position.clone()]),
-		startQuat: mesh.quaternion.clone(),
-		startScale: mesh.scale.clone(),
+		position: mesh.position.clone(),
+		quaternion: mesh.quaternion.clone(),
+		scale: mesh.scale.clone(),
+	}))
+	drag = {
+		mode: `splat-${mode}`,
+		pointerId: event.pointerId,
+		members,
 		pivot,
-		pivotLocal: mesh.worldToLocal(pivot.clone()),
-		scaleAnchorLocal,
-		scaleAnchorWorld,
-		startPoint: hit.point.clone(),
+		startPoint,
 		startX: event.clientX,
 		startY: event.clientY,
 		rollAxis: pivot.clone().sub(camera.position).normalize(),
@@ -1963,24 +2103,117 @@ function startSplatDrag(event, hit) {
 	drag.startAngle = pointerScreenAngle(event, drag.rollCenter)
 	renderer.domElement.setPointerCapture(event.pointerId)
 	renderer.domElement.classList.add("is-dragging")
+	return true
 }
 
-function splatScaleAnchorLocal(mesh, fallbackWorld) {
-	const box = mesh.userData.contentBox
-	if (box && !box.isEmpty()) {
-		const anchor = box.getCenter(new THREE.Vector3())
-		anchor.y = box.min.y
-		return anchor
+function startSplatLasso(event) {
+	drag = {
+		mode: "splat-lasso",
+		pointerId: event.pointerId,
+		append: event.shiftKey,
+		points: [{ x: event.clientX, y: event.clientY }],
 	}
-	return mesh.worldToLocal(fallbackWorld.clone())
+	renderer.domElement.setPointerCapture(event.pointerId)
+	els.viewLassoPath.classList.remove("hidden")
+	syncSplatLassoPath()
+}
+
+function syncSplatLassoPath() {
+	const points = drag?.mode === "splat-lasso" ? drag.points : []
+	if (!points.length) {
+		els.viewLassoPath.classList.add("hidden")
+		els.viewLassoPath.setAttribute("d", "")
+		return
+	}
+	const [first, ...rest] = points
+	const closed = points.length > 2 ? " Z" : ""
+	els.viewLassoPath.setAttribute("d", `M ${first.x} ${first.y}${rest.map(point => ` L ${point.x} ${point.y}`).join("")}${closed}`)
+}
+
+function updateSplatLasso(event) {
+	const point = { x: event.clientX, y: event.clientY }
+	const last = drag.points.at(-1)
+	if (Math.hypot(point.x - last.x, point.y - last.y) < 3) return
+	drag.points.push(point)
+	syncSplatLassoPath()
+}
+
+function pointInPolygon(point, polygon) {
+	let inside = false
+	for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+		const a = polygon[i], b = polygon[j]
+		if ((a.y > point.y) !== (b.y > point.y) && point.x < ((b.x - a.x) * (point.y - a.y)) / (b.y - a.y) + a.x) inside = !inside
+	}
+	return inside
+}
+
+function cross2d(a, b, c) {
+	return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+}
+
+function pointOnSegment(point, a, b) {
+	return Math.abs(cross2d(a, b, point)) < 1e-6 &&
+		point.x >= Math.min(a.x, b.x) && point.x <= Math.max(a.x, b.x) &&
+		point.y >= Math.min(a.y, b.y) && point.y <= Math.max(a.y, b.y)
+}
+
+function segmentsIntersect(a, b, c, d) {
+	const abC = cross2d(a, b, c), abD = cross2d(a, b, d)
+	const cdA = cross2d(c, d, a), cdB = cross2d(c, d, b)
+	if (((abC > 0 && abD < 0) || (abC < 0 && abD > 0)) && ((cdA > 0 && cdB < 0) || (cdA < 0 && cdB > 0))) return true
+	return (Math.abs(abC) < 1e-6 && pointOnSegment(c, a, b)) ||
+		(Math.abs(abD) < 1e-6 && pointOnSegment(d, a, b)) ||
+		(Math.abs(cdA) < 1e-6 && pointOnSegment(a, c, d)) ||
+		(Math.abs(cdB) < 1e-6 && pointOnSegment(b, c, d))
+}
+
+function polygonOverlapsBounds(polygon, bounds) {
+	const corners = [
+		{ x: bounds.minX, y: bounds.minY }, { x: bounds.maxX, y: bounds.minY },
+		{ x: bounds.maxX, y: bounds.maxY }, { x: bounds.minX, y: bounds.maxY },
+	]
+	if (polygon.some(point => point.x >= bounds.minX && point.x <= bounds.maxX && point.y >= bounds.minY && point.y <= bounds.maxY)) return true
+	if (corners.some(point => pointInPolygon(point, polygon))) return true
+	for (let i = 0; i < polygon.length; i++) {
+		const a = polygon[i], b = polygon[(i + 1) % polygon.length]
+		for (let j = 0; j < corners.length; j++) {
+			if (segmentsIntersect(a, b, corners[j], corners[(j + 1) % corners.length])) return true
+		}
+	}
+	return false
+}
+
+function finishSplatLasso(event) {
+	updateSplatLasso(event)
+	const points = drag.points
+	const minX = Math.min(...points.map(point => point.x))
+	const minY = Math.min(...points.map(point => point.y))
+	const maxX = Math.max(...points.map(point => point.x))
+	const maxY = Math.max(...points.map(point => point.y))
+	let meshes = []
+	if (points.length < 3 || Math.max(maxX - minX, maxY - minY) < 8) {
+		const hit = raycastSplatProxies(event)
+		if (hit?.object?.parent) meshes = [hit.object.parent]
+	} else {
+		meshes = world.generated
+			.map(record => record.mesh)
+			.filter(mesh => mesh.visible && mesh.userData.genKind === "object")
+			.filter(mesh => {
+				const bounds = projectSplatScreenBounds(mesh)
+				return bounds && polygonOverlapsBounds(points, bounds)
+			})
+	}
+	setSplatSelection(meshes, drag.append)
+	els.viewLassoPath.classList.add("hidden")
+	els.viewLassoPath.setAttribute("d", "")
 }
 
 // Drag on the horizontal plane through the grab point; hold Shift to move vertically.
 function updateSplatMove(event) {
 	if (event.shiftKey) {
 		const dy = (drag.startY - event.clientY) * 0.02
-		for (const [mesh, start] of drag.startGroupPositions ?? [[drag.mesh, drag.startPos]]) {
-			mesh.position.set(start.x, start.y + dy, start.z)
+		for (const member of drag.members) {
+			member.mesh.position.set(member.position.x, member.position.y + dy, member.position.z)
 		}
 		if (Math.abs(dy) > 0.001) drag.mutated = true
 		return
@@ -1991,42 +2224,43 @@ function updateSplatMove(event) {
 	if (!raycaster.ray.intersectPlane(splatDragPlane, splatDragPoint)) return
 	const dx = splatDragPoint.x - drag.startPoint.x
 	const dz = splatDragPoint.z - drag.startPoint.z
-	for (const [mesh, start] of drag.startGroupPositions ?? [[drag.mesh, drag.startPos]]) {
-		mesh.position.set(start.x + dx, start.y, start.z + dz)
+	for (const member of drag.members) {
+		member.mesh.position.set(member.position.x + dx, member.position.y, member.position.z + dz)
 	}
 	if (Math.hypot(dx, dz) > 0.001) drag.mutated = true
 }
 
-// Uniform scale from the selected splat's bottom centre, so the object grows up/out
-// instead of sinking below or floating above its seated contact point.
+// Uniform group scale from the combined bottom centre so the selection stays seated
+// while the objects and all spacing between them grow or shrink together.
 function updateSplatScale(event) {
 	const delta = (event.clientX - drag.startX) - (event.clientY - drag.startY)
 	const factor = Math.min(6, Math.max(0.15, Math.exp(delta * 0.01)))
-	drag.mesh.scale.copy(drag.startScale).multiplyScalar(factor)
-	// Packed splat coordinates are world-like and the mesh origin is usually zero;
-	// compensate position so scaling happens from the bottom anchor, not origin.
-	tmpWorld.copy(drag.scaleAnchorLocal).multiply(drag.mesh.scale).applyQuaternion(drag.startQuat)
-	drag.mesh.position.copy(drag.scaleAnchorWorld).sub(tmpWorld)
+	for (const member of drag.members) {
+		member.mesh.scale.copy(member.scale).multiplyScalar(factor)
+		member.mesh.position.copy(member.position).sub(drag.pivot).multiplyScalar(factor).add(drag.pivot)
+	}
 	if (Math.abs(factor - 1) > 0.001) drag.mutated = true
 }
 
-// Match Build-mode rotation: pointer angle around the object's on-screen centre drives
-// a roll about the camera-to-object axis, rather than a sideways-only world-Y spin.
+// Pointer angle around the selection centre rotates every member and its offset from the
+// shared pivot, preserving the selected arrangement as one rigid group.
 function updateSplatRotate(event) {
 	const angle = pointerScreenAngle(event, drag.rollCenter) - drag.startAngle
 	splatRotQuat.setFromAxisAngle(drag.rollAxis, angle)
-	drag.mesh.quaternion.copy(splatRotQuat).multiply(drag.startQuat)
-	drag.mesh.position.copy(drag.startPos).sub(drag.pivot).applyQuaternion(splatRotQuat).add(drag.pivot)
+	for (const member of drag.members) {
+		member.mesh.quaternion.copy(splatRotQuat).multiply(member.quaternion)
+		member.mesh.position.copy(member.position).sub(drag.pivot).applyQuaternion(splatRotQuat).add(drag.pivot)
+	}
 	if (Math.abs(angle) > 0.001) drag.mutated = true
 }
 
 function setViewTool(tool) {
+	if (tool !== "orbit" && tool !== "lasso") return
 	viewTool = tool
 	for (const button of els.viewToolButtons) button.classList.toggle("active", button.dataset.viewTool === tool)
-	if (tool === "orbit") deselectSplat()
-	renderer.domElement.classList.toggle("is-splat-move", tool === "move")
-	renderer.domElement.classList.toggle("is-splat-scale", tool === "scale")
-	renderer.domElement.classList.toggle("is-splat-rotate", tool === "rotate")
+	renderer.domElement.classList.toggle("is-splat-lasso", tool === "lasso")
+	setViewTransformCursor()
+	syncViewTransformOverlay()
 }
 
 // --- Pointer routing --------------------------------------------------------
@@ -2055,15 +2289,11 @@ function pointerDown(event) {
 		return
 	}
 	if (uiTab === "view") {
-		// Move/scale/rotate act on the splat under the cursor; anywhere else (or the orbit
-		// tool) the drag is the camera. Block-out editing stays a Build-only thing.
-		if (viewTool !== "orbit") {
-			const hit = raycastSplatProxies(event)
-			if (hit) {
-				startSplatDrag(event, hit)
-				return
-			}
-			deselectSplat()
+		if (viewTool === "lasso") {
+			const transform = selectedSplatMeshes.size ? viewTransformHit(event) : null
+			if (transform && startSplatGroupDrag(event, transform)) return
+			startSplatLasso(event)
+			return
 		}
 		startOrbit(event)
 		return
@@ -2131,21 +2361,26 @@ renderer.domElement.addEventListener("pointermove", event => {
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
+	else if (drag?.mode === "splat-lasso") updateSplatLasso(event)
 	else if (drag?.mode === "splat-move") updateSplatMove(event)
 	else if (drag?.mode === "splat-scale") updateSplatScale(event)
 	else if (drag?.mode === "splat-rotate") updateSplatRotate(event)
 	else if (drag && ["scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
 	else if (uiTab === "build" && !generating) updatePlacement(event)
+	else if (uiTab === "view" && viewTool === "lasso") setViewTransformCursor(viewTransformHit(event))
 })
 
 renderer.domElement.addEventListener("pointerup", event => {
 	if (drag?.pointerId === event.pointerId) {
+		if (drag.mode === "splat-lasso") finishSplatLasso(event)
 		if (drag.actionPushed && !drag.mutated) activeBuildHistory()?.undo.pop() // drag never moved — drop its checkpoint
 		if (drag.mutated) persistFramesSoon() // a drag can outlive the debounce its checkpoint armed
 		renderer.domElement.releasePointerCapture(event.pointerId)
 		drag = null
 		renderer.domElement.classList.remove("is-dragging")
 		updateTransformGizmo()
+		syncViewTransformOverlay()
+		if (uiTab === "view" && viewTool === "lasso") setViewTransformCursor(viewTransformHit(event))
 	}
 })
 
@@ -6387,6 +6622,7 @@ function animate(now = performance.now()) {
 	else if (camMode === "anim") updateCamAnim(now)
 	sky.position.copy(camera.position)
 	updateTransformGizmo()
+	syncViewTransformOverlay()
 	renderer.render(scene, camera)
 	requestAnimationFrame(animate)
 }
