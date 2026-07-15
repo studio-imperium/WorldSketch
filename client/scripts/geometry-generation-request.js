@@ -1,6 +1,7 @@
-export const GEOMETRY_MODEL = "Qwen/Qwen2.5-Coder-7B-Instruct"
-export const GEOMETRY_PROVIDER = "nscale"
-export const MAX_GENERATED_PRIMITIVES = 40
+export const GEOMETRY_MODEL = "openai/gpt-oss-20b"
+export const GEOMETRY_PROVIDERS = ["novita", "together", "ovhcloud"]
+export const GEOMETRY_PROVIDER = GEOMETRY_PROVIDERS[0]
+export const MAX_GENERATED_PRIMITIVES = 32
 
 const vector = (items, description) => ({
 	type: "array",
@@ -108,11 +109,11 @@ small amount of repeated detail. Prefer whole numbers or one decimal place. Keep
 scene within roughly -28 to 28 on X and Z. Use no more than ${MAX_GENERATED_PRIMITIVES}
 boxes. The generated JSON replaces the entire current build, including its floor.`
 
-export function geometryGenerationRequest(prompt) {
+export function geometryGenerationRequest(prompt, { provider = GEOMETRY_PROVIDER } = {}) {
 	const description = String(prompt ?? "").trim()
 	if (!description) throw new Error("Describe the geometry you want to generate")
 	return {
-		provider: GEOMETRY_PROVIDER,
+		provider,
 		model: GEOMETRY_MODEL,
 		messages: [
 			{ role: "system", content: SYSTEM_PROMPT },
@@ -128,7 +129,7 @@ export function geometryGenerationRequest(prompt) {
 				schema: WORLD_SKETCH_GEOMETRY_SCHEMA,
 			},
 		},
-		max_tokens: 3200,
+		max_tokens: 2400,
 		temperature: 0.2,
 	}
 }
