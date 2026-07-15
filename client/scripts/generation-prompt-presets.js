@@ -10,10 +10,10 @@ function sceneText(scene) {
 	return String(scene || "A coherent richly detailed environment").trim()
 }
 
-// Candidate prompts for A/B testing, deliberately varied in length and emphasis.
-// Every preset takes (scene, { hasGeometryReference }) and returns the full prompt text.
-// "Current" is whatever the live pipeline uses (the minimal prompt, which won the
-// 2026-07-15 A/B round); the rest test enrichment without adding new objects.
+// Candidate prompts for A/B testing. "Current" is the live pipeline prompt (the
+// minimal variant, which won the 2026-07-15 round); the rest are minimal-length
+// candidates that lean on COLOR FIDELITY — the model likes to substitute its own
+// palette (black→blue, red→beige), and these test different ways of stopping that.
 export const promptPresets = [
 	{
 		key: "current",
@@ -21,53 +21,52 @@ export const promptPresets = [
 		build: (scene, opts) => sceneGenerationPrompt(scene, opts),
 	},
 	{
-		key: "enhance",
-		label: "Enhance",
+		key: "color-lock",
+		label: "Color lock",
 		build: (scene, { hasGeometryReference = false } = {}) => `${geometryLine(hasGeometryReference)}
 
-Render this block-out as ${sceneText(scene)}, changing nothing but the surfaces.
+Transform this block-out into: ${sceneText(scene)}.
 
-Add zero new things: no props, plants, rocks, paths, openings, or ornaments beyond what the blocks and painted regions already show. All richness comes from the materials themselves — believable construction, uneven wear, subtle color and roughness variation, fine texture at the right scale, crisp contact shadows. Same camera, composition, and proportions at full architectural scale; never a miniature. Everything outside the terrain chunk stays pure black (#000000).`,
+Same camera, same composition, same proportions — every block becomes a full-sized real structure exactly in place. THE COLORS ARE LOCKED: each block and painted region keeps its own hue in the final image. Render a realistic material IN that color — a red block becomes a red structure, dark stays dark, never substitute a different palette. Enrich with texture, shading, and wear, not with new colors. Never a miniature. Every pixel outside the terrain chunk stays flat black (#000000).`,
 	},
 	{
-		key: "texture-pass",
-		label: "Texture pass",
-		build: (scene, { hasGeometryReference = false } = {}) => `This is a detailing pass, not a redesign. Repaint the block-out as ${sceneText(scene)} by upgrading every existing surface to its finished material — and nothing more.
+		key: "palette",
+		label: "Palette is law",
+		build: (scene, { hasGeometryReference = false } = {}) => `The input's colors are the art direction. ${geometryLine(hasGeometryReference)}
+
+Turn this block-out into: ${sceneText(scene)}.
+
+Sample the color of every block and painted ground region and keep it recognizably the same in the output — same hue, similar tone, now expressed as a believable real material with fine texture and wear. Swapping a region's color family (red to beige, black to blue, green to grey) is a failure. Keep the camera, composition, and proportions unchanged at full architectural scale; never a miniature. Pure black (#000000) everywhere outside the terrain chunk.`,
+	},
+	{
+		key: "color-rules",
+		label: "Color rules",
+		build: (scene, { hasGeometryReference = false } = {}) => `Transform the block-out into: ${sceneText(scene)}.
 
 ${geometryLine(hasGeometryReference)}
 
-Treat each block and painted region as final geometry: give it the real material it implies, rendered with fine natural detail — grain, courses, seams, and weathering at a believable scale, with quiet variation instead of uniformity. Where a surface is plain, make the SAME surface richer, never busier: vary its height, tone, and texture rather than placing objects on it. Keep camera, framing, silhouettes, and scale identical. Pure black (#000000) outside the terrain chunk.`,
+1. Every region keeps its input hue — pick a real material that naturally HAS that color; never repaint a region into a different color family.
+2. Shading, texture, and weathering may vary a color's brightness, never its hue.
+3. Same camera, composition, footprints, and scale; blocks become the real structures they stand for, in place.
+4. Full-sized and real — no miniature or toy look.
+5. Flat black #000000 outside the terrain chunk; dark input regions stay dark, they do not turn blue.`,
 	},
 	{
-		key: "nothing-new",
-		label: "Nothing new",
+		key: "painted-model",
+		label: "Painted model",
 		build: (scene, { hasGeometryReference = false } = {}) => `${geometryLine(hasGeometryReference)}
 
-Recreate this exact scene as ${sceneText(scene)}. The output must contain exactly the objects visible in the input — same count, same places, same sizes — plus nothing.
+This block-out is a color-accurate model of: ${sceneText(scene)}. The builder already chose every color on purpose.
 
-Spend all detail INSIDE the existing silhouettes: material realism, micro-variation, construction logic, wear, and grounded shadows. Empty ground stays empty but becomes a richly textured version of itself. If something is not in the block-out, it does not appear. Full architectural scale, never a miniature. Every pixel outside the terrain chunk is flat black (#000000).`,
+Materialize it faithfully: for each block and painted region, choose a real-world material that matches its existing color, then render that material with crisp construction detail, texture variation, and honest wear. Do not recolor anything to look more natural — the palette is intentional. Same camera, composition, and proportions at real-world scale; never a miniature. The surrounding void stays pure black (#000000).`,
 	},
 	{
-		key: "restraint",
-		label: "Restraint rules",
-		build: (scene, { hasGeometryReference = false } = {}) => `Transform the block-out into ${sceneText(scene)}.
+		key: "hue-preserve",
+		label: "Hue preserve",
+		build: (scene, { hasGeometryReference = false } = {}) => `Re-render this exact scene — ${sceneText(scene)} — at final quality with its colors intact.
 
 ${geometryLine(hasGeometryReference)}
 
-1. Adding is failure: no new objects, props, vegetation clusters, openings, or decorations of any kind.
-2. Enhancing is the goal: every existing surface becomes its real material with fine texture, tonal variation, and honest wear — richness through detail density, not through content.
-3. Geometry is fixed: same camera, framing, silhouettes, footprints, spacing, and scale; empty areas stay empty.
-4. Painted ground colors mark terrain features; render those features in place, nothing else.
-5. Full-sized and real — no miniature, toy, or clay look.
-6. Background: flat black #000000 outside the terrain chunk. No sky or scenery.`,
-	},
-	{
-		key: "re-render",
-		label: "Re-render",
-		build: (scene, { hasGeometryReference = false } = {}) => `Re-render this exact scene — ${sceneText(scene)} — as a final-quality frame of the same geometry.
-
-${geometryLine(hasGeometryReference)}
-
-Keep every form precisely where it is and simply resolve it: placeholder surfaces become physically believable materials with natural micro-detail, soft occlusion, and grounded shadows under the same lighting and orthographic camera. Nothing is added, moved, or resized; simple shapes stay simple, just finished. Real-world scale, never a miniature. The void around the terrain chunk remains pure black (#000000).`,
+Every form stays where it is; every region's HUE must survive into the finished image. Resolve placeholder surfaces into realistic materials of the same color: vary value, roughness, and texture freely, shift hue never. If a region reads red in the input it reads red in the output. Same orthographic camera and framing, real-world scale, no miniature look. Everything outside the terrain chunk remains flat black (#000000).`,
 	},
 ]
