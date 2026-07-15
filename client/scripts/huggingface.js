@@ -19,8 +19,8 @@ const DEFAULT_CONFIG = {
 	tripoSpace: "VAST-AI/TripoSplat",
 	inferenceProvider: "fal-ai",
 	inferenceModel: "black-forest-labs/FLUX.2-klein-4B",
-	image: { steps: 4, guidance: 1, width: 512, height: 512 },
-	tripo: { steps: 10, guidance: 1, gaussians: 32768, format: "splat" },
+	image: { steps: 4, guidance: 1, width: 1024, height: 1024 },
+	tripo: { steps: 20, guidance: 3, gaussians: 131072, format: "splat" },
 }
 
 let config = structuredClone(DEFAULT_CONFIG)
