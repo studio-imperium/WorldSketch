@@ -1,81 +1,12 @@
 package config
 
 import (
-	"bufio"
 	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 )
-
-type ImageEditSettings struct {
-	Provider      string
-	GeminiModel   string
-	OpenAIModel   string
-	Size          string
-	Quality       string
-	Fidelity      string
-	Background    string
-	Format        string
-	SkipImageEdit bool
-}
-
-type TripoSettings struct {
-	Steps     string
-	Guidance  string
-	Gaussians string
-	Format    string
-}
-
-func SceneImageEditSettings() ImageEditSettings {
-	return ImageEditSettings{
-		Provider:      Env("WS_SCENE_IMAGE_PROVIDER", "openai"),
-		GeminiModel:   Env("WS_SCENE_GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
-		OpenAIModel:   Env("WS_SCENE_IMAGE_MODEL", "gpt-image-1"),
-		Size:          Env("WS_SCENE_IMAGE_SIZE", "1024x1024"),
-		Quality:       Env("WS_SCENE_IMAGE_QUALITY", "high"),
-		Fidelity:      Env("WS_SCENE_IMAGE_FIDELITY", "high"),
-		Background:    Env("WS_SCENE_IMAGE_BACKGROUND", "opaque"),
-		Format:        Env("WS_SCENE_IMAGE_FORMAT", "png"),
-		SkipImageEdit: EnvBool("WS_SCENE_SKIP_IMAGE_EDIT", false),
-	}
-}
-
-func SceneTripoSettings() TripoSettings {
-	return TripoSettings{
-		Steps:     ClampIntString(Env("WS_SCENE_TRIPO_STEPS", "24"), "24", 1, 64),
-		Guidance:  Env("WS_SCENE_TRIPO_GUIDANCE", "7"),
-		Gaussians: ClampIntString(Env("WS_SCENE_TRIPO_GAUSSIANS", "262144"), "262144", 1024, 262144),
-		Format:    Env("WS_SCENE_TRIPO_FORMAT", "splat"),
-	}
-}
-
-func GeminiAPIKey() string {
-	if key := strings.TrimSpace(os.Getenv("GEMINI_API_KEY")); key != "" {
-		return key
-	}
-	path := Env("WS_GEMINI_ENV_FILE", filepath.Join(RootDir(), "..", "Viggle", "Backend", ".env"))
-	return ReadEnvKey(path, "GEMINI_API_KEY")
-}
-
-func ReadEnvKey(path, key string) string {
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	prefix := key + "="
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := strings.TrimPrefix(strings.TrimSpace(scanner.Text()), "export ")
-		if strings.HasPrefix(line, "#") || !strings.HasPrefix(line, prefix) {
-			continue
-		}
-		return strings.Trim(strings.TrimSpace(strings.TrimPrefix(line, prefix)), `"'`)
-	}
-	return ""
-}
 
 func LoadDotEnv() {
 	path := Env("WS_ENV_FILE", filepath.Join(RootDir(), ".env"))
@@ -94,15 +25,14 @@ func LoadDotEnv() {
 		if eq <= 0 {
 			continue
 		}
-		key := strings.TrimSpace(line[:eq])
-		val := strings.TrimSpace(line[eq+1:])
-		if len(val) >= 2 && (val[0] == '"' || val[0] == '\'') && val[len(val)-1] == val[0] {
-			val = val[1 : len(val)-1]
+		key, value := strings.TrimSpace(line[:eq]), strings.TrimSpace(line[eq+1:])
+		if len(value) >= 2 && (value[0] == '"' || value[0] == '\'') && value[len(value)-1] == value[0] {
+			value = value[1 : len(value)-1]
 		}
-		if _, present := os.LookupEnv(key); present {
+		if _, exists := os.LookupEnv(key); exists {
 			continue
 		}
-		os.Setenv(key, val)
+		_ = os.Setenv(key, value)
 		loaded++
 	}
 	if loaded > 0 {
@@ -122,54 +52,30 @@ func RootDir() string {
 }
 
 func Env(name, fallback string) string {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
+	if value := strings.TrimSpace(os.Getenv(name)); value != "" {
+		return value
 	}
-	return value
+	return fallback
 }
 
-func EnvBool(name string, fallback bool) bool {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseBool(value)
+func EnvInt(name string, fallback, min, max int) int {
+	parsed, err := strconv.Atoi(Env(name, strconv.Itoa(fallback)))
 	if err != nil {
 		return fallback
+	}
+	if parsed < min {
+		return min
+	}
+	if parsed > max {
+		return max
 	}
 	return parsed
 }
 
 func EnvFloat(name string, fallback float64) float64 {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return fallback
-	}
-	parsed, err := strconv.ParseFloat(value, 64)
+	parsed, err := strconv.ParseFloat(Env(name, strconv.FormatFloat(fallback, 'f', -1, 64)), 64)
 	if err != nil {
 		return fallback
 	}
 	return parsed
-}
-
-func ClampIntString(value, fallback string, min, max int) string {
-	out := fallback
-	if s := strings.TrimSpace(value); s != "" {
-		out = s
-	}
-	if n, err := strconv.Atoi(out); err == nil && n > 0 {
-		return strconv.Itoa(ClampInt(n, min, max))
-	}
-	return fallback
-}
-
-func ClampInt(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
 }

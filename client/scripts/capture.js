@@ -106,6 +106,33 @@ function isoCamera(box, angles = null) {
 	return camera
 }
 
+// Project the original connected-object bounds into the exact camera frame used for
+// generation. These known bounds replace the old second AI call that tried to rediscover
+// the objects from the edited image. Qwen is instructed to preserve the composition, so
+// source-geometry boxes are deterministic, instant, and do not consume more GPU time.
+export function projectCaptureBoxes(objectGroups, groundBox, frameBox, angles = null) {
+	const camera = isoCamera(frameBox, angles)
+	const corner = new THREE.Vector3()
+	const project = (box, padding = 0) => {
+		let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity
+		for (let i = 0; i < 8; i++) {
+			corner.set(
+				i & 1 ? box.max.x : box.min.x,
+				i & 2 ? box.max.y : box.min.y,
+				i & 4 ? box.max.z : box.min.z,
+			).project(camera)
+			x0 = Math.min(x0, (corner.x * 0.5 + 0.5) * 1000)
+			x1 = Math.max(x1, (corner.x * 0.5 + 0.5) * 1000)
+			y0 = Math.min(y0, (-corner.y * 0.5 + 0.5) * 1000)
+			y1 = Math.max(y1, (-corner.y * 0.5 + 0.5) * 1000)
+		}
+		return [y0 - padding, x0 - padding, y1 + padding, x1 + padding].map(value => Math.round(Math.min(1000, Math.max(0, value))))
+	}
+	const boxes = objectGroups.map((group, index) => ({ label: `object ${index + 1}`, box_2d: project(group.box, 15) }))
+	if (groundBox && !groundBox.isEmpty()) boxes.unshift({ label: "terrain", box_2d: project(groundBox, 10) })
+	return boxes
+}
+
 // Render a guide (optionally with edge lines) + a flat material-ID map of `subject` alone, on a
 // black background, with the dedicated `view` camera. Everything else — other block-out
 // meshes, all splats, the sky dome, outlines, helpers, the placement preview — is hidden

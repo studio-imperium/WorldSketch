@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"log"
 	"net/http"
+	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
+	"time"
 
 	"worldsketch/server/internal/config"
 	"worldsketch/server/internal/handlers"
@@ -17,9 +23,29 @@ func main() {
 	handlers.Register(mux)
 
 	clientDir := filepath.Join(config.RootDir(), "client")
-	mux.Handle("/", httpx.NoCache(http.FileServer(http.Dir(clientDir))))
+	mux.Handle("/", httpx.StaticHeaders(http.FileServer(http.Dir(clientDir))))
 
 	addr := config.Env("PORT", "8067")
 	log.Printf("WorldSketch listening on http://localhost:%s", addr)
-	log.Fatal(http.ListenAndServe(":"+addr, mux))
+	server := &http.Server{
+		Addr:              ":" + addr,
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+	stop, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancel()
+	go func() {
+		<-stop.Done()
+		ctx, done := context.WithTimeout(context.Background(), 10*time.Second)
+		defer done()
+		if err := server.Shutdown(ctx); err != nil {
+			log.Printf("shutdown: %v", err)
+		}
+	}()
+	if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Fatal(err)
+	}
 }

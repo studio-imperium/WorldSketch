@@ -17,7 +17,8 @@
 			"three": "/lib/three.module.js",
 			"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
 			"spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js",
-			"fflate": "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js"
+			"fflate": "https://cdn.jsdelivr.net/npm/fflate@0.8.2/esm/browser.js",
+			"@gradio/client": "https://cdn.jsdelivr.net/npm/@gradio/client@2.3.1/+esm"
 		}
 	}
 	</script>
@@ -98,6 +99,14 @@
 				<span class="brush-size-dot" id="brush_size_dot" aria-hidden="true"></span>
 				<input type="range" id="brush_size_slider" min="0.5" max="1.75" step="0.05" value="1" aria-label="Brush size" title="Brush size">
 			</div>
+			</div>
+		</div>
+		<div class="hf-auth" id="hf_auth">
+			<button class="hf-sign-in" id="hf_sign_in_btn" type="button">Sign in with Hugging Face</button>
+			<div class="hf-account hidden" id="hf_account">
+				<img class="hf-avatar hidden" id="hf_avatar" alt="">
+				<span class="hf-name" id="hf_name">Hugging Face connected</span>
+				<button class="hf-sign-out" id="hf_sign_out_btn" type="button">Sign out</button>
 			</div>
 		</div>
 		<div class="settings-menu" id="settings_menu">

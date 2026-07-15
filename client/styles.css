@@ -232,12 +232,6 @@ body.tab-view canvas.is-splat-rotate {
 	stroke-width: 2;
 }
 
-/* No inline progress under the prompt bar — the disabled buttons and the View tab's
-   spinner carry the in-flight signal. */
-.gen-progress {
-	display: none !important;
-}
-
 /* Errors DO need a surface (a failed generation used to die silently into the console):
    the status line floats as a dismissable toast under the tabs, outside the prompt bar.
    NOTE: not named `.status` — daisyUI v5 ships a Status-dot component on that class. */
@@ -430,9 +424,8 @@ body.tab-view canvas.is-splat-rotate {
 	cursor: wait;
 }
 
-/* World generation progress — sits under the generate button. The fill advances
-   one notch per generated subject (floor + each object) since a full world now
-   takes a while. */
+/* World generation progress — queue and stage updates sit under the prompt so a
+   public Space's wait never looks like a frozen app. */
 .gen-progress {
 	order: 2;
 	display: flex;
@@ -808,6 +801,70 @@ body.tab-view .side-rail {
 	left: 1rem;
 	top: 1rem;
 	display: none;
+}
+
+.hf-auth {
+	position: absolute;
+	top: 1rem;
+	right: 1rem;
+	z-index: 20;
+}
+
+.hf-sign-in,
+.hf-account {
+	min-height: 2.5rem;
+	border: 1px solid rgba(15, 23, 42, 0.1);
+	border-radius: 0.85rem;
+	background: rgba(255, 255, 255, 0.96);
+	color: #30343b;
+	box-shadow: 0 0.35rem 1.1rem rgba(15, 23, 42, 0.13);
+	font: inherit;
+}
+
+.hf-sign-in {
+	padding: 0.55rem 0.85rem;
+	font-size: 0.78rem;
+	font-weight: 650;
+	cursor: pointer;
+}
+
+.hf-account {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding: 0.35rem 0.45rem 0.35rem 0.4rem;
+}
+
+.hf-avatar {
+	width: 1.75rem;
+	height: 1.75rem;
+	border-radius: 50%;
+	object-fit: cover;
+}
+
+.hf-name {
+	max-width: 10rem;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 0.75rem;
+	font-weight: 650;
+}
+
+.hf-sign-out {
+	border: 0;
+	border-radius: 0.55rem;
+	padding: 0.35rem 0.5rem;
+	background: #f0f2f5;
+	color: #69717d;
+	font: inherit;
+	font-size: 0.7rem;
+	cursor: pointer;
+}
+
+.hf-sign-in:hover,
+.hf-sign-out:hover {
+	background: #e8ebf0;
 }
 
 body.dev-controls-visible .settings-menu {

@@ -1,8 +1,17 @@
 import * as THREE from "three"
 import { PackedSplats, SparkRenderer, SplatMesh } from "spark"
 import { zip, unzip } from "fflate"
-import { getConfig, newOutput, generateScene } from "/scripts/api.js"
-import { captureWorld, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
+import { getConfig } from "/scripts/api.js"
+import { captureWorld, projectCaptureBoxes, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
+import {
+	configureHuggingFace,
+	finishHuggingFaceSignIn,
+	generateSceneOnHuggingFace,
+	getHuggingFaceAuth,
+	onHuggingFaceAuthChange,
+	signInHuggingFace,
+	signOutHuggingFace,
+} from "/scripts/huggingface.js"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
@@ -54,7 +63,6 @@ const defaultFitSettings = {
 	yawDeg: 0,
 }
 let sceneFit = { ...defaultFitSettings }
-let sceneSemanticImage = false
 
 // Two stages: Build the block-out, then View the one-shot generated scene.
 let uiTab = "build"
@@ -68,6 +76,7 @@ let drag = null
 let nextPrimitiveId = 1
 let generating = false
 let splatting = false // a SPLAT generation is in flight (drives the View tab's disabled+spinner gate)
+let generationAbort = null
 
 // Raw one-shot scene bytes + metadata kept in memory for ZIP export and re-fitting.
 let sceneSplat = null
@@ -190,6 +199,11 @@ const els = {
 	historyClear: document.getElementById("history_clear_btn"),
 	historyClose: document.getElementById("history_close_btn"),
 	historyEmpty: document.getElementById("history_empty"),
+	hfSignIn: document.getElementById("hf_sign_in_btn"),
+	hfAccount: document.getElementById("hf_account"),
+	hfAvatar: document.getElementById("hf_avatar"),
+	hfName: document.getElementById("hf_name"),
+	hfSignOut: document.getElementById("hf_sign_out_btn"),
 }
 
 renderer.setSize(window.innerWidth, window.innerHeight)
@@ -1854,9 +1868,9 @@ const splatWorldBounds = new THREE.Box3()
 const splatBoxCorner = new THREE.Vector3()
 const viewHandleHitRadius = 15
 
-// Gemini-detected 2D boxes over the generated scene image ({label, box_2d:[y0,x0,y1,x1]}
-// in 0-1000 image coords). Fetched once per generation, persisted with the build, and
-// used by segmentation as objectness evidence + a per-piece wisp clip.
+// Known source-geometry boxes projected through the generation camera
+// ({label, box_2d:[y0,x0,y1,x1]} in 0-1000 image coords). They are deterministic,
+// persisted with the build, and used as segmentation evidence + a per-piece wisp clip.
 let sceneImageBoxes = null
 window.__wsSetImageBoxes = boxes => {
 	sceneImageBoxes = boxes
@@ -2755,6 +2769,9 @@ function hideProgress() {
 function syncGenerateButton() {
 	els.generate.disabled = generating
 	els.generate.classList.toggle("is-disabled", generating)
+	const signedIn = getHuggingFaceAuth().signedIn
+	els.generate.title = generating ? "Generating…" : signedIn ? "Generate with Hugging Face" : "Sign in with Hugging Face to generate"
+	els.generate.setAttribute("aria-label", signedIn ? "Generate world" : "Sign in with Hugging Face and generate")
 	// Make the frozen state visible: not-allowed cursor over both canvases, and no
 	// placement affordance left glowing.
 	document.body.classList.toggle("is-generating", generating)
@@ -3209,7 +3226,6 @@ function fitSettingsFromConfig(cfg) {
 
 function applyRuntimeConfig(cfg) {
 	sceneFit = fitSettingsFromConfig(cfg)
-	sceneSemanticImage = Boolean(cfg?.scene?.semanticImage)
 }
 
 // --- Scene yaw estimation ------------------------------------------------------
@@ -3820,13 +3836,13 @@ function segmentSceneSplat(hasGround = true) {
 	const spanZ = Math.max(1e-3, maxZ - minZ)
 	const VOX = Math.max(VOX_MIN, Math.min(VOX_MAX, Math.max(spanX, spanY, spanZ) / VOX_TARGET_CELLS))
 
-	// ---- Image-box projection (AI-assisted evidence) -----------------------------------
+	// ---- Image-box projection (source-geometry evidence) -------------------------------
 	// Project every seated gaussian into the generated image's frame (the capture ortho
 	// camera is fully known: stored capture angles + the wholeSceneBox framing), so
-	// Gemini's detected object boxes become usable per-gaussian evidence: material inside
-	// an object's box is that object; material outside EVERY box is haze/wisp. Boxes are
-	// content-aligned (detected on the OUTPUT image), so image-model placement drift is
-	// irrelevant — unlike the abandoned block-mask projection.
+	// the block-out's projected object boxes become usable per-gaussian evidence: material
+	// inside an object's box is that object; material outside EVERY box is haze/wisp. The
+	// image prompt requires composition preservation, and IMG_BOX_PAD below allows modest
+	// detail growth or fitting drift around the source silhouette.
 	let imgU = null, imgV = null // 0-1000 image coords per gaussian
 	let imageObjectBoxes = null, imageTerrainBox = null, imageFeatureBoxes = []
 	if (sceneImageBoxes?.length) {
@@ -3848,8 +3864,8 @@ function segmentSceneSplat(hasGround = true) {
 			imgU[i] = ((u - uc) / (2 * half) + 0.5) * 1000
 			imgV[i] = (1 - ((v - vc) / (2 * half) + 0.5)) * 1000
 		}
-		// Ground features (pond, paths) are part of the terrain even when the detector
-		// boxes them; only true props count as objectness evidence.
+		// Ground features (ponds, paths) are terrain when custom/dev boxes include them;
+		// only true object groups count as objectness evidence.
 		const groundish = /terrain|pond|water|lake|path|road|shadow|ground/
 		imageObjectBoxes = sceneImageBoxes.filter(b => Array.isArray(b.box_2d) && !groundish.test((b.label ?? "").toLowerCase()))
 		imageTerrainBox = sceneImageBoxes.find(b => (b.label ?? "").toLowerCase() === "terrain" && Array.isArray(b.box_2d))?.box_2d ?? null
@@ -5677,6 +5693,11 @@ async function generateWorld(prompt) {
 		els.chatPrompt.placeholder = "Draw some ground with the paint tool first…"
 		return
 	}
+	if (!getHuggingFaceAuth().signedIn) {
+		snapshotActiveBuildFrame()
+		await signInHuggingFace(prompt)
+		return
+	}
 	generating = true
 	splatting = true
 	world.prompt = prompt
@@ -5691,8 +5712,8 @@ async function generateWorld(prompt) {
 		const genStart = performance.now()
 		const cfg = await getConfig()
 		applyRuntimeConfig(cfg)
-		let output = null
-		try { output = (await newOutput()).index } catch {}
+		configureHuggingFace(cfg?.generation)
+		generationAbort = new AbortController()
 
 		const box = wholeSceneBox()
 		const subjectMeshes = hasGround ? world.allBlockoutMeshes() : [...world.primitives]
@@ -5708,17 +5729,20 @@ async function generateWorld(prompt) {
 			theta: FRONT_THETA + Math.round((orbit.theta - FRONT_THETA) / QUARTER) * QUARTER,
 			phi: FRONT_PHI,
 		}
-		const capture = await captureWorld(renderer, scene, world, box, sceneSemanticImage ? objectGroups : null, viewAngles)
+		const capture = await captureWorld(renderer, scene, world, box, null, viewAngles)
 		const captureMs = performance.now() - tCap
+		// Qwen is asked to preserve the camera and composition, so the original object
+		// bounds remain the most reliable boxes for later splat segmentation.
+		sceneImageBoxes = projectCaptureBoxes(objectGroups, world.groundInkBounds(), box, capture)
 
 		sceneSplat = null
 		sceneSession = null
-		showProgress(0, 1, "Texturing and reconstructing complete scene…")
-		const bytes = await generateScene({
+		showProgress(0, 100, "Sending the scene to Hugging Face…")
+		const { bytes } = await generateSceneOnHuggingFace({
 			prompt,
-			output,
 			image: capture.guide,
-			materialImage: sceneSemanticImage ? capture.semanticMap : null,
+			signal: generationAbort.signal,
+			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),
 		})
 		// Fit a copy so sceneSplat retains the pristine TripoSplat bytes for ZIP/history.
 		// Preserve the one-shot reconstruction's proportions with a uniform fit. The
@@ -5736,22 +5760,16 @@ async function generateWorld(prompt) {
 			yOffset: sceneFit.yOffset,
 		})
 		sceneSplat = bytes
-		sceneSession = { hasGround, yawDeg: sceneYawDeg, mirrorZ: sceneMirrorZ, captureTheta: capture.theta, capturePhi: capture.phi }
-		// AI box detection on the generated image (Gemini, server-cached): objectness
-		// evidence + wisp clipping for segmentation. Best-effort — never blocks the build.
-		sceneImageBoxes = null
-		if (output != null) {
-			try {
-				const res = await fetch(`/api/scene-boxes?output=${output}`)
-				if (res.ok) {
-					sceneImageBoxes = await res.json()
-					sceneSession.imageBoxes = sceneImageBoxes
-					console.log(`[segment] fetched ${sceneImageBoxes?.length ?? 0} image box(es) for output ${output}`)
-				}
-			} catch (error) { console.warn("scene boxes:", error.message || error) }
+		sceneSession = {
+			hasGround,
+			yawDeg: sceneYawDeg,
+			mirrorZ: sceneMirrorZ,
+			captureTheta: capture.theta,
+			capturePhi: capture.phi,
+			imageBoxes: sceneImageBoxes,
 		}
 		// Carve the one splat into per-object pieces so View can move them; a segmentation
-		// failure must never sink the (paid) generation — the monolith is a fine fallback.
+		// failure must never sink the completed generation — the monolith is a fine fallback.
 		try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment:", error) }
 
 		console.log(`[timing] whole scene ${((performance.now() - genStart) / 1000).toFixed(1)}s — one capture ${(captureMs / 1000).toFixed(1)}s · one texture edit · one TripoSplat request`)
@@ -5768,6 +5786,7 @@ async function generateWorld(prompt) {
 		setStatus(error.message || "Generation failed")
 		hideProgress()
 	} finally {
+		generationAbort = null
 		generating = false
 		splatting = false
 		syncGenerateButton()
@@ -6602,7 +6621,16 @@ els.chatForm.addEventListener("submit", event => {
 	event.preventDefault()
 	if (els.generate.disabled) return
 	const prompt = els.chatPrompt.value.trim()
-	generateWorld(prompt)
+	generateWorld(prompt).catch(error => setStatus(error.message || "Could not start generation"))
+})
+
+els.hfSignIn?.addEventListener("click", () => {
+	signInHuggingFace(els.chatPrompt.value.trim()).catch(error => setStatus(error.message || "Could not start sign-in"))
+})
+
+els.hfSignOut?.addEventListener("click", () => {
+	signOutHuggingFace()
+	setStatus("Signed out of Hugging Face")
 })
 
 window.addEventListener("resize", () => {
@@ -6625,6 +6653,31 @@ function animate(now = performance.now()) {
 	syncViewTransformOverlay()
 	renderer.render(scene, camera)
 	requestAnimationFrame(animate)
+}
+
+const runtimeConfig = await getConfig()
+applyRuntimeConfig(runtimeConfig)
+configureHuggingFace(runtimeConfig?.generation)
+onHuggingFaceAuthChange(({ signedIn, user }) => {
+	els.hfSignIn?.classList.toggle("hidden", signedIn)
+	els.hfAccount?.classList.toggle("hidden", !signedIn)
+	if (signedIn) {
+		els.hfName.textContent = user?.fullname || user?.name || "Hugging Face connected"
+		const avatar = user?.avatarUrl || user?.avatar_url || ""
+		els.hfAvatar.classList.toggle("hidden", !avatar)
+		if (avatar) els.hfAvatar.src = avatar
+		else els.hfAvatar.removeAttribute("src")
+	}
+	syncGenerateButton()
+})
+try {
+	const callback = await finishHuggingFaceSignIn()
+	if (callback.handled) {
+		if (callback.prompt) els.chatPrompt.value = callback.prompt
+		setStatus("Hugging Face connected. Press Generate when you are ready.")
+	}
+} catch (error) {
+	setStatus(error.message || "Hugging Face sign-in failed")
 }
 
 setActiveTool("pointer")
