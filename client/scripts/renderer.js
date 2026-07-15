@@ -145,7 +145,6 @@ const segmentationTuneDefaults = {
 	groundSmooth: 0.63,
 	groundFill: 0.6,
 	groundFillMaxHeight: 0.25,
-	groundStretch: 0,
 	scarDilation: 1,
 	scarBaseHeight: 0.85,
 	scarBaseSurface: 1.1,
@@ -158,7 +157,6 @@ const adjustableSegmentationKeys = new Set([
 	"minBlob", "bridgeCut", "colorSplit", "terrainBias", "baseDetachStrength",
 	"skirtGuardMinRise", "wispAggression", "detachedCullPct", "cullAmount",
 	"cleanupReach", "edgeOutliers", "groundSmooth", "groundFill", "groundFillMaxHeight",
-	"groundStretch",
 ])
 try {
 	const saved = JSON.parse(localStorage.getItem("worldsketch.segmentationTuning") || "{}")
@@ -2185,171 +2183,6 @@ function setViewTransformCursor(mode = null) {
 	renderer.domElement.classList.toggle("is-splat-rotate", mode === "rotate")
 }
 
-// --- Rubber ground attachment (prototype) -----------------------------------
-// While a single object piece is dragged in View, the floor gaussians around
-// its base are pulled along with it — carried fully at the footprint, fading to
-// anchored at the outer ring — so the piece stays visually attached and the
-// ground stretches toward it like rubber. Gaussians mid-ring get elongated
-// along the pull direction; dragging back to the start restores them exactly.
-const rubberScratch = {
-	delta: new THREE.Matrix4(),
-	startInv: new THREE.Matrix4(),
-	basis: new THREE.Matrix4(),
-	target: new THREE.Vector3(),
-	disp: new THREE.Vector3(),
-	dir: new THREE.Vector3(),
-	side: new THREE.Vector3(),
-	up: new THREE.Vector3(),
-	center: new THREE.Vector3(),
-	scales: new THREE.Vector3(),
-	quat: new THREE.Quaternion(),
-}
-
-function beginGroundRubber() {
-	const objects = drag.members.filter(member => member.mesh.userData.genKind === "object")
-	if (objects.length !== 1) return
-	const member = objects[0]
-	const groundRecord = world.generated.find(g => g.mesh.userData.genKind === "floor" && g.mesh !== member.mesh)
-	const packed = groundRecord?.mesh.packedSplats
-	if (!packed?.numSplats) return
-	const groundMesh = groundRecord.mesh
-	groundMesh.updateMatrixWorld(true)
-	member.mesh.updateMatrixWorld(true)
-	const contentBox = member.mesh.userData.contentBox
-	if (!contentBox || contentBox.isEmpty()) return
-	const worldBox = contentBox.clone().applyMatrix4(member.mesh.matrixWorld)
-	// Loosely segmented pieces can carry a wide ground skirt in their bounding
-	// box; clamp the reach so one object never recruits half the island.
-	const footprint = Math.min(worldBox.max.x - worldBox.min.x, worldBox.max.z - worldBox.min.z)
-	const baseReach = Math.min(2.2, Math.max(0.8, 0.45 * footprint))
-	// Capture a generous candidate pool up front; the active ring grows with the
-	// pull distance at apply time, recruiting farther material like real rubber.
-	const maxReach = Math.min(6, Math.max(3, 3 * footprint))
-	const baseY = worldBox.min.y
-	const groundMatrix = groundMesh.matrixWorld
-	const world0 = new THREE.Vector3()
-	const entries = []
-	const meanColor = { r: 0, g: 0, b: 0, n: 0 }
-	packed.forEachSplat((index, center, scales, quaternion, opacity, color) => {
-		if (entries.length >= 20000) return
-		world0.copy(center).applyMatrix4(groundMatrix)
-		if (world0.y < baseY - 1.2 || world0.y > baseY + 1.2) return
-		const dx = Math.max(worldBox.min.x - world0.x, 0, world0.x - worldBox.max.x)
-		const dz = Math.max(worldBox.min.z - world0.z, 0, world0.z - worldBox.max.z)
-		const dist = Math.hypot(dx, dz)
-		if (dist > maxReach) return
-		// Baked contact shadows are near-black; carrying and elongating them
-		// smears dark streaks across the floor. Leave them mostly anchored (a
-		// shadow shouldn't travel with the object) and never stretch them.
-		const luminance = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
-		const dark = luminance < 0.16
-		if (!dark) {
-			meanColor.r += color.r
-			meanColor.g += color.g
-			meanColor.b += color.b
-			meanColor.n++
-		}
-		entries.push({
-			index,
-			dark,
-			dist,
-			world: world0.clone(),
-			center: center.clone(),
-			scales: scales.clone(),
-			quaternion: quaternion.clone(),
-			opacity,
-			color: color.clone(),
-			planar: Math.max(scales.x, scales.z),
-			narrow: Math.min(scales.x, scales.z),
-		})
-	})
-	if (!entries.length) return
-	// Splats far from the terrain's dominant palette are usually object fringe
-	// (tent canvas, walls) left in the ground layer — stretching them paints
-	// alien-coloured streaks across the floor, so treat them like shadows.
-	if (meanColor.n) {
-		meanColor.r /= meanColor.n
-		meanColor.g /= meanColor.n
-		meanColor.b /= meanColor.n
-		for (const entry of entries) {
-			const off = Math.hypot(entry.color.r - meanColor.r, entry.color.g - meanColor.g, entry.color.b - meanColor.b)
-			if (off > 0.42) entry.dark = true
-		}
-	}
-	const invQuat = new THREE.Quaternion()
-	groundMesh.getWorldQuaternion(invQuat).invert()
-	drag.rubber = {
-		packed,
-		member,
-		entries,
-		invQuat,
-		baseReach,
-		maxReach,
-		invGroundMatrix: groundMatrix.clone().invert(),
-		startMatrix: member.mesh.matrixWorld.clone(),
-	}
-	console.log(`[rubber] holding ${entries.length} floor gaussian(s) around ${member.mesh.userData.genName}`)
-}
-
-function applyGroundRubber() {
-	const rubber = drag?.rubber
-	if (!rubber) return
-	const { delta, startInv, basis, target, disp, dir, side, up, quat, scales: outScales, center: outCenter } = rubberScratch
-	// Full world-space transform delta of the dragged piece since grab — one
-	// formula covers moves, lifts, rotations, and scales alike.
-	rubber.member.mesh.updateMatrixWorld(true)
-	startInv.copy(rubber.startMatrix).invert()
-	delta.multiplyMatrices(rubber.member.mesh.matrixWorld, startInv)
-	for (const entry of rubber.entries) {
-		target.copy(entry.world).applyMatrix4(delta)
-		disp.copy(target).sub(entry.world)
-		const pull = disp.length()
-		// The active band widens with the pull, so long drags recruit farther
-		// material instead of tearing a hole at the origin, and the stretch
-		// ratio stays bounded (~2.3×) no matter how far the piece travels.
-		const reach = Math.min(rubber.maxReach, rubber.baseReach + pull * 1.1)
-		// Linear falloff = uniform stretch across the whole band; a smoothstep
-		// concentrates the stretch mid-band and tears the edges instead. Shadow
-		// and off-palette splats stay fully anchored — a shadow patch left at
-		// the old spot reads far more natural than a travelling dark smear.
-		const weight = entry.dark ? 0 : Math.max(0, 1 - entry.dist / reach)
-		const carried = disp.multiplyScalar(weight)
-		outCenter.copy(entry.world).add(carried).applyMatrix4(rubber.invGroundMatrix)
-		// Anchored shadow / off-palette fringe fades out as its object departs —
-		// a contact shadow with no caster left reads as a burnt black crater.
-		if (entry.dark) {
-			const faded = entry.opacity * Math.max(0.08, 1 - pull * 0.45)
-			rubber.packed.setSplat(entry.index, outCenter, entry.scales, entry.quaternion, faded, entry.color)
-			continue
-		}
-		// Real rubber stretches the whole band by the same ratio (pull ÷ band
-		// width). Elongating every ring splat by that ratio keeps neighbours
-		// overlapping, so the stretched surface stays continuous instead of
-		// tearing into stripes. Splats inside the footprint ride rigidly.
-		const ring = !entry.dark && weight > 0.03 && weight < 0.97
-		if (ring && pull > 1e-3 && carried.lengthSq() > 1e-8) {
-			dir.copy(carried).normalize().applyQuaternion(rubber.invQuat)
-			up.set(0, 1, 0)
-			side.crossVectors(dir, up)
-			if (side.lengthSq() < 1e-6) side.set(1, 0, 0)
-			side.normalize()
-			up.crossVectors(side, dir).normalize()
-			basis.makeBasis(dir, up, side)
-			quat.setFromRotationMatrix(basis)
-			const elongation = Math.min(3.5, 1 + pull / Math.max(0.3, reach))
-			outScales.set(
-				entry.planar * elongation,
-				entry.scales.y,
-				Math.min(entry.narrow * 2.5, entry.narrow * (1 + 0.8 * (elongation - 1))),
-			)
-			rubber.packed.setSplat(entry.index, outCenter, outScales, quat, entry.opacity, entry.color)
-		} else {
-			rubber.packed.setSplat(entry.index, outCenter, entry.scales, entry.quaternion, entry.opacity, entry.color)
-		}
-	}
-	rubber.packed.needsUpdate = true
-}
-
 function startSplatGroupDrag(event, mode) {
 	const pivot = selectedSplatPivot(mode === "scale")
 	if (!pivot || !selectedSplatMeshes.size) return false
@@ -2377,7 +2210,6 @@ function startSplatGroupDrag(event, mode) {
 		rollCenter: objectScreenPosition(pivot),
 	}
 	drag.startAngle = pointerScreenAngle(event, drag.rollCenter)
-	beginGroundRubber()
 	renderer.domElement.setPointerCapture(event.pointerId)
 	renderer.domElement.classList.add("is-dragging")
 	return true
@@ -2493,7 +2325,6 @@ function updateSplatMove(event) {
 			member.mesh.position.set(member.position.x, member.position.y + dy, member.position.z)
 		}
 		if (Math.abs(dy) > 0.001) drag.mutated = true
-		applyGroundRubber()
 		return
 	}
 	splatDragPlane.set(localUp, -drag.startPoint.y)
@@ -2506,7 +2337,6 @@ function updateSplatMove(event) {
 		member.mesh.position.set(member.position.x + dx, member.position.y, member.position.z + dz)
 	}
 	if (Math.hypot(dx, dz) > 0.001) drag.mutated = true
-	applyGroundRubber()
 }
 
 // Uniform group scale from the combined bottom centre so the selection stays seated
@@ -2519,7 +2349,6 @@ function updateSplatScale(event) {
 		member.mesh.position.copy(member.position).sub(drag.pivot).multiplyScalar(factor).add(drag.pivot)
 	}
 	if (Math.abs(factor - 1) > 0.001) drag.mutated = true
-	applyGroundRubber()
 }
 
 // Pointer angle around the selection centre rotates every member and its offset from the
@@ -2532,7 +2361,6 @@ function updateSplatRotate(event) {
 		member.mesh.position.copy(member.position).sub(drag.pivot).applyQuaternion(splatRotQuat).add(drag.pivot)
 	}
 	if (Math.abs(angle) > 0.001) drag.mutated = true
-	applyGroundRubber()
 }
 
 function setViewTool(tool) {
@@ -3261,10 +3089,6 @@ const segmentationTuneControls = [
 	{
 		id: "ground-fill-height", group: "Repair the ground", key: "groundFillMaxHeight", label: "Highest height to fill", min: 0, max: 1, step: 0.01, format: percent,
 		description: "Measured from the bottom to the top of each original object.", low: "Object base", high: "Object top",
-	},
-	{
-		id: "ground-stretch", group: "Repair the ground", key: "groundStretch", label: "Stretch edges over holes (instead of fill)", min: 0, max: 1, step: 0.01, format: percent,
-		description: "Pulls the surrounding ground gaussians over the hole like rubber instead of adding filler material.", low: "Fill (off)", high: "Full stretch",
 	},
 ]
 
@@ -5844,7 +5668,6 @@ function segmentSceneSplat(hasGround = true) {
 		const GROUND_SMOOTH = clamp01(segmentationTuning.groundSmooth ?? 0.8)
 		const GROUND_FILL = clamp01(segmentationTuning.groundFill ?? 0.5)
 		const GROUND_FILL_MAX_HEIGHT = clamp01(segmentationTuning.groundFillMaxHeight ?? 0.25)
-		const GROUND_STRETCH = clamp01(segmentationTuning.groundStretch ?? 0)
 		const SCAR_RAISED_CULL = lerp(0.55, 0.015, GROUND_SMOOTH) // stronger smoothing removes material closer to the repaired floor
 		const SCAR_NEARBY_COLOR_RADIUS = 8 // larger = sample terrain colour farther away from the scar
 		const SCAR_TARGET_SPLATS = Math.round(lerp(0, 36, GROUND_FILL)) // higher = denser/more opaque-looking fill
@@ -5990,112 +5813,6 @@ function segmentSceneSplat(hasGround = true) {
 			}
 			let scarSkippedSkyCells = 0
 			let scarSkippedHighCells = 0
-			if (GROUND_STRETCH > 0) {
-				// Rubber-sheet repair prototype: instead of paving the hole with synthetic
-				// filler, pull the ground gaussians ringing the scar inward and elongate
-				// them toward the hole, so the surrounding material stretches over the gap.
-				const RIM_CELLS = 3
-				const NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]]
-				const rimDist = new Int32Array(gw * gh).fill(-1)
-				const nearestScar = new Int32Array(gw * gh).fill(-1)
-				const scarDepth = new Int32Array(gw * gh)
-				let frontier = []
-				for (let cell = 0; cell < gw * gh; cell++) {
-					if (!scarCells[cell]) continue
-					rimDist[cell] = 0
-					nearestScar[cell] = cell
-					frontier.push(cell)
-				}
-				const scarCellTotal = frontier.length
-				// Depth of each scar cell from open ground: deeper cells need a longer pull.
-				let edge = []
-				for (const cell of frontier) {
-					const cx = cell % gw, cz = (cell / gw) | 0
-					const open = NEIGHBORS.some(([dx, dz]) => {
-						const nx = cx + dx, nz = cz + dz
-						return nx < 0 || nx >= gw || nz < 0 || nz >= gh || !scarCells[nz * gw + nx]
-					})
-					if (open) {
-						scarDepth[cell] = 1
-						edge.push(cell)
-					}
-				}
-				while (edge.length) {
-					const next = []
-					for (const cell of edge) {
-						const cx = cell % gw, cz = (cell / gw) | 0
-						for (const [dx, dz] of NEIGHBORS) {
-							const nx = cx + dx, nz = cz + dz
-							if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
-							const n = nz * gw + nx
-							if (scarCells[n] && !scarDepth[n]) {
-								scarDepth[n] = scarDepth[cell] + 1
-								next.push(n)
-							}
-						}
-					}
-					edge = next
-				}
-				// Ring distances outward from the scar, remembering the nearest scar cell.
-				while (frontier.length) {
-					const next = []
-					for (const cell of frontier) {
-						const d = rimDist[cell]
-						if (d >= RIM_CELLS) continue
-						const cx = cell % gw, cz = (cell / gw) | 0
-						for (const [dx, dz] of NEIGHBORS) {
-							const nx = cx + dx, nz = cz + dz
-							if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
-							const n = nz * gw + nx
-							if (rimDist[n] !== -1) continue
-							rimDist[n] = d + 1
-							nearestScar[n] = nearestScar[cell]
-							next.push(n)
-						}
-					}
-					frontier = next
-				}
-				const stretched = new PackedSplats()
-				const stretchedBounds = new THREE.Box3()
-				const pullDir = new THREE.Vector3()
-				let stretchedCount = 0
-				ground.packed.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
-					const cell = cellOfXZ(center.x, center.z)
-					const d = rimDist[cell]
-					const ns = nearestScar[cell]
-					if (d > 0 && d <= RIM_CELLS && ns >= 0) {
-						const tx = minX + ((ns % gw) + 0.5) * cellW
-						const tz = minZ + (((ns / gw) | 0) + 0.5) * cellD
-						pullDir.set(tx - center.x, 0, tz - center.z)
-						const reach = pullDir.length()
-						if (reach > 1e-6) {
-							pullDir.multiplyScalar(1 / reach)
-							const falloff = (RIM_CELLS + 1 - d) / RIM_CELLS
-							const depth = Math.max(1, scarDepth[ns])
-							// Pull toward the hole, capped so a splat never overshoots its target
-							// cell; deeper holes recruit a longer reach from their rim.
-							const pull = GROUND_STRETCH * falloff * Math.min(reach, cellW * (0.4 + depth * 0.6))
-							center.x += pullDir.x * pull
-							center.z += pullDir.z * pull
-							// Drape slightly down toward the repaired floor height inside the hole.
-							center.y = lerp(center.y, repairFloorHeight[ns] + SCAR_HEIGHT, 0.3 * GROUND_STRETCH * falloff)
-							// Elongate along the pull direction (rotate the gaussian's long axis
-							// toward the hole), keeping thickness and the narrow axis as they were.
-							const planar = Math.max(scales.x, scales.z)
-							const narrow = Math.min(scales.x, scales.z)
-							const elongation = 1 + GROUND_STRETCH * falloff * (0.8 + depth * 0.8)
-							quaternion.setFromAxisAngle(localUp, Math.atan2(-pullDir.z, pullDir.x))
-							scales.set(planar * elongation, scales.y, narrow)
-							stretchedCount++
-						}
-					}
-					stretched.pushSplat(center, scales, quaternion, opacity, color)
-					stretchedBounds.expandByPoint(center)
-				})
-				ground.packed = stretched
-				ground.bounds = stretchedBounds
-				console.log(`[segment] ground scar stretch → ${stretchedCount} rim gaussian(s) pulled over ${scarCellTotal} scar cell(s) (fill skipped)`)
-			} else {
 			for (let cz = 0; cz < gh; cz++) {
 				for (let cx = 0; cx < gw; cx++) {
 					const cell = cz * gw + cx
@@ -6135,7 +5852,6 @@ function segmentSceneSplat(hasGround = true) {
 			}
 			if (scarSkippedSkyCells) console.log(`[segment] ground scar flatten skipped ${scarSkippedSkyCells} sky/unanchored scar cell(s)`)
 			if (scarSkippedHighCells) console.log(`[segment] ground scar flatten skipped ${scarSkippedHighCells} cell(s) above the object-relative fill ceiling`)
-			}
 		}
 		if (scarPatchSplats || scarRemnantsCulled) console.log(`[segment] ground scar flatten → ${scarPatchSplats} filler + ${scarRemnantsCulled} raised remnant gaussian(s) under object footprint(s)`)
 	}
