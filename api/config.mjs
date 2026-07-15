@@ -41,7 +41,7 @@ export function runtimeConfig() {
 			tripo: {
 				steps: envInt("WS_HF_TRIPO_STEPS", 30, 1, 64),
 				guidance: envFloat("WS_HF_TRIPO_GUIDANCE", 3),
-				gaussians: envInt("WS_HF_TRIPO_GAUSSIANS", 262144, 32768, 262144),
+				gaussians: envInt("WS_HF_TRIPO_GAUSSIANS", 131072, 32768, 262144),
 				format: "splat",
 			},
 		},

@@ -20,7 +20,7 @@ const DEFAULT_CONFIG = {
 	inferenceProvider: "fal-ai",
 	inferenceModel: "black-forest-labs/FLUX.2-klein-4B",
 	image: { steps: 4, guidance: 1, width: 1024, height: 1024 },
-	tripo: { steps: 30, guidance: 3, gaussians: 262144, format: "splat" },
+	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
 }
 
 let config = structuredClone(DEFAULT_CONFIG)
@@ -72,11 +72,56 @@ function fileReference(value) {
 	return null
 }
 
-async function downloadFile(file, space, signal) {
+async function downloadFile(file, space, signal, { onProgress, stallMs = 45_000 } = {}) {
 	const url = resolveAuthenticatedSpaceFileURL(file, space)
-	const response = await fetch(url, { headers: { Authorization: `Bearer ${getHuggingFaceAccessToken()}` }, signal })
-	if (!response.ok) throw new Error(`Could not download the generated file (${response.status})`)
-	return response.blob()
+	const controller = new AbortController()
+	let stalled = false
+	let stallTimer = 0
+	const abort = () => controller.abort(signal?.reason)
+	const armStallTimer = () => {
+		window.clearTimeout(stallTimer)
+		stallTimer = window.setTimeout(() => {
+			stalled = true
+			controller.abort()
+		}, stallMs)
+	}
+	signal?.addEventListener("abort", abort, { once: true })
+	try {
+		armStallTimer()
+		const response = await fetch(url, {
+			headers: { Authorization: `Bearer ${getHuggingFaceAccessToken()}` },
+			signal: controller.signal,
+		})
+		if (!response.ok) throw new Error(`Could not download the generated file (${response.status})`)
+		const reader = response.body?.getReader?.()
+		if (!reader) return response.blob()
+		const total = Math.max(0, Number(response.headers.get("content-length")) || 0)
+		const chunks = []
+		let loaded = 0
+		while (true) {
+			armStallTimer()
+			const { done, value } = await reader.read()
+			if (done) break
+			if (!value?.byteLength) continue
+			chunks.push(value)
+			loaded += value.byteLength
+			onProgress?.({ loaded, total })
+		}
+		return new Blob(chunks, { type: response.headers.get("content-type") || "application/octet-stream" })
+	} catch (error) {
+		if (stalled) throw new Error(`The generated file download stalled for ${Math.round(stallMs / 1000)} seconds. Please try again.`)
+		throw error
+	} finally {
+		window.clearTimeout(stallTimer)
+		signal?.removeEventListener("abort", abort)
+	}
+}
+
+function downloadLabel(loaded, total) {
+	const mb = bytes => `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+	return total > 0
+		? `Downloading the 3D scene — ${mb(loaded)} of ${mb(total)}`
+		: `Downloading the 3D scene — ${mb(loaded)}`
 }
 
 function statusLabel(stage, message) {
@@ -172,8 +217,15 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 		const splatFile = fileReference(tripoData?.[2]) ?? fileReference(tripoData)
 		if (!splatFile) throw new Error("TripoSplat returned no 3D file")
 		onProgress?.(0.94, "Downloading the 3D scene")
-		const splat = await downloadFile(splatFile, config.tripoSpace, signal)
-		return { bytes: new Uint8Array(await splat.arrayBuffer()), editedImage }
+		const splat = await downloadFile(splatFile, config.tripoSpace, signal, {
+			onProgress: ({ loaded, total }) => {
+				const ratio = total > 0 ? loaded / total : Math.min(0.95, loaded / (8 * 1024 * 1024))
+				onProgress?.(0.94 + Math.min(1, ratio) * 0.03, downloadLabel(loaded, total))
+			},
+		})
+		onProgress?.(0.97, "Reading the downloaded 3D scene")
+		const bytes = new Uint8Array(await splat.arrayBuffer())
+		return { bytes, editedImage }
 	} catch (error) {
 		throw friendlyHuggingFaceError(error)
 	}

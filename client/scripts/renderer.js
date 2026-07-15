@@ -8,7 +8,7 @@ import {
 	generateSceneOnHuggingFace,
 	getHuggingFaceAuth,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=auth-landing-1"
+} from "/scripts/huggingface.js?v=splat-download-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
@@ -32,6 +32,7 @@ const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false, stenci
 const raycaster = new THREE.Raycaster()
 const pointer = new THREE.Vector2()
 const scratch = new THREE.Vector3()
+const MAX_AUTOMATIC_SEGMENT_SPLATS = 180_000
 const localUp = new THREE.Vector3(0, 1, 0)
 const localFaceNormal = new THREE.Vector3()
 const placementNormal = new THREE.Vector3()
@@ -2823,6 +2824,10 @@ function hideProgress() {
 	els.progressFill.style.width = "0%"
 	els.progressPercent.textContent = "0%"
 	els.progressTrack.setAttribute("aria-valuenow", "0")
+}
+
+function yieldForProgressPaint() {
+	return new Promise(resolve => requestAnimationFrame(() => window.setTimeout(resolve, 0)))
 }
 
 function syncGeometryPrompt() {
@@ -5877,6 +5882,8 @@ async function generateWorld(prompt) {
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),
 		})
 		logGenerationDebugImage("output", "Final FLUX image sent to TripoSplat", editedImage)
+		showProgress(97, 100, "Analyzing the 3D scene…")
+		await yieldForProgressPaint()
 		// Fit a copy so sceneSplat retains the pristine TripoSplat bytes for ZIP/history.
 		// Preserve the one-shot reconstruction's proportions with a uniform fit. The
 		// terrain and objects share one cloud, so independently forcing X and Z onto the
@@ -5887,7 +5894,9 @@ async function generateWorld(prompt) {
 		const sceneEstimate = await estimateSceneYaw(bytes, subjectMeshes, capture.guide, capture)
 		const sceneYawDeg = sceneEstimate?.yawDeg ?? (sceneFit.yawDeg + captureYawDeg)
 		const sceneMirrorZ = sceneEstimate?.mirrorZ ?? false
-		await seatScene(bytes.slice(), box, {
+		showProgress(98, 100, "Loading the 3D scene…")
+		await yieldForProgressPaint()
+		const seatedScene = await seatScene(bytes.slice(), box, {
 			yawDeg: sceneYawDeg,
 			mirrorZ: sceneMirrorZ,
 			yOffset: sceneFit.yOffset,
@@ -5903,7 +5912,15 @@ async function generateWorld(prompt) {
 		}
 		// Carve the one splat into per-object pieces so View can move them; a segmentation
 		// failure must never sink the completed generation — the monolith is a fine fallback.
-		try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment:", error) }
+		const splatCount = seatedScene?.packedSplats?.numSplats ?? 0
+		const segmentationSkipped = splatCount > MAX_AUTOMATIC_SEGMENT_SPLATS
+		showProgress(99, 100, segmentationSkipped ? "Finalizing the 3D scene…" : "Separating scene objects…")
+		await yieldForProgressPaint()
+		if (segmentationSkipped) {
+			console.warn(`[segment] skipped automatic separation for ${splatCount.toLocaleString()} splats to keep the browser responsive`)
+		} else {
+			try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment:", error) }
+		}
 
 		console.log(`[timing] whole scene ${((performance.now() - genStart) / 1000).toFixed(1)}s — one capture ${(captureMs / 1000).toFixed(1)}s · one texture edit · one TripoSplat request`)
 
@@ -5914,6 +5931,7 @@ async function generateWorld(prompt) {
 		frameGeneratedSplats()
 		saveBuildToHistory(world.prompt)
 		showProgress(1, 1, "Done")
+		if (segmentationSkipped) setStatus("Scene loaded as one piece because it was too dense to separate safely in the browser")
 		window.setTimeout(hideProgress, 1000)
 	} catch (error) {
 		setStatus(error.message || "Generation failed")
