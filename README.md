@@ -1,6 +1,6 @@
 # WorldSketch
 
-WorldSketch turns a browser-built block-out into a detailed image with FLUX.2 dev, then converts that image into a Gaussian splat with TripoSplat. The image step uses a public Hugging Face Space by default, or the user's monthly inference credits when they enable that setting. TripoSplat runs through a public Space using the user's ZeroGPU allowance. The WorldSketch server never receives or stores the user's Hugging Face token, source image, generated image, or splat.
+WorldSketch turns a browser-built block-out into a detailed image with Qwen-Image-Edit-2509, then converts that image into a Gaussian splat with TripoSplat. The image step uses a public Hugging Face Space by default, or the user's monthly inference credits when they enable that setting. TripoSplat runs through a public Space using the user's ZeroGPU allowance. The WorldSketch server never receives or stores the user's Hugging Face token, source image, generated image, or splat.
 
 ## Run locally
 
@@ -31,7 +31,7 @@ Before using a production domain:
 
 No API keys or persistent volume are required. Scaling the web service horizontally is safe because generation state and user credentials stay in the browser. Public Spaces can change or become unavailable; the Space ID is an environment setting, although a replacement must expose the same Gradio input and output shape or the browser adapter must be updated with it.
 
-The default image Space is the official `black-forest-labs/FLUX.2-dev` (30-step image editing, prompt upsampling disabled); set `WS_HF_IMAGE_SPACE=black-forest-labs/FLUX.2-klein-4B` with `WS_HF_IMAGE_STEPS=4` and `WS_HF_IMAGE_GUIDANCE=1` to switch back to the faster distilled Klein model. The Space allows up to 85 seconds for a job; actual quota usage depends on how long the GPU function runs.
+The default image Space is the official `Qwen/Qwen-Image-Edit-2509` (40-step image editing, prompt rewriting disabled). `WS_HF_IMAGE_SPACE` can point back at `black-forest-labs/FLUX.2-dev` (steps 30, guidance 4) or the fast distilled `black-forest-labs/FLUX.2-klein-4B` (steps 4, guidance 1). The Space allows up to 85 seconds for a job; actual quota usage depends on how long the GPU function runs.
 
 The checked-in defaults are an inexpensive testing preset: a 512×512 image, four image-editing steps, ten TripoSplat steps with CFG disabled, and 32,768 Gaussians. For final-quality generations, set the image to 1024×1024 and use 20 TripoSplat steps, guidance 3, and 262,144 Gaussians. ZeroGPU checks that the declared reservation fits within the remaining quota before starting, then accounts for the GPU time used.
 

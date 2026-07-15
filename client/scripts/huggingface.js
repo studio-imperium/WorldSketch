@@ -8,18 +8,18 @@ import {
 } from "/scripts/huggingface-auth.js"
 import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=minimal-default-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
-import { fluxEditPayload } from "/scripts/huggingface-image.js?v=flux2-dev-1"
+import { imageEditPayload } from "/scripts/huggingface-image.js?v=qwen-edit-1"
 import { inferenceCreditImageRequest } from "/scripts/huggingface-provider.js"
 import { resolveAuthenticatedSpaceFileURL } from "/scripts/huggingface-url.js"
 
 const DEFAULT_CONFIG = {
 	oauthClientId: "91581ad0-d16c-4f49-9746-cff21b50ac9e",
 	redirectUrl: "",
-	imageSpace: "black-forest-labs/FLUX.2-dev",
+	imageSpace: "Qwen/Qwen-Image-Edit-2509",
 	tripoSpace: "VAST-AI/TripoSplat",
 	inferenceProvider: "fal-ai",
 	inferenceModel: "black-forest-labs/FLUX.2-dev",
-	image: { steps: 30, guidance: 4, width: 1024, height: 1024 },
+	image: { steps: 40, guidance: 4, width: 1024, height: 1024 },
 	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
 }
 
@@ -216,7 +216,7 @@ export async function detailImageOnHuggingFace({ prompt, image, geometryImage = 
 			return editedImage
 		}
 		onProgress?.(0, "Uploading the block-out")
-		const imageData = await runSpace(config.imageSpace, "/infer", fluxEditPayload({
+		const imageData = await runSpace(config.imageSpace, "/infer", imageEditPayload({
 			file: handle_file(image),
 			geometryFile: geometryImage ? handle_file(geometryImage) : null,
 			prompt,
