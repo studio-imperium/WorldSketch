@@ -85,24 +85,49 @@ function outlinedGroundCanvas(src) {
 }
 
 // A true isometric (orthographic) camera framing `box`. Distance only sets the clip
-// range (orthographic projection is scale-independent of distance); the frustum is
-// sized to the box's bounding sphere so the whole object fits with a small margin.
+// range (orthographic projection is scale-independent of distance, so the player's
+// distance to the subject never affects framing). The frustum is fitted to the box's
+// PROJECTED extents in camera space — a tight off-center crop around the structure as
+// seen from this angle — not to the bounding sphere, whose slack varied with the
+// player-derived view angle and wasted frame on empty black.
 function isoCamera(box, angles = null) {
 	const center = box.getCenter(new THREE.Vector3())
 	const size = box.getSize(new THREE.Vector3())
 	const radius = Math.max(0.3, 0.5 * Math.hypot(size.x, size.y, size.z)) // bounding-sphere radius
-	const half = radius * 1.12 // frame with a small margin
 	const dist = Math.max(8, radius * 6)
 	const theta = Number.isFinite(angles?.theta) ? angles.theta : ISO_THETA
 	const phi = Number.isFinite(angles?.phi) ? angles.phi : ISO_PHI
-	const camera = new THREE.OrthographicCamera(-half, half, half, -half, Math.max(0.01, dist - radius * 4), dist + radius * 4)
+	const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, Math.max(0.01, dist - radius * 4), dist + radius * 4)
 	camera.up.set(0, 1, 0)
 	const offset = new THREE.Vector3().setFromSpherical(new THREE.Spherical(dist, phi, theta))
 	if (MIRROR_CAPTURE_X) offset.x = -offset.x // mirror the viewpoint across X
 	camera.position.copy(center).add(offset)
 	camera.lookAt(center)
-	camera.updateProjectionMatrix()
 	camera.updateMatrixWorld(true)
+	// Project the box's eight corners into camera space and frame the tightest square
+	// that holds them (square because the capture target is square), plus a thin black
+	// margin so the silhouette never touches the frame edge.
+	const corner = new THREE.Vector3()
+	let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+	for (let i = 0; i < 8; i++) {
+		corner.set(
+			i & 1 ? box.max.x : box.min.x,
+			i & 2 ? box.max.y : box.min.y,
+			i & 4 ? box.max.z : box.min.z,
+		).applyMatrix4(camera.matrixWorldInverse)
+		minX = Math.min(minX, corner.x)
+		maxX = Math.max(maxX, corner.x)
+		minY = Math.min(minY, corner.y)
+		maxY = Math.max(maxY, corner.y)
+	}
+	const half = Math.max(0.3, 0.5 * Math.max(maxX - minX, maxY - minY) * 1.06)
+	const cx = (minX + maxX) / 2
+	const cy = (minY + maxY) / 2
+	camera.left = cx - half
+	camera.right = cx + half
+	camera.top = cy + half
+	camera.bottom = cy - half
+	camera.updateProjectionMatrix()
 	return camera
 }
 
