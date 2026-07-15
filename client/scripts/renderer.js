@@ -2185,6 +2185,94 @@ function setViewTransformCursor(mode = null) {
 	renderer.domElement.classList.toggle("is-splat-rotate", mode === "rotate")
 }
 
+// --- Rubber ground attachment (prototype) -----------------------------------
+// While a single object piece is dragged in View, the floor gaussians around
+// its base are pulled along with it — carried fully at the footprint, fading to
+// anchored at the outer ring — so the piece stays visually attached and the
+// ground stretches toward it like rubber. Gaussians mid-ring get elongated
+// along the pull direction; dragging back to the start restores them exactly.
+const rubberScratch = {
+	offset: new THREE.Vector3(),
+	disp: new THREE.Vector3(),
+	dir: new THREE.Vector3(),
+	center: new THREE.Vector3(),
+	scales: new THREE.Vector3(),
+	quat: new THREE.Quaternion(),
+	unitX: new THREE.Vector3(1, 0, 0),
+}
+
+function beginGroundRubber() {
+	const objects = drag.members.filter(member => member.mesh.userData.genKind === "object")
+	if (objects.length !== 1) return
+	const member = objects[0]
+	const groundRecord = world.generated.find(g => g.mesh.userData.genKind === "floor" && g.mesh !== member.mesh)
+	const packed = groundRecord?.mesh.packedSplats
+	if (!packed?.numSplats) return
+	const groundMesh = groundRecord.mesh
+	groundMesh.updateMatrixWorld(true)
+	member.mesh.updateMatrixWorld(true)
+	const contentBox = member.mesh.userData.contentBox
+	if (!contentBox || contentBox.isEmpty()) return
+	const worldBox = contentBox.clone().applyMatrix4(member.mesh.matrixWorld)
+	const footprint = Math.min(worldBox.max.x - worldBox.min.x, worldBox.max.z - worldBox.min.z)
+	const reach = Math.min(3, Math.max(0.8, 0.45 * footprint))
+	const baseY = worldBox.min.y
+	const groundMatrix = groundMesh.matrixWorld
+	const world0 = new THREE.Vector3()
+	const entries = []
+	packed.forEachSplat((index, center, scales, quaternion, opacity, color) => {
+		if (entries.length >= 9000) return
+		world0.copy(center).applyMatrix4(groundMatrix)
+		if (world0.y < baseY - 1.2 || world0.y > baseY + 1.2) return
+		const dx = Math.max(worldBox.min.x - world0.x, 0, world0.x - worldBox.max.x)
+		const dz = Math.max(worldBox.min.z - world0.z, 0, world0.z - worldBox.max.z)
+		const dist = Math.hypot(dx, dz)
+		if (dist > reach) return
+		entries.push({
+			index,
+			weight: 1 - dist / reach,
+			center: center.clone(),
+			scales: scales.clone(),
+			quaternion: quaternion.clone(),
+			opacity,
+			color: color.clone(),
+			planar: Math.max(scales.x, scales.z),
+			narrow: Math.min(scales.x, scales.z),
+		})
+	})
+	if (!entries.length) return
+	const invQuat = new THREE.Quaternion()
+	groundMesh.getWorldQuaternion(invQuat).invert()
+	drag.rubber = { packed, member, entries, invQuat, reach }
+	console.log(`[rubber] holding ${entries.length} floor gaussian(s) around ${member.mesh.userData.genName}`)
+}
+
+function applyGroundRubber() {
+	const rubber = drag?.rubber
+	if (!rubber) return
+	const { offset, disp, dir, quat, unitX, scales: outScales, center: outCenter } = rubberScratch
+	offset.copy(rubber.member.mesh.position).sub(rubber.member.position)
+	offset.applyQuaternion(rubber.invQuat) // world offset → ground-local space
+	const magnitude = offset.length()
+	if (magnitude > 1e-6) dir.copy(offset).normalize()
+	for (const entry of rubber.entries) {
+		disp.copy(offset).multiplyScalar(entry.weight)
+		outCenter.copy(entry.center).add(disp)
+		// Tension peaks mid-ring: the inner edge is carried, the outer edge is
+		// anchored, and the material in between visibly stretches.
+		const tension = magnitude * entry.weight * (1 - entry.weight)
+		if (tension > 1e-4) {
+			quat.setFromUnitVectors(unitX, dir)
+			const elongation = Math.min(6, 1 + (4 * tension) / rubber.reach)
+			outScales.set(entry.planar * elongation, entry.scales.y, entry.narrow)
+			rubber.packed.setSplat(entry.index, outCenter, outScales, quat, entry.opacity, entry.color)
+		} else {
+			rubber.packed.setSplat(entry.index, outCenter, entry.scales, entry.quaternion, entry.opacity, entry.color)
+		}
+	}
+	rubber.packed.needsUpdate = true
+}
+
 function startSplatGroupDrag(event, mode) {
 	const pivot = selectedSplatPivot(mode === "scale")
 	if (!pivot || !selectedSplatMeshes.size) return false
@@ -2212,6 +2300,7 @@ function startSplatGroupDrag(event, mode) {
 		rollCenter: objectScreenPosition(pivot),
 	}
 	drag.startAngle = pointerScreenAngle(event, drag.rollCenter)
+	if (mode === "move") beginGroundRubber()
 	renderer.domElement.setPointerCapture(event.pointerId)
 	renderer.domElement.classList.add("is-dragging")
 	return true
@@ -2327,6 +2416,7 @@ function updateSplatMove(event) {
 			member.mesh.position.set(member.position.x, member.position.y + dy, member.position.z)
 		}
 		if (Math.abs(dy) > 0.001) drag.mutated = true
+		applyGroundRubber()
 		return
 	}
 	splatDragPlane.set(localUp, -drag.startPoint.y)
@@ -2339,6 +2429,7 @@ function updateSplatMove(event) {
 		member.mesh.position.set(member.position.x + dx, member.position.y, member.position.z + dz)
 	}
 	if (Math.hypot(dx, dz) > 0.001) drag.mutated = true
+	applyGroundRubber()
 }
 
 // Uniform group scale from the combined bottom centre so the selection stays seated
