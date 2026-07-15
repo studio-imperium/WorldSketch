@@ -12,32 +12,24 @@ func SceneBoxes() string {
 }
 
 func Scene(scene string) string {
+	base := `Use Image 1 as the geometric source and transform it into a richly detailed, production-quality isometric environment.
 
-	base := "Image 1 is a rough ISOMETRIC BLOCK-OUT of a REGION OF A GAME WORLD — a large outdoor area roughly 100 meters across, built from colored primitive shapes floating on a pure black background. " +
-		"Reimagine each colored block as the natural object it represents, rendered together as one cohesive, believable place in a polished hand-painted stylized isometric game-art style — " +
-		"semi-realistic yet clearly stylized, richly detailed, with soft warm painted lighting, clean readable silhouettes, saturated natural colors, and crisp storybook charm, " +
-		"like a hand-painted isometric map region from a high-quality fantasy builder/RPG. " +
-		"This is a LANDSCAPE at real-world scale, NOT a miniature or diorama: trees, rocks, and structures are life-sized features seen from a high isometric viewpoint, each occupying only a small part of the terrain. " +
-		"Match ONLY the ART STYLE — the block COLORS are just placeholders to tell objects apart, NOT literal surface textures; give every object its own natural materials and colors. " +
-		"SPATIAL FIDELITY IS THE TOP PRIORITY: this result is fitted back into the EXACT bounding volume of the block-out, so it must occupy the same space the same way. " +
-		"PRESERVE THE LAYOUT precisely — keep the exact position, relative size, FOOTPRINT, HEIGHT, proportions, and upright orientation of every element, " +
-		"and do not move, resize, re-centre, add, remove, merge, or split any element. " +
-		"Render every element at the scale its footprint implies within that ~100m area — do not enlarge objects to fill the frame. " +
-		"Do NOT ADD structure that is not in the block-out: no new roof, lid, ceiling, top, extra walls, floor, base, or enclosure. " +
-		"If a shape is OPEN — for example upright walls with nothing on top, or an open room seen from above — keep it OPEN; NEVER close an open room into a solid house or building. " +
-		"You MAY smooth the crude facets into natural surface detail, but ONLY within each element's existing silhouette: do not change its overall shape or size, " +
-		"and do not make it blocky, cubic, pixelated, or Minecraft-like either. " +
-		"Render ONLY the shapes that are present — match the block-out exactly. " +
-		"Do NOT INVENT a ground plane, baseplate, terrain, grass, soil, pebbles, dirt, path, or background scenery that is not one of the placed shapes. " +
-		"BUT if the block-out DOES include a floor or ground surface as one of its shapes — for example a flat slab that the walls and furniture sit on, i.e. a room floor — " +
-		"you MUST render that floor too, re-textured in the same art style; do NOT delete it or leave it black. " +
-		"Render any floor or terrain PHYSICALLY FLAT and LEVEL — no island-like beveled edges, no tapered rim, no raised tabletop, no cliff sides, and no mound or hill shape — " +
-		"and reproduce its drawn outline exactly. " +
-		"Thin white outlines in Image 1 trace each shape's exact silhouette, including the floor's boundary — follow them precisely, but never paint the white lines themselves into the artwork. " +
-		"Everything that is NOT a placed shape stays pure black: empty black fills all the space around and outside the shapes, " +
-		"with no invented slab or shadow beneath objects that were floating — no sky, no frame, no text, no UI. " +
-		"Keep the isometric camera angle exactly. " +
+Image 1 is a player-made 3D blockout. Preserve its exact camera angle, perspective, framing, footprint, silhouette, height relationships, major volumes, paths, terrain boundaries, openings, and object placement. The final image must clearly depict the same structure. Do not rotate, mirror, flatten, simplify, or substantially redesign it.
+
+Interpret every primitive shape as finished architecture or environment design. Turn basic blocks into believable buildings, towers, walls, gatehouses, roofs, windows, doors, balconies, supports, stairs, fences, paths, terrain, trees, water, and other appropriate features. The flat colors in Image 1 are only rough semantic hints and must not remain as plain colored geometry.
+
+Render the scene in a premium stylized isometric game-art style inspired by a highly detailed handcrafted miniature diorama. Use warm natural lighting, painterly realism, crisp readable forms, soft ambient shadows, strong contact shadows, and richly authored materials.
+
+Add detailed weathered stone, aged plaster, dark ceramic roof tiles, exposed wooden beams, carved doors, small balconies, railings, windows, gutters, pipes, lanterns, flower pots, vines, moss, shrubs, grass, flowers, dirt, chipped edges, and believable material variation. Add dense environmental storytelling, but do not clutter or hide the original construction.
+
+For natural geometry, replace primitive shapes with organic trees, layered foliage, branches, roots, rocks, grasses, soil, flowers, and worn paths while preserving the original position, scale, and silhouette.
+
+Keep the entire environment visible and centered with comfortable margins. Preserve the arbitrary three-quarter isometric angle from Image 1. Place the finished environment on a clean isolated diorama base with a pure black background. No sky, horizon, distant scenery, editor overlays, grid lines, selection outlines, or white borders.
+
+Do not produce flat colored cubes, voxel art, Minecraft-style graphics, low-poly prototype geometry, plastic materials, simplified cartoon buildings, blurry surfaces, or generic concept art that ignores the input.
+
+Before rendering, mentally trace the major silhouette and edges of Image 1. The final detailed environment should align closely with that trace, with detail added directly onto the existing geometry rather than replacing it.` +
 		"Scene context: " + scene + "\n\n" +
-		"Structural preservation: keep the source silhouette and occlusion intact."
+		"Structural preservation is mandatory: honor the original block-out exactly."
 	return base
 }

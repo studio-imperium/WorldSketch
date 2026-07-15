@@ -34,7 +34,7 @@ func SceneImageEditSettings() ImageEditSettings {
 		GeminiModel:   Env("WS_SCENE_GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
 		OpenAIModel:   Env("WS_SCENE_IMAGE_MODEL", "gpt-image-1"),
 		Size:          Env("WS_SCENE_IMAGE_SIZE", "1024x1024"),
-		Quality:       Env("WS_SCENE_IMAGE_QUALITY", "medium"),
+		Quality:       Env("WS_SCENE_IMAGE_QUALITY", "high"),
 		Fidelity:      Env("WS_SCENE_IMAGE_FIDELITY", "high"),
 		Background:    Env("WS_SCENE_IMAGE_BACKGROUND", "opaque"),
 		Format:        Env("WS_SCENE_IMAGE_FORMAT", "png"),
