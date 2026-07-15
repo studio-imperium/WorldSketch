@@ -24,15 +24,15 @@ export const WORLD_SKETCH_GEOMETRY_SCHEMA = {
 		version: { type: "integer", enum: [4] },
 		ground: {
 			type: "object",
-			description: "Required floor wrapper. Keep strokes empty unless the user explicitly requests visible terrain or a ground feature.",
+			description: "Required floor wrapper. Normally contains one compact closed terrain polygon fitted around the build.",
 			additionalProperties: false,
 			required: ["size", "complete", "strokes"],
 			properties: {
-				size: { type: "number", minimum: 32, maximum: 96 },
+				size: { type: "number", enum: [144] },
 				complete: { type: "boolean", enum: [true] },
 				strokes: {
 					type: "array",
-					description: "Optional closed filled ground polygons. Empty by default; never add decorative borders or open-ended trails.",
+					description: "Closed filled ground polygons. Use one compact supporting land patch by default; never add decorative borders or open-ended trails.",
 					maxItems: 2,
 					items: {
 						type: "object",
@@ -80,15 +80,16 @@ export const WORLD_SKETCH_GEOMETRY_SCHEMA = {
 }
 
 // Condensed from the user's 184-block Japanese courtyard reference. It teaches the
-// coordinate convention, layered architecture and repeated structural rhythm without
-// spending thousands of input tokens on the full production build. Its empty ground is
-// deliberate: floor paint is optional and should not leak into unrelated generations.
+// coordinate convention, layered architecture, repeated structural rhythm and a compact
+// closed terrain footprint without spending thousands of tokens on the full build.
 export const COURTYARD_EXAMPLE = {
 	version: 4,
 	ground: {
-		size: 72,
+		size: 144,
 		complete: true,
-		strokes: [],
+		strokes: [
+			{ mode: "paint", color: "#8b8066", radius: 0.6, closed: true, points: [[-18, -21], [18, -21], [22, -17], [22, 17], [18, 21], [-18, 21], [-22, 17], [-22, -17]] },
+		],
 	},
 	primitives: [
 		{ type: "box", position: [0, 0.6, 18], rotation: [0, 0, 0], scale: [38, 1.2, 1.4], color: "#6f6858" },
@@ -107,23 +108,70 @@ export const COURTYARD_EXAMPLE = {
 }
 
 const SYSTEM_PROMPT = `You generate compact WorldSketch block-outs as strict JSON.
-Use boxes, with floor paint only when explicitly requested. Never return commentary or markdown.
+Use boxes plus a clean terrain footprint. Never return commentary or markdown.
 World coordinates are X/Z across the floor and Y upward. Position is the box center;
 therefore a box resting on the floor usually has position.y equal to scale.y / 2.
 Make a recognizable, coherent silhouette with connected walls, roofs, openings and a
 small amount of repeated detail. Prefer whole numbers or one decimal place. Keep the
 scene within roughly -28 to 28 on X and Z. Use no more than ${MAX_GENERATED_PRIMITIVES}
-boxes. Ground is optional despite the required wrapper: return strokes: [] unless the
-user asks for terrain, floor, a path, road, water or another ground feature. Never invent
-a perimeter frame, ring, U-shape, decorative border or open-ended trail around an object.
-Requested ground must use one or two compact closed polygons whose points trace the
-outer boundary and whose closed value is true. The generated JSON replaces the entire
-current build, including its floor.`
+boxes. Unless the user explicitly requests no terrain, include exactly one compact closed
+land patch fitted just beyond the build footprint. It must read as a filled island/base,
+not a line: never make a perimeter frame, ring, U-shape, decorative border or open-ended
+trail around an object. If the user requests a path, road, water or another ground feature,
+use at most one additional compact closed polygon. Polygon points trace the outer boundary
+and closed is always true. The generated JSON replaces the entire build, including floor.`
 
-export function geometryPromptRequestsGround(prompt) {
+export function geometryPromptRejectsGround(prompt) {
 	const description = String(prompt ?? "").toLowerCase()
-	if (/\b(?:no|without|omit|skip)\s+(?:any\s+)?(?:ground|terrain|floor|path|road|trail|water)\b/.test(description)) return false
-	return /\b(?:ground|terrain|floor|path|road|street|trail|river|water|pond|lake|moat|garden|grass|sand|snow|courtyard|plaza|island)\b/.test(description)
+	return /\b(?:no|without|omit|skip)\s+(?:any\s+)?(?:ground|terrain|floor|land|base)\b/.test(description)
+}
+
+export function geometryPromptRequestsDesignedGround(prompt) {
+	return /\b(?:path|road|street|trail|river|water|pond|lake|moat|courtyard|plaza|garden|island)\b/i.test(String(prompt ?? ""))
+}
+
+function fittedGroundColor(prompt) {
+	const description = String(prompt ?? "").toLowerCase()
+	if (/\b(?:snow|ice|frozen|arctic)\b/.test(description)) return "#d8e0df"
+	if (/\b(?:sand|desert|dune|beach)\b/.test(description)) return "#bfa16a"
+	if (/\b(?:stone|rock|volcanic|ruin)\b/.test(description)) return "#746b5d"
+	return "#65734d"
+}
+
+export function fittedGeometryGroundStroke(primitives, prompt = "") {
+	if (!Array.isArray(primitives) || !primitives.length) return null
+	let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity
+	for (const primitive of primitives) {
+		const x = Number(primitive?.position?.[0])
+		const z = Number(primitive?.position?.[2])
+		const sx = Math.abs(Number(primitive?.scale?.[0]))
+		const sz = Math.abs(Number(primitive?.scale?.[2]))
+		if (![x, z, sx, sz].every(Number.isFinite)) continue
+		const yaw = Number(primitive?.rotation?.[1]) || 0
+		const halfX = (Math.abs(Math.cos(yaw)) * sx + Math.abs(Math.sin(yaw)) * sz) / 2
+		const halfZ = (Math.abs(Math.sin(yaw)) * sx + Math.abs(Math.cos(yaw)) * sz) / 2
+		minX = Math.min(minX, x - halfX); maxX = Math.max(maxX, x + halfX)
+		minZ = Math.min(minZ, z - halfZ); maxZ = Math.max(maxZ, z + halfZ)
+	}
+	if (![minX, maxX, minZ, maxZ].every(Number.isFinite)) return null
+	const span = Math.max(maxX - minX, maxZ - minZ, 4)
+	const pad = Math.min(5, Math.max(2.2, span * 0.12))
+	minX = Math.max(-46, minX - pad); maxX = Math.min(46, maxX + pad)
+	minZ = Math.max(-46, minZ - pad); maxZ = Math.min(46, maxZ + pad)
+	const corner = Math.min(3.5, Math.max(1.2, Math.min(maxX - minX, maxZ - minZ) * 0.14))
+	const round = value => Number(value.toFixed(1))
+	return {
+		mode: "paint",
+		color: fittedGroundColor(prompt),
+		radius: 0.6,
+		closed: true,
+		points: [
+			[round(minX + corner), round(minZ)], [round(maxX - corner), round(minZ)],
+			[round(maxX), round(minZ + corner)], [round(maxX), round(maxZ - corner)],
+			[round(maxX - corner), round(maxZ)], [round(minX + corner), round(maxZ)],
+			[round(minX), round(maxZ - corner)], [round(minX), round(minZ + corner)],
+		],
+	}
 }
 
 export function geometryGenerationRequest(prompt, {

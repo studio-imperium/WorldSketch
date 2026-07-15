@@ -4,9 +4,11 @@ import test from "node:test"
 import {
 	cleanGeometryResponse,
 	COURTYARD_EXAMPLE,
+	fittedGeometryGroundStroke,
 	GEOMETRY_TARGETS,
 	geometryGenerationRequest,
-	geometryPromptRequestsGround,
+	geometryPromptRejectsGround,
+	geometryPromptRequestsDesignedGround,
 	geometryResponseContent,
 	MAX_GENERATED_PRIMITIVES,
 	WORLD_SKETCH_GEOMETRY_SCHEMA,
@@ -41,20 +43,35 @@ test("uses a compact valid courtyard example instead of the full reference build
 	assert.ok(COURTYARD_EXAMPLE.primitives.length > 5)
 	assert.ok(COURTYARD_EXAMPLE.primitives.length < MAX_GENERATED_PRIMITIVES)
 	assert.equal(COURTYARD_EXAMPLE.version, 4)
+	assert.equal(COURTYARD_EXAMPLE.ground.size, 144)
 	assert.equal(COURTYARD_EXAMPLE.ground.complete, true)
-	assert.deepEqual(COURTYARD_EXAMPLE.ground.strokes, [])
+	assert.equal(COURTYARD_EXAMPLE.ground.strokes.length, 1)
+	assert.equal(COURTYARD_EXAMPLE.ground.strokes[0].closed, true)
 })
 
-test("leaves terrain empty by default and recognizes explicit ground requests", () => {
+test("uses compact closed terrain by default and recognizes explicit ground designs", () => {
 	const request = geometryGenerationRequest("a small stone lighthouse")
-	assert.match(request.messages[0].content, /return strokes: \[\] unless/)
-	assert.match(request.messages[0].content, /Never invent[\s\S]*U-shape/)
-	assert.equal(geometryPromptRequestsGround("a small stone lighthouse"), false)
-	assert.equal(geometryPromptRequestsGround("a lighthouse with a winding path"), true)
-	assert.equal(geometryPromptRequestsGround("a lighthouse without any terrain"), false)
+	assert.match(request.messages[0].content, /exactly one compact closed/)
+	assert.match(request.messages[0].content, /never make[\s\S]*U-shape/)
+	assert.equal(geometryPromptRejectsGround("a small stone lighthouse"), false)
+	assert.equal(geometryPromptRejectsGround("a lighthouse without any terrain"), true)
+	assert.equal(geometryPromptRequestsDesignedGround("a lighthouse with a winding path"), true)
+	assert.equal(geometryPromptRequestsDesignedGround("a small stone lighthouse"), false)
 	const strokeSchema = WORLD_SKETCH_GEOMETRY_SCHEMA.properties.ground.properties.strokes.items
 	assert.ok(strokeSchema.required.includes("closed"))
 	assert.deepEqual(strokeSchema.properties.closed.enum, [true])
+})
+
+test("fits a tidy terrain island around the generated block footprint", () => {
+	const stroke = fittedGeometryGroundStroke([
+		{ position: [0, 2, 0], rotation: [0, 0, 0], scale: [10, 4, 8] },
+		{ position: [7, 1, 0], rotation: [0, 0.4, 0], scale: [2, 2, 3] },
+	], "a grassy tower")
+	assert.equal(stroke.closed, true)
+	assert.equal(stroke.points.length, 8)
+	assert.equal(stroke.color, "#65734d")
+	assert.ok(Math.min(...stroke.points.map(point => point[0])) < -5)
+	assert.ok(Math.max(...stroke.points.map(point => point[0])) > 8)
 })
 
 test("cleans defensive JSON fences and rejects empty responses", () => {

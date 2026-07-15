@@ -14,8 +14,14 @@ import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
-import { generateGeometryOnHuggingFace } from "/scripts/geometry-generation.js?v=geometry-dev-5"
-import { geometryPromptRequestsGround, MAX_GENERATED_PRIMITIVES } from "/scripts/geometry-generation-request.js?v=geometry-dev-5"
+import { loadDefaultBuildSeeds } from "/scripts/default-builds.js"
+import { generateGeometryOnHuggingFace } from "/scripts/geometry-generation.js?v=geometry-dev-6"
+import {
+	fittedGeometryGroundStroke,
+	geometryPromptRejectsGround,
+	geometryPromptRequestsDesignedGround,
+	MAX_GENERATED_PRIMITIVES,
+} from "/scripts/geometry-generation-request.js?v=geometry-dev-6"
 import { createSky } from "/scripts/sky.js"
 import { cloneGroundStrokes, closeGroundStroke, paintGroundStroke } from "/scripts/ground-strokes.js"
 
@@ -2563,6 +2569,24 @@ function emptyBuildSnapshot() {
 	}
 }
 
+async function seedDefaultBuildFrames() {
+	const seeds = await loadDefaultBuildSeeds()
+	for (const seed of seeds) {
+		frames.build.push({
+			id: ++frameSeq,
+			name: seed.name,
+			snapshot: { prims: seed.prims, baseGroundColor, prompt: "" },
+		})
+	}
+	const first = frames.build[0]
+	if (!first) return false
+	activeFrameId.build = first.id
+	await applyBuildSnapshot(first.snapshot)
+	renderFramesPanel()
+	syncViewGate()
+	return true
+}
+
 async function applyBuildSnapshot(snap) {
 	// Persistence guard: while a snapshot is being applied the live world is half-built,
 	// so serializeFramesState must not re-snapshot the active frame from it.
@@ -2847,7 +2871,12 @@ async function generateBuildGeometry(prompt) {
 		if (!geometry.ground) {
 			geometry.ground = { size: GROUND_SHEET_SIZE, complete: true, strokes: [] }
 		}
-		if (!geometryPromptRequestsGround(description)) geometry.ground.strokes = []
+		if (geometryPromptRejectsGround(description)) {
+			geometry.ground.strokes = []
+		} else if (!geometryPromptRequestsDesignedGround(description) || !geometry.ground.strokes.length) {
+			const fittedGround = fittedGeometryGroundStroke(geometry.primitives, description)
+			geometry.ground.strokes = fittedGround ? [fittedGround] : []
+		}
 		await replaceBuildGeometry(geometry)
 		world.prompt = description
 		if (els.chatPrompt) els.chatPrompt.value = description
@@ -6783,9 +6812,14 @@ setActiveTool("pointer")
 applyColor(activeColor)
 applyBrushScale(activeBrushScale)
 if (!(await restoreFramesState())) {
-	// Nothing saved from an earlier session — a fresh empty build is frame 1.
-	pushBuildFrame()
-	snapshotActiveBuildFrame()
+	// Nothing saved from an earlier session — seed the two checked-in example builds.
+	try {
+		await seedDefaultBuildFrames()
+	} catch (error) {
+		console.warn("Default build seed failed:", error)
+		pushBuildFrame()
+		snapshotActiveBuildFrame()
+	}
 }
 applyUiTab()
 updateCamera()
