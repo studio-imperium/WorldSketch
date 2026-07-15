@@ -30,6 +30,7 @@ export function runtimeConfig() {
 			redirectUrl: env("WS_HF_REDIRECT_URL", ""),
 			imageSpace: env("WS_HF_IMAGE_SPACE", "WilliamQM/Qwen-Image-Edit-2509"),
 			tripoSpace: env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
+			tripoDirectUrl: env("TRIPOSPLAT_URL", ""),
 			inferenceProvider: env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
 			inferenceModel: env("WS_HF_INFERENCE_MODEL", "black-forest-labs/FLUX.2-dev"),
 			image: {

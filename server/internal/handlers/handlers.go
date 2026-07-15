@@ -33,6 +33,7 @@ func Config(w http.ResponseWriter, r *http.Request) {
 			"redirectUrl":       config.Env("WS_HF_REDIRECT_URL", ""),
 			"imageSpace":        config.Env("WS_HF_IMAGE_SPACE", "WilliamQM/Qwen-Image-Edit-2509"),
 			"tripoSpace":        config.Env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
+			"tripoDirectUrl":    config.Env("TRIPOSPLAT_URL", ""),
 			"inferenceProvider": config.Env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
 			"inferenceModel":    config.Env("WS_HF_INFERENCE_MODEL", "black-forest-labs/FLUX.2-dev"),
 			"image": map[string]any{

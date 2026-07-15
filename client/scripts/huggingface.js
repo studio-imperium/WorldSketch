@@ -10,13 +10,14 @@ import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=flat-grou
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
 import { imageEditPayload } from "/scripts/huggingface-image.js?v=qwen-edit-1"
 import { inferenceCreditImageRequest } from "/scripts/huggingface-provider.js"
-import { resolveAuthenticatedSpaceFileURL } from "/scripts/huggingface-url.js"
+import { resolveAuthenticatedSpaceFileURL, resolveDirectGradioFileURL } from "/scripts/huggingface-url.js?v=direct-tripo-1"
 
 const DEFAULT_CONFIG = {
 	oauthClientId: "91581ad0-d16c-4f49-9746-cff21b50ac9e",
 	redirectUrl: "",
 	imageSpace: "WilliamQM/Qwen-Image-Edit-2509",
 	tripoSpace: "VAST-AI/TripoSplat",
+	tripoDirectUrl: "",
 	inferenceProvider: "fal-ai",
 	inferenceModel: "black-forest-labs/FLUX.2-dev",
 	image: { steps: 20, guidance: 4, width: 1024, height: 1024 },
@@ -72,8 +73,15 @@ function fileReference(value) {
 	return null
 }
 
+// A full http(s) URL configures a direct self-hosted Gradio server instead of a
+// Hugging Face Space; the user's HF token must never be sent to such a host.
+function isDirectGradioUrl(space) {
+	return /^https?:\/\//i.test(String(space ?? ""))
+}
+
 async function downloadFile(file, space, signal, { onProgress, stallMs = 45_000 } = {}) {
-	const url = resolveAuthenticatedSpaceFileURL(file, space)
+	const direct = isDirectGradioUrl(space)
+	const url = direct ? resolveDirectGradioFileURL(file, space) : resolveAuthenticatedSpaceFileURL(file, space)
 	const controller = new AbortController()
 	let stalled = false
 	let stallTimer = 0
@@ -89,7 +97,7 @@ async function downloadFile(file, space, signal, { onProgress, stallMs = 45_000 
 	try {
 		armStallTimer()
 		const response = await fetch(url, {
-			headers: { Authorization: `Bearer ${getHuggingFaceAccessToken()}` },
+			headers: direct ? {} : { Authorization: `Bearer ${getHuggingFaceAccessToken()}` },
 			signal: controller.signal,
 		})
 		if (!response.ok) throw new Error(`Could not download the generated file (${response.status})`)
@@ -136,7 +144,9 @@ function statusLabel(stage, message) {
 
 async function runSpace(space, endpoint, payload, stage, progress, signal) {
 	if (signal?.aborted) throw new DOMException("Generation cancelled", "AbortError")
-	const app = await Client.connect(space, { token: getHuggingFaceAccessToken(), events: ["data", "status"] })
+	const app = await Client.connect(space, isDirectGradioUrl(space)
+		? { events: ["data", "status"] }
+		: { token: getHuggingFaceAccessToken(), events: ["data", "status"] })
 	const job = await app.submit(endpoint, payload)
 	activeJob = job
 	const abort = () => job.cancel?.()
@@ -234,23 +244,31 @@ export async function detailImageOnHuggingFace({ prompt, image, geometryImage = 
 }
 
 // 3D stage only: detailed image → splat bytes. A fixed `seed` makes runs
-// reproducible for A/B comparisons.
-export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), signal, onProgress }) {
+// reproducible for A/B comparisons. With `useInferenceCredits` set and a
+// tripoDirectUrl configured (TRIPOSPLAT_URL env), the splat runs on the direct
+// self-hosted server instead of the ZeroGPU Space — a stopgap for when the
+// ZeroGPU quota is exhausted.
+export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), useInferenceCredits = false, signal, onProgress }) {
 	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
+	const tripoSpace = useInferenceCredits && config.tripoDirectUrl ? config.tripoDirectUrl : config.tripoSpace
 	try {
 		onProgress?.(0, "Sending the image to TripoSplat")
-		const tripoData = await runSpace(config.tripoSpace, "/generate", {
+		const payload = {
 			image: handle_file(await withTransparentBorder(image)),
 			seed,
 			steps: Number(config.tripo.steps),
 			guidance_scale: Number(config.tripo.guidance),
 			num_gaussians: Number(config.tripo.gaussians),
 			output_format: config.tripo.format || "splat",
-		}, "TripoSplat is building the 3D scene", label => onProgress?.(0.43, label), signal)
+		}
+		// The self-hosted server exposes an explicit preprocess switch; the ZeroGPU
+		// Space does not (there the transparent border alone suppresses its cutout).
+		if (isDirectGradioUrl(tripoSpace)) payload.preprocess = false
+		const tripoData = await runSpace(tripoSpace, "/generate", payload, "TripoSplat is building the 3D scene", label => onProgress?.(0.43, label), signal)
 		const splatFile = fileReference(tripoData?.[2]) ?? fileReference(tripoData)
 		if (!splatFile) throw new Error("TripoSplat returned no 3D file")
 		onProgress?.(0.92, "Downloading the 3D scene")
-		const splat = await downloadFile(splatFile, config.tripoSpace, signal, {
+		const splat = await downloadFile(splatFile, tripoSpace, signal, {
 			onProgress: ({ loaded, total }) => {
 				const ratio = total > 0 ? loaded / total : Math.min(0.95, loaded / (8 * 1024 * 1024))
 				onProgress?.(0.92 + Math.min(1, ratio) * 0.07, downloadLabel(loaded, total))
@@ -278,6 +296,7 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 	onImageReady?.(editedImage)
 	const bytes = await buildSplatOnHuggingFace({
 		image: editedImage,
+		useInferenceCredits,
 		signal,
 		onProgress: (fraction, label) => onProgress?.(0.6 + fraction * 0.37, label),
 	})

@@ -18,6 +18,26 @@ export function huggingFaceSpaceOrigin(space) {
 	}
 }
 
+// Direct (self-hosted) Gradio server: resolve the returned file against the
+// configured origin only. The caller must NEVER attach the Hugging Face token
+// to these requests — this host is outside hf.space.
+export function resolveDirectGradioFileURL(file, base) {
+	const origin = new URL(String(base)).origin
+	let value = file?.url
+	if (!value && file?.path) value = `${origin}/gradio_api/file=${encodeURIComponent(String(file.path))}`
+	if (!value) throw new Error("The TripoSplat server returned no downloadable file")
+	let url
+	try {
+		url = new URL(String(value), `${origin}/`)
+	} catch {
+		throw new Error("The TripoSplat server returned an invalid download URL")
+	}
+	if (url.origin !== origin || url.username || url.password) {
+		throw new Error("Blocked an unsafe download URL returned by the TripoSplat server")
+	}
+	return url.href
+}
+
 // A Gradio Space controls the FileData it returns. Resolve that file only after
 // proving its URL has the exact expected Space origin; otherwise the caller must
 // not attach the user's bearer token.
