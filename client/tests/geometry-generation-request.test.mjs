@@ -13,16 +13,18 @@ import {
 
 test("builds a fast, schema-constrained geometry request", () => {
 	const request = geometryGenerationRequest("a small stone lighthouse")
-	assert.equal(request.provider, "scaleway")
-	assert.equal(request.model, "Qwen/Qwen3-Coder-30B-A3B-Instruct")
+	assert.equal(request.provider, "novita")
+	assert.equal(request.model, "openai/gpt-oss-20b")
 	assert.deepEqual(GEOMETRY_TARGETS, [
+		{ model: "openai/gpt-oss-20b", provider: "novita" },
+		{ model: "openai/gpt-oss-20b", provider: "together" },
+		{ model: "openai/gpt-oss-20b", provider: "ovhcloud" },
 		{ model: "Qwen/Qwen3-Coder-30B-A3B-Instruct", provider: "scaleway" },
-		{ model: "Qwen/Qwen2.5-7B-Instruct", provider: "together" },
-		{ model: "microsoft/phi-4", provider: "deepinfra" },
 	])
 	assert.equal(request.response_format.type, "json_schema")
 	assert.equal(request.response_format.json_schema.strict, true)
-	assert.equal(request.max_tokens, 2400)
+	assert.equal(request.max_tokens, 8192)
+	assert.equal(request.reasoning_effort, "low")
 	assert.equal(WORLD_SKETCH_GEOMETRY_SCHEMA.properties.primitives.maxItems, MAX_GENERATED_PRIMITIVES)
 	assert.match(request.messages.at(-1).content, /small stone lighthouse/)
 })
@@ -30,7 +32,7 @@ test("builds a fast, schema-constrained geometry request", () => {
 test("can target a healthy fallback provider without changing the prompt", () => {
 	const request = geometryGenerationRequest("a small stone lighthouse", GEOMETRY_TARGETS[1])
 	assert.equal(request.provider, "together")
-	assert.equal(request.model, "Qwen/Qwen2.5-7B-Instruct")
+	assert.equal(request.model, "openai/gpt-oss-20b")
 	assert.match(request.messages.at(-1).content, /small stone lighthouse/)
 })
 

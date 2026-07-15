@@ -8,6 +8,12 @@ test("balances creative reinterpretation with spatial fidelity", () => {
 	for (const invariant of [
 		"Creatively reinterpret every primitive",
 		"A block is a massing proxy",
+		"SCENE COVERAGE IS MANDATORY",
+		"Every explicitly named feature in SCENE TO CREATE must appear",
+		"Match each feature to its own visible source mass or painted terrain region",
+		"painted bands or lines become the named path",
+		"Do not absorb a secondary object into the main subject",
+		"do not crop or zoom into one object",
 		"SPATIAL FIDELITY IS THE CONSTRAINT",
 		"roughly the same projected footprint and height envelope",
 		"Do not enlarge a subject to fill empty ground",
@@ -19,6 +25,7 @@ test("balances creative reinterpretation with spatial fidelity", () => {
 		"Avoid smooth blank surfaces",
 		"crisp contact shadows",
 		"without biasing every result toward houses",
+		"Isolate the complete terrain chunk—not merely its main object",
 		"SCENE TO CREATE: A vine-covered village house",
 	]) assert.ok(prompt.includes(invariant), `missing balanced prompt invariant: ${invariant}`)
 	assert.ok(!prompt.includes("fine storytelling details"))

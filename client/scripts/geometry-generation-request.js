@@ -1,7 +1,8 @@
 export const GEOMETRY_TARGETS = [
+	{ model: "openai/gpt-oss-20b", provider: "novita" },
+	{ model: "openai/gpt-oss-20b", provider: "together" },
+	{ model: "openai/gpt-oss-20b", provider: "ovhcloud" },
 	{ model: "Qwen/Qwen3-Coder-30B-A3B-Instruct", provider: "scaleway" },
-	{ model: "Qwen/Qwen2.5-7B-Instruct", provider: "together" },
-	{ model: "microsoft/phi-4", provider: "deepinfra" },
 ]
 export const GEOMETRY_MODEL = GEOMETRY_TARGETS[0].model
 export const GEOMETRY_PROVIDER = GEOMETRY_TARGETS[0].provider
@@ -136,7 +137,8 @@ export function geometryGenerationRequest(prompt, {
 				schema: WORLD_SKETCH_GEOMETRY_SCHEMA,
 			},
 		},
-		max_tokens: 2400,
+		max_tokens: 8192,
+		reasoning_effort: "low",
 		temperature: 0.2,
 	}
 }

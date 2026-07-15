@@ -1,23 +1,25 @@
 export function sceneGenerationPrompt(scene = "", { hasGeometryReference = false } = {}) {
 	const geometryReference = hasGeometryReference
-		? `Image 1 is the render to transform. Image 2 is an exactly aligned structural map; its artificial colors identify major masses and terrain only. Use it for placement and relative scale, but never copy those colors or treat it as an appearance reference.`
+		? `Image 1 is the render. Image 2 is an exactly aligned structural map. Use its artificial colors only for mass placement and scale; never copy those colors or appearance.`
 		: `Image 1 is the render to transform and the authoritative spatial reference.`
 	const description = String(scene || "A coherent handcrafted environment").trim()
-	return `Transform the supplied player-made block-out into a richly detailed, production-quality stylized 3D game environment.
+	return `Transform the block-out into a richly detailed, production-quality stylized 3D game environment.
 
 SCENE TO CREATE: ${description}
 
 ${geometryReference}
 
-Creatively reinterpret every primitive as a finished subject implied by the scene. A block is a massing proxy, never a literal cube or surface to texture. Choose any appropriate subject; leave no primitive geometry visible.
+Creatively reinterpret every primitive. A block is a massing proxy, never a literal cube or surface to texture. Leave no primitive geometry visible.
 
-SPATIAL FIDELITY IS THE CONSTRAINT. Preserve the camera, orthographic projection, framing, composition, and terrain. Keep every subject centered on its source with roughly the same projected footprint and height envelope. Preserve relative scale, spacing, orientation, and occlusion. Keep subjects separate and empty regions open. Change silhouettes only to form the intended simple object; add no new major subjects.
+SCENE COVERAGE IS MANDATORY. Every explicitly named feature in SCENE TO CREATE must appear. Match each feature to its own visible source mass or painted terrain region: terrain is the named environment; painted bands or lines become the named path, road, or water; separate blocks remain separate objects. Do not absorb a secondary object into the main subject or omit terrain markings. Show the complete terrain chunk; do not crop or zoom into one object.
 
-SURFACE RICHNESS AND CRISP MATERIAL DETAIL ARE REQUIRED. Keep objects simple and uncluttered while rendering their existing forms at three readable scales: clear primary shape; authentic surface construction such as tiles, shingles, seams, masonry courses, boards, joints, leaf clusters, bark, grass, stones, or cracks; and fine texture, edge wear, color and roughness variation, and crisp contact shadows. Details must follow the surface orientation and real construction. Use a small coherent material palette with rich internal variation. Avoid smooth blank surfaces, blurry or oversized detail, plastic, clay-like materials, and unfinished areas.
+SPATIAL FIDELITY IS THE CONSTRAINT. Preserve camera, orthographic projection, framing, composition, and terrain. Keep each subject centered on its source with roughly the same projected footprint and height envelope. Preserve relative scale, spacing, orientation, and occlusion. Keep empty regions open; change silhouettes only to form the simple intended object and add no major subjects.
 
-Enrich the existing material, not the object count. Do not add arbitrary props, panels, machinery, vents, signs, cables, planters, tools, debris, extensions, fixtures, or decorations unless requested or essential for recognition. A simple roof should stay a simple roof, made rich through crisp tiles or shingles, seams, edges, and material variation—not unrelated equipment. Use neighboring shapes as scale references. Do not enlarge a subject to fill empty ground. Preserve the terrain boundary, footprint, placement, and thickness while enriching only its surface.
+SURFACE RICHNESS AND CRISP MATERIAL DETAIL ARE REQUIRED. Keep objects simple; render their existing forms at three readable scales: primary shape; authentic construction such as tiles, seams, masonry, boards, joints, foliage, grass, stones, or cracks; and fine texture, wear, color and roughness variation, and crisp contact shadows. Follow real surface orientation and construction. Use a small palette with rich internal variation. Avoid smooth blank surfaces, blurry or oversized detail, plastic, clay-like materials, and unfinished areas.
 
-STYLE: premium handcrafted miniature diorama, painterly realism, crisp forms, warm natural light, saturated color, fine world-scale texture, material variation, and soft ambient plus strong contact shadows. Apply this generation-agnostically without biasing every result toward houses or fantasy villages.
+Enrich the existing material, not the object count. Do not add arbitrary props, panels, machinery, signs, cables, planters, tools, debris, extensions, or decorations unless requested or essential. A simple roof should stay a simple roof, enriched by crisp tiles or shingles, seams, edges, and material variation—not equipment. Use neighboring shapes for scale. Do not enlarge a subject to fill empty ground. Preserve terrain boundary and footprint while enriching only its surface.
 
-Block-out colors are semantic hints, not final materials. Keep the isolated pure black background without sky, horizon, distant scenery, UI, grid, border, legible text, or unrelated content. Make it crisp and materially rich while remaining simple and unmistakably the same composition and scale.`
+STYLE: premium handcrafted miniature diorama with painterly realism, crisp forms, warm light, saturated color, fine texture, material variation, and contact shadows—without biasing every result toward houses or fantasy villages.
+
+Colors are semantic hints, not materials. Isolate the complete terrain chunk—not merely its main object—on pure black with no sky, scenery, UI, text, or unrelated content. Keep it crisp, materially rich, simple, and unmistakably the same composition and scale.`
 }
