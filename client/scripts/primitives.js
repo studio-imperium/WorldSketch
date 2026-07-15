@@ -64,28 +64,6 @@ export function setEdgeOutlineVisible(mesh, visible) {
 	if (edges) edges.visible = visible
 }
 
-export function createSelectionOutline(mesh, color = 0x5b6ee1) { // project accent (see renderer.js / styles.css)
-	const outline = new THREE.Mesh(
-		mesh.geometry.clone(),
-		new THREE.MeshBasicMaterial({
-			color,
-			side: THREE.BackSide,
-			depthTest: true,
-			depthWrite: false,
-		}),
-	)
-	outline.name = "selection_outline"
-	outline.userData.isSelectionOutline = true
-	outline.scale.setScalar(1.045)
-	mesh.add(outline)
-	return outline
-}
-
-export function clearSelectionOutline(mesh) {
-	const outline = mesh?.children.find(child => child.userData.isSelectionOutline)
-	if (outline) disposeObject(outline)
-}
-
 export function disposeObject(object) {
 	object.traverse(child => {
 		if (child.geometry) child.geometry.dispose()

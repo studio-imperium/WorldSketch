@@ -162,26 +162,48 @@ async function runSpace(space, endpoint, payload, stage, progress, signal) {
 	return data
 }
 
+// TripoSplat's Space runs its own background-removal model (BiRefNet) on any
+// upload without transparency, and that pass can carve away real terrain. It
+// skips removal entirely when the image already carries a real alpha channel
+// (any pixel below 255), so a transparent 1px border keeps the full frame
+// intact and leaves the black background to the image model.
+async function withTransparentBorder(blob) {
+	const bitmap = await createImageBitmap(blob)
+	const canvas = document.createElement("canvas")
+	canvas.width = bitmap.width
+	canvas.height = bitmap.height
+	const context = canvas.getContext("2d")
+	context.drawImage(bitmap, 0, 0)
+	bitmap.close()
+	context.clearRect(0, 0, canvas.width, 1)
+	context.clearRect(0, canvas.height - 1, canvas.width, 1)
+	context.clearRect(0, 0, 1, canvas.height)
+	context.clearRect(canvas.width - 1, 0, 1, canvas.height)
+	const png = await new Promise((resolve, reject) => {
+		canvas.toBlob(result => result ? resolve(result) : reject(new Error("Could not encode the image for TripoSplat")), "image/png")
+	})
+	return new File([png], "scene.png", { type: "image/png" })
+}
+
 function randomSeed() {
 	return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff
 }
 
-export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress, onImageReady }) {
+// Image-detail stage only: block-out render (+ optional aligned geometry map) →
+// detailed image blob. `prompt` is the FULL prompt text, not the scene description.
+// A fixed `seed` makes runs reproducible for A/B comparisons.
+export async function detailImageOnHuggingFace({ prompt, image, geometryImage = null, seed = randomSeed(), useInferenceCredits = false, signal, onProgress }) {
 	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
 	try {
-		// The public Space supports multiple aligned edit images. The paid inference API
-		// accepts one image only, so mention the geometry map only on the path that sends it.
-		const useGeometryReference = !useInferenceCredits && Boolean(geometryImage)
-		const detailPrompt = sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference })
-		let editedImage
 		if (useInferenceCredits) {
-			onProgress?.(0.12, "Using inference credits for image detail")
+			onProgress?.(0, "Using inference credits for image detail")
 			const inference = new InferenceClient(getHuggingFaceAccessToken())
+			let editedImage
 			try {
 				editedImage = await inference.imageToImage(inferenceCreditImageRequest({
 					image,
-					prompt: detailPrompt,
-					seed: randomSeed(),
+					prompt,
+					seed,
 					settings: config.image,
 					provider: config.inferenceProvider,
 					model: config.inferenceModel,
@@ -190,44 +212,73 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 				throw friendlyHuggingFaceError(error, { useInferenceCredits: true })
 			}
 			if (signal?.aborted) throw new DOMException("Generation cancelled", "AbortError")
-			onProgress?.(0.55, "Image detail complete — inference credits used")
-		} else {
-			onProgress?.(0.12, "Uploading the block-out")
-			const imageData = await runSpace(config.imageSpace, "/infer", fluxKleinEditPayload({
-				file: handle_file(image),
-				geometryFile: useGeometryReference ? handle_file(geometryImage) : null,
-				prompt: detailPrompt,
-				seed: randomSeed(),
-				settings: config.image,
-			}), "Adding detail to the block-out", label => onProgress?.(0.35, label), signal)
-			const editedFile = fileReference(imageData?.[0] ?? imageData)
-			if (!editedFile) throw new Error("The image editor returned no image")
-			onProgress?.(0.55, "Downloading the detailed image")
-			editedImage = await downloadFile(editedFile, config.imageSpace, signal)
+			onProgress?.(1, "Image detail complete — inference credits used")
+			return editedImage
 		}
-		onImageReady?.(editedImage)
-		onProgress?.(0.6, "Sending the image to TripoSplat")
+		onProgress?.(0, "Uploading the block-out")
+		const imageData = await runSpace(config.imageSpace, "/infer", fluxKleinEditPayload({
+			file: handle_file(image),
+			geometryFile: geometryImage ? handle_file(geometryImage) : null,
+			prompt,
+			seed,
+			settings: config.image,
+		}), "Adding detail to the block-out", label => onProgress?.(0.5, label), signal)
+		const editedFile = fileReference(imageData?.[0] ?? imageData)
+		if (!editedFile) throw new Error("The image editor returned no image")
+		onProgress?.(0.9, "Downloading the detailed image")
+		return await downloadFile(editedFile, config.imageSpace, signal)
+	} catch (error) {
+		throw friendlyHuggingFaceError(error)
+	}
+}
+
+// 3D stage only: detailed image → splat bytes. A fixed `seed` makes runs
+// reproducible for A/B comparisons.
+export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), signal, onProgress }) {
+	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
+	try {
+		onProgress?.(0, "Sending the image to TripoSplat")
 		const tripoData = await runSpace(config.tripoSpace, "/generate", {
-			image: handle_file(editedImage),
-			seed: randomSeed(),
+			image: handle_file(await withTransparentBorder(image)),
+			seed,
 			steps: Number(config.tripo.steps),
 			guidance_scale: Number(config.tripo.guidance),
 			num_gaussians: Number(config.tripo.gaussians),
 			output_format: config.tripo.format || "splat",
-		}, "TripoSplat is building the 3D scene", label => onProgress?.(0.76, label), signal)
+		}, "TripoSplat is building the 3D scene", label => onProgress?.(0.43, label), signal)
 		const splatFile = fileReference(tripoData?.[2]) ?? fileReference(tripoData)
 		if (!splatFile) throw new Error("TripoSplat returned no 3D file")
-		onProgress?.(0.94, "Downloading the 3D scene")
+		onProgress?.(0.92, "Downloading the 3D scene")
 		const splat = await downloadFile(splatFile, config.tripoSpace, signal, {
 			onProgress: ({ loaded, total }) => {
 				const ratio = total > 0 ? loaded / total : Math.min(0.95, loaded / (8 * 1024 * 1024))
-				onProgress?.(0.94 + Math.min(1, ratio) * 0.03, downloadLabel(loaded, total))
+				onProgress?.(0.92 + Math.min(1, ratio) * 0.07, downloadLabel(loaded, total))
 			},
 		})
-		onProgress?.(0.97, "Reading the downloaded 3D scene")
-		const bytes = new Uint8Array(await splat.arrayBuffer())
-		return { bytes, editedImage }
+		onProgress?.(0.99, "Reading the downloaded 3D scene")
+		return new Uint8Array(await splat.arrayBuffer())
 	} catch (error) {
 		throw friendlyHuggingFaceError(error)
 	}
+}
+
+export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress, onImageReady }) {
+	// The public Space supports multiple aligned edit images. The paid inference API
+	// accepts one image only, so mention the geometry map only on the path that sends it.
+	const useGeometryReference = !useInferenceCredits && Boolean(geometryImage)
+	const editedImage = await detailImageOnHuggingFace({
+		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference }),
+		image,
+		geometryImage: useGeometryReference ? geometryImage : null,
+		useInferenceCredits,
+		signal,
+		onProgress: (fraction, label) => onProgress?.(0.12 + fraction * 0.43, label),
+	})
+	onImageReady?.(editedImage)
+	const bytes = await buildSplatOnHuggingFace({
+		image: editedImage,
+		signal,
+		onProgress: (fraction, label) => onProgress?.(0.6 + fraction * 0.37, label),
+	})
+	return { bytes, editedImage }
 }

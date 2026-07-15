@@ -12,7 +12,8 @@ import {
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
-import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
+import { closestAxisDistance } from "/scripts/axis-drag.js?v=direct-tools-1"
+import { createPrimitive, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js?v=direct-tools-1"
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
 import { loadDefaultBuildSeeds } from "/scripts/default-builds.js"
@@ -40,6 +41,7 @@ const placementNormal = new THREE.Vector3()
 const rollAxis = new THREE.Vector3()
 const rollQuat = new THREE.Quaternion()
 const normalMatrix = new THREE.Matrix3()
+const scaleParentMatrix = new THREE.Matrix3()
 const scaleAxisDir = new THREE.Vector3()
 const tmpScale = new THREE.Vector3()
 const tmpWorld = new THREE.Vector3()
@@ -50,6 +52,8 @@ const gizmoPlane = new THREE.Plane()
 const gizmoAxisWorld = new THREE.Vector3()
 const gizmoCameraDir = new THREE.Vector3()
 const gizmoPlaneNormal = new THREE.Vector3()
+const primitiveMovePlane = new THREE.Plane()
+const primitiveMovePoint = new THREE.Vector3()
 const backgroundColor = new THREE.Color(0xfcfcfc)
 
 const shapeTools = new Set(["box"])
@@ -60,8 +64,8 @@ const groundTopY = groundThickness // Y of the drawable sheet's top surface
 const baseGroundColor = "#587553" // default terrain; painted regions layer on top
 const WORKSPACE_SCALE = 3
 const GROUND_SHEET_SIZE = 48 * WORKSPACE_SCALE // 144 world units: 3× the previous drawable/buildable sheet
-// THE project accent — the single colour every UI affordance uses (tabs, selection,
-// colliders, primary button). DB32 "bright blue"; also set in styles.css.
+// THE project accent — the single colour every UI affordance uses (tabs, colliders,
+// transform controls, primary button). DB32 "bright blue"; also set in styles.css.
 const accent = 0x5b6ee1
 
 const defaultFitSettings = {
@@ -880,7 +884,7 @@ function startGizmoDrag(event, handle) {
 		origin: transformGizmo.position.clone(),
 		startScalar,
 		subtree,
-		startPositions: [selectedPrimitive, ...subtree].map(mesh => mesh.position.clone()),
+		startPositions: [selectedPrimitive, ...subtree].map(mesh => mesh.getWorldPosition(new THREE.Vector3())),
 		actionPushed: true,
 	}
 	renderer.domElement.setPointerCapture(event.pointerId)
@@ -889,13 +893,62 @@ function startGizmoDrag(event, handle) {
 }
 
 function updateGizmoDrag(event) {
-	drag.mutated = true // the checkpoint pushed at drag start is now earned
 	if (!intersectGizmoPlane(event, gizmoRayPoint)) return
 	const currentScalar = gizmoRayPoint.clone().sub(drag.origin).dot(drag.axisWorld)
 	const delta = currentScalar - drag.startScalar
+	if (Math.abs(delta) < 1e-6) return
+	drag.mutated = true // the checkpoint pushed at drag start is now earned
 	tmpDelta.copy(drag.axisWorld).multiplyScalar(delta)
 	const moved = [drag.mesh, ...drag.subtree]
-	for (let i = 0; i < moved.length; i++) moved[i].position.copy(drag.startPositions[i]).add(tmpDelta)
+	for (let i = 0; i < moved.length; i++) {
+		tmpWorld.copy(drag.startPositions[i]).add(tmpDelta)
+		moved[i].parent.worldToLocal(tmpWorld)
+		moved[i].position.copy(tmpWorld)
+	}
+	updateTransformGizmo()
+}
+
+// Dragging a block directly with the Move tool keeps the exact grabbed point under
+// the cursor on a horizontal plane. The axis gizmo remains available for constrained
+// and vertical movement.
+function startPrimitiveMoveDrag(event, mesh, hit) {
+	selectPrimitive(mesh)
+	if (mesh.userData.isGround || mesh.userData.locked) return false
+	primitiveMovePlane.setFromNormalAndCoplanarPoint(localUp, hit.point)
+	pointerFromEvent(event)
+	raycaster.setFromCamera(pointer, camera)
+	if (!raycaster.ray.intersectPlane(primitiveMovePlane, primitiveMovePoint)) return false
+	const members = [mesh, ...objectClusterOf(mesh)]
+	beginBuildAction()
+	drag = {
+		mode: "primitive-move",
+		pointerId: event.pointerId,
+		plane: primitiveMovePlane.clone(),
+		startPoint: primitiveMovePoint.clone(),
+		members: members.map(member => ({
+			mesh: member,
+			startWorld: member.getWorldPosition(new THREE.Vector3()),
+		})),
+		actionPushed: true,
+		mutated: false,
+	}
+	renderer.domElement.setPointerCapture(event.pointerId)
+	renderer.domElement.classList.add("is-dragging")
+	return true
+}
+
+function updatePrimitiveMoveDrag(event) {
+	pointerFromEvent(event)
+	raycaster.setFromCamera(pointer, camera)
+	if (!raycaster.ray.intersectPlane(drag.plane, primitiveMovePoint)) return
+	tmpDelta.copy(primitiveMovePoint).sub(drag.startPoint)
+	if (tmpDelta.lengthSq() < 1e-12) return
+	drag.mutated = true
+	for (const member of drag.members) {
+		tmpWorld.copy(member.startWorld).add(tmpDelta)
+		member.mesh.parent.worldToLocal(tmpWorld)
+		member.mesh.position.copy(tmpWorld)
+	}
 	updateTransformGizmo()
 }
 
@@ -916,6 +969,7 @@ function updatePaletteFlyout() {
 function setActiveTool(tool) {
 	const previous = activeTool
 	activeTool = tool
+	renderer.domElement.style.removeProperty("cursor")
 	// Keep the selection when hopping between the two selection tools (pointer ↔ move).
 	if (previous !== tool && !(selectionTools.has(previous) && selectionTools.has(tool))) selectPrimitive(null)
 	for (const button of els.toolButtons) button.classList.toggle("active", button.dataset.tool === tool)
@@ -956,17 +1010,10 @@ function syncPlacementPreview() {
 }
 
 function selectPrimitive(mesh) {
-	if (selectedPrimitive) clearSelectionOutline(selectedPrimitive)
 	selectedPrimitive = mesh
-	if (mesh) {
-		applySelectionOutline(mesh)
-		syncActiveColorFromSelection(mesh)
-	}
+	if (mesh) syncActiveColorFromSelection(mesh)
 	updateTransformGizmo()
 	updatePaletteFlyout()
-}
-function applySelectionOutline(mesh) {
-	createSelectionOutline(mesh)
 }
 
 function setActiveColorOnly(color) {
@@ -1233,7 +1280,7 @@ function paintGroundHit(event) {
 
 function surfaceHit(event, exclude = null) {
 	const skip = exclude instanceof Set ? exclude : exclude ? new Set([exclude]) : null
-	const objects = world.raycastables().filter(mesh => !(skip?.has(mesh)) && !mesh.userData.isSelectionOutline)
+	const objects = world.raycastables().filter(mesh => !(skip?.has(mesh)))
 	const hit = raycast(event, objects)
 	if (!hit) return null
 	const normal = hit.face?.normal ? hit.face.normal.clone() : new THREE.Vector3(0, 1, 0)
@@ -1707,29 +1754,72 @@ function setupRollDrag(mesh) {
 	}
 }
 
-// Capture everything the scale drag needs: the on-screen direction of each local
-// axis (so the drag direction can pick one), the seated face to pin, and the start
-// state of every dependent block so they can be re-glued to the moving faces.
+function resizeCursorFromScreenVector(x, y) {
+	const ax = Math.abs(x)
+	const ay = Math.abs(y)
+	if (ax > ay * 1.8) return "ew-resize"
+	if (ay > ax * 1.8) return "ns-resize"
+	return x * y >= 0 ? "nwse-resize" : "nesw-resize"
+}
+
+function scaleScreenFallback(point, axisWorld) {
+	const start = objectScreenPosition(point)
+	const end = objectScreenPosition(tmpFace.copy(point).add(axisWorld))
+	const x = end.x - start.x
+	const y = end.y - start.y
+	const pixelsPerWorldUnit = Math.hypot(x, y)
+	if (pixelsPerWorldUnit < 1e-4) {
+		return { x: 0, y: -1, worldUnitsPerPixel: Math.max(0.001, orbit.radius / 900), cursor: "ns-resize" }
+	}
+	return {
+		x: x / pixelsPerWorldUnit,
+		y: y / pixelsPerWorldUnit,
+		worldUnitsPerPixel: 1 / pixelsPerWorldUnit,
+		cursor: resizeCursorFromScreenVector(x, y),
+	}
+}
+
+function updateScaleHoverCursor(event) {
+	if (activeTool !== "scale" || drag || uiTab !== "build") {
+		renderer.domElement.style.removeProperty("cursor")
+		return
+	}
+	const hit = raycast(event, world.selectables())
+	if (!hit?.object || hit.object.userData.isGround || hit.object.userData.locked) {
+		renderer.domElement.style.removeProperty("cursor")
+		return
+	}
+	const axis = hitFaceAxis(hit)
+	hit.object.updateWorldMatrix(true, false)
+	normalMatrix.getNormalMatrix(hit.object.matrixWorld)
+	scaleAxisDir.set(0, 0, 0)
+	scaleAxisDir[axis.name] = axis.sign
+	scaleAxisDir.applyMatrix3(normalMatrix).normalize()
+	renderer.domElement.style.cursor = scaleScreenFallback(hit.point, scaleAxisDir).cursor
+}
+
+// Capture the exact grabbed face point, its outward world axis, the opposite pinned
+// face, and every dependent stack. Pointer movement is solved in world space instead
+// of applying an arbitrary scale-per-pixel sensitivity.
 function setupScaleDrag(mesh, hit = null) {
 	mesh.updateWorldMatrix(true, false)
-	const center = mesh.getWorldPosition(new THREE.Vector3())
-	const worldQuat = mesh.getWorldQuaternion(new THREE.Quaternion())
-	const centerScreen = objectScreenPosition(center)
-	const screenAxis = {}
-	for (const name of ["x", "y", "z"]) {
-		scaleAxisDir.set(0, 0, 0)
-		scaleAxisDir[name] = 1
-		scaleAxisDir.applyQuaternion(worldQuat).multiplyScalar(0.5).add(center)
-		const tip = objectScreenPosition(scaleAxisDir)
-		const sx = tip.x - centerScreen.x
-		const sy = tip.y - centerScreen.y
-		const len = Math.hypot(sx, sy) || 1
-		screenAxis[name] = { x: sx / len, y: sy / len }
-	}
-	const pickedAxis = hit ? hitFaceAxis(hit) : null
-	const anchorAxis = pickedAxis ? { name: pickedAxis.name, sign: -pickedAxis.sign } : { name: "y", sign: -1 }
+	mesh.parent.updateWorldMatrix(true, false)
+	const pickedAxis = hit ? hitFaceAxis(hit) : { name: "y", sign: 1 }
+	const anchorAxis = { name: pickedAxis.name, sign: -pickedAxis.sign }
 	const anchorLocal = faceLocalPoint(mesh, anchorAxis, new THREE.Vector3())
 	const anchorWorld = mesh.localToWorld(anchorLocal.clone())
+	const grabbedWorld = hit?.point?.clone?.() ?? mesh.localToWorld(faceLocalPoint(mesh, pickedAxis, new THREE.Vector3()))
+	if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
+	const bounds = mesh.geometry.boundingBox
+	const localSpan = Math.max(1e-6, bounds.max[pickedAxis.name] - bounds.min[pickedAxis.name])
+	scaleAxisDir.set(0, 0, 0)
+	scaleAxisDir[pickedAxis.name] = pickedAxis.sign
+	scaleAxisDir.applyQuaternion(mesh.quaternion)
+	scaleParentMatrix.setFromMatrix4(mesh.parent.matrixWorld)
+	scaleAxisDir.applyMatrix3(scaleParentMatrix)
+	const worldUnitsPerScale = Math.max(1e-6, scaleAxisDir.length() * localSpan)
+	const axisWorld = scaleAxisDir.normalize().clone()
+	const screenFallback = scaleScreenFallback(grabbedWorld, axisWorld)
 	const children = []
 	for (const child of world.primitives) {
 		if (child.userData.support !== mesh) continue
@@ -1740,26 +1830,32 @@ function setupScaleDrag(mesh, hit = null) {
 			faceLocal,
 			startFaceWorld: mesh.localToWorld(faceLocal.clone()),
 			subtree,
-			startPos: subtree.map(m => m.position.clone()),
+			startPos: subtree.map(m => m.getWorldPosition(new THREE.Vector3())),
 		})
 	}
-	if (pickedAxis) {
-		screenAxis[pickedAxis.name] = {
-			x: screenAxis[pickedAxis.name].x * pickedAxis.sign,
-			y: screenAxis[pickedAxis.name].y * pickedAxis.sign,
-		}
+	drag.scale = {
+		mesh,
+		axis: pickedAxis.name,
+		axisWorld,
+		grabbedWorld,
+		worldUnitsPerScale,
+		screenFallback,
+		anchorLocal,
+		anchorWorld,
+		children,
 	}
-	drag.scale = { mesh, worldQuat, screenAxis, anchorLocal, anchorWorld, children, axis: pickedAxis?.name ?? null }
+	renderer.domElement.style.cursor = screenFallback.cursor
 }
 
 function updatePrimitiveDrag(event) {
-	drag.mutated = true // the checkpoint pushed at drag start is now earned
 	if (drag.mode === "scale") {
 		updateScaleDrag(event)
 		return
 	}
 	if (drag.mode === "roll") {
 		const delta = pointerScreenAngle(event, drag.rollCenter) - drag.startAngle
+		if (Math.abs(delta) < 1e-6) return
+		drag.mutated = true // the checkpoint pushed at drag start is now earned
 		rollQuat.setFromAxisAngle(drag.rollAxis, delta)
 		drag.mesh.quaternion.copy(rollQuat).multiply(drag.startQuaternion)
 		drag.mesh.userData.manualRotation = true
@@ -1778,34 +1874,25 @@ function updatePrimitiveDrag(event) {
 
 function updateScaleDrag(event) {
 	const s = drag.scale
-	const dx = event.clientX - drag.startX
-	const dy = event.clientY - drag.startY
-	// Lock to one axis on the first decisive movement and keep it until release, so a
-	// scale never wanders onto another axis mid-drag.
-	if (!s.axis) {
-		if (Math.hypot(dx, dy) < 4) return // wait for a deliberate drag before committing
-		let best = -1
-		for (const name of ["x", "y", "z"]) {
-			const sa = s.screenAxis[name]
-			const p = Math.abs(dx * sa.x + dy * sa.y)
-			if (p > best) {
-				best = p
-				s.axis = name
-			}
-		}
+	pointerFromEvent(event)
+	raycaster.setFromCamera(pointer, camera)
+	let worldDistance = closestAxisDistance(raycaster.ray.origin, raycaster.ray.direction, s.grabbedWorld, s.axisWorld)
+	if (worldDistance == null) {
+		const dx = event.clientX - drag.startX
+		const dy = event.clientY - drag.startY
+		worldDistance = (dx * s.screenFallback.x + dy * s.screenFallback.y) * s.screenFallback.worldUnitsPerPixel
 	}
 	const axis = s.axis
-	const sa = s.screenAxis[axis]
-	const proj = dx * sa.x + dy * sa.y
-	const factor = Math.min(6, Math.max(0.15, 1 + proj * 0.01))
 	const newScale = drag.startScale.clone()
-	newScale[axis] = drag.startScale[axis] * factor
+	newScale[axis] = Math.max(0.05, drag.startScale[axis] + worldDistance / s.worldUnitsPerScale)
+	if (Math.abs(newScale[axis] - drag.startScale[axis]) < 1e-6) return
+	drag.mutated = true // the checkpoint pushed at drag start is now earned
 	s.mesh.scale.copy(newScale)
 	// Pin the opposite grabbed face so dragging outward grows and inward shrinks.
-	tmpScale.copy(s.anchorLocal).multiply(newScale).applyQuaternion(s.worldQuat)
-	tmpWorld.copy(s.anchorWorld).sub(tmpScale)
-	world.group.worldToLocal(tmpWorld)
-	s.mesh.position.copy(tmpWorld)
+	tmpScale.copy(s.anchorLocal).multiply(newScale).applyQuaternion(s.mesh.quaternion)
+	tmpWorld.copy(s.anchorWorld)
+	s.mesh.parent.worldToLocal(tmpWorld)
+	s.mesh.position.copy(tmpWorld).sub(tmpScale)
 	s.mesh.updateWorldMatrix(true, false)
 	// Drag every dependent stack along with the face it is seated on.
 	for (const rec of s.children) {
@@ -1813,7 +1900,9 @@ function updateScaleDrag(event) {
 		s.mesh.localToWorld(tmpFace)
 		tmpDelta.copy(tmpFace).sub(rec.startFaceWorld)
 		for (let i = 0; i < rec.subtree.length; i++) {
-			rec.subtree[i].position.copy(rec.startPos[i]).add(tmpDelta)
+			tmpWorld.copy(rec.startPos[i]).add(tmpDelta)
+			rec.subtree[i].parent.worldToLocal(tmpWorld)
+			rec.subtree[i].position.copy(tmpWorld)
 		}
 	}
 }
@@ -2362,6 +2451,7 @@ function pointerDown(event) {
 			return
 		}
 		if (activeTool === "scale" || activeTool === "rotate") startPrimitiveDrag(event, hit.object, hit)
+		else if (activeTool === "move") startPrimitiveMoveDrag(event, hit.object, hit)
 		else selectPrimitive(hit.object)
 		return
 	}
@@ -2381,12 +2471,16 @@ renderer.domElement.addEventListener("pointermove", event => {
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
+	else if (drag?.mode === "primitive-move") updatePrimitiveMoveDrag(event)
 	else if (drag?.mode === "splat-lasso") updateSplatLasso(event)
 	else if (drag?.mode === "splat-move") updateSplatMove(event)
 	else if (drag?.mode === "splat-scale") updateSplatScale(event)
 	else if (drag?.mode === "splat-rotate") updateSplatRotate(event)
 	else if (drag && ["scale", "roll"].includes(drag.mode)) updatePrimitiveDrag(event)
-	else if (uiTab === "build" && !generating) updatePlacement(event)
+	else if (uiTab === "build" && !generating) {
+		if (activeTool === "scale") updateScaleHoverCursor(event)
+		else updatePlacement(event)
+	}
 	else if (uiTab === "view" && viewTool === "lasso") setViewTransformCursor(viewTransformHit(event))
 })
 
@@ -2402,10 +2496,16 @@ renderer.domElement.addEventListener("pointerup", event => {
 		renderer.domElement.releasePointerCapture(event.pointerId)
 		drag = null
 		renderer.domElement.classList.remove("is-dragging")
+		renderer.domElement.style.removeProperty("cursor")
 		updateTransformGizmo()
+		if (activeTool === "scale") updateScaleHoverCursor(event)
 		syncViewTransformOverlay()
 		if (uiTab === "view" && viewTool === "lasso") setViewTransformCursor(viewTransformHit(event))
 	}
+})
+
+renderer.domElement.addEventListener("pointerleave", () => {
+	if (!drag) renderer.domElement.style.removeProperty("cursor")
 })
 
 renderer.domElement.addEventListener("wheel", event => {

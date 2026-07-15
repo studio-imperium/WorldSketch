@@ -54,7 +54,7 @@ button {
 }
 
 #canvas canvas.is-scaling {
-	cursor: nwse-resize;
+	cursor: grab;
 }
 
 #canvas canvas.is-rotating {

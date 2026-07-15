@@ -3,7 +3,7 @@ export function sceneGenerationPrompt(scene = "", { hasGeometryReference = false
 		? `Image 1 is the render. Image 2 is an exactly aligned structural map. Use its artificial colors only for mass placement and scale; never copy those colors or appearance.`
 		: `Image 1 is the render to transform and the authoritative spatial reference.`
 	const description = String(scene || "A coherent richly detailed environment").trim()
-	return `Transform the block-out into a production-quality environment rendered with richly detailed stylized realism.
+	return `Transform the block-out into a production-quality environment rendered with richly detailed stylized realism, isolated on a pure black background.
 
 SCENE TO CREATE: ${description}
 
@@ -21,5 +21,5 @@ Enrich the existing material, not the object count. Do not add arbitrary props, 
 
 STYLE: highly detailed stylized realism at the scale of a believable full-sized place. Use readable silhouettes and a cohesive artistic palette, but keep proportions, construction, lighting, depth, and material response realistic. Architecture must feel massive, structural, and inhabitable; terrain must feel naturally formed. Favor crisp layered detail, natural imperfections, weathering, believable roughness and reflections, ambient occlusion, and grounded shadows. Never depict a miniature, tabletop diorama, toy, model kit, clay sculpture, low-poly asset, cartoon, or plastic object.
 
-Colors are semantic hints, not materials. Isolate the complete terrain chunk—not merely its main object—on pure black with no sky, scenery, UI, text, or unrelated content. Keep it crisp, materially rich, simple, and unmistakably the same composition and scale.`
+Colors are semantic hints, not materials. THE BLACK BACKGROUND IS NON-NEGOTIABLE. Every pixel outside the terrain chunk stays pure flat black (#000000): no sky, horizon, surrounding ground, scenery, gradients, glow, vignette, UI, or text. The complete terrain chunk—not merely its main object—floats isolated on black exactly where the source render is black. Keep it crisp, materially rich, simple, and unmistakably the same composition and scale.`
 }
