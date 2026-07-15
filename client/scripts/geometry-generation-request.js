@@ -1,6 +1,10 @@
-export const GEOMETRY_MODEL = "openai/gpt-oss-20b"
-export const GEOMETRY_PROVIDERS = ["novita", "together", "ovhcloud"]
-export const GEOMETRY_PROVIDER = GEOMETRY_PROVIDERS[0]
+export const GEOMETRY_TARGETS = [
+	{ model: "Qwen/Qwen3-Coder-30B-A3B-Instruct", provider: "scaleway" },
+	{ model: "Qwen/Qwen2.5-7B-Instruct", provider: "together" },
+	{ model: "microsoft/phi-4", provider: "deepinfra" },
+]
+export const GEOMETRY_MODEL = GEOMETRY_TARGETS[0].model
+export const GEOMETRY_PROVIDER = GEOMETRY_TARGETS[0].provider
 export const MAX_GENERATED_PRIMITIVES = 32
 
 const vector = (items, description) => ({
@@ -109,12 +113,15 @@ small amount of repeated detail. Prefer whole numbers or one decimal place. Keep
 scene within roughly -28 to 28 on X and Z. Use no more than ${MAX_GENERATED_PRIMITIVES}
 boxes. The generated JSON replaces the entire current build, including its floor.`
 
-export function geometryGenerationRequest(prompt, { provider = GEOMETRY_PROVIDER } = {}) {
+export function geometryGenerationRequest(prompt, {
+	model = GEOMETRY_MODEL,
+	provider = GEOMETRY_PROVIDER,
+} = {}) {
 	const description = String(prompt ?? "").trim()
 	if (!description) throw new Error("Describe the geometry you want to generate")
 	return {
 		provider,
-		model: GEOMETRY_MODEL,
+		model,
 		messages: [
 			{ role: "system", content: SYSTEM_PROMPT },
 			{ role: "user", content: "Create a compact Japanese courtyard with perimeter walls, one layered building, a gate, a tree and painted ground." },
@@ -137,4 +144,17 @@ export function geometryGenerationRequest(prompt, { provider = GEOMETRY_PROVIDER
 export function cleanGeometryResponse(content) {
 	if (typeof content !== "string" || !content.trim()) throw new Error("The geometry model returned no JSON")
 	return content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "")
+}
+
+export function geometryResponseContent(response) {
+	const choice = response?.choices?.[0]
+	if (choice?.finish_reason !== "length") {
+		const content = choice?.message?.content
+		if (typeof content === "string" && content.trim()) return content
+	}
+	const error = new Error(choice?.finish_reason === "length"
+		? "The geometry model used its whole output budget without returning complete JSON"
+		: "The geometry model returned no JSON")
+	error.code = "EMPTY_GEOMETRY_RESPONSE"
+	throw error
 }
