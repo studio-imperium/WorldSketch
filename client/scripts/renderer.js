@@ -14,8 +14,8 @@ import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
-import { generateGeometryOnHuggingFace } from "/scripts/geometry-generation.js?v=geometry-dev-4"
-import { MAX_GENERATED_PRIMITIVES } from "/scripts/geometry-generation-request.js?v=geometry-dev-4"
+import { generateGeometryOnHuggingFace } from "/scripts/geometry-generation.js?v=geometry-dev-5"
+import { geometryPromptRequestsGround, MAX_GENERATED_PRIMITIVES } from "/scripts/geometry-generation-request.js?v=geometry-dev-5"
 import { createSky } from "/scripts/sky.js"
 import { cloneGroundStrokes, closeGroundStroke, paintGroundStroke } from "/scripts/ground-strokes.js"
 
@@ -83,6 +83,25 @@ let generating = false
 let splatting = false // a SPLAT generation is in flight (drives the View tab's disabled+spinner gate)
 let generationAbort = null
 let geometryGenerating = false
+const generationDebugImageUrls = new Map()
+
+// Temporary inspection aid: keep the exact images sent through the one-shot pipeline
+// available as clickable blob URLs in DevTools until the next generation replaces them.
+function clearGenerationDebugImages() {
+	for (const url of generationDebugImageUrls.values()) URL.revokeObjectURL(url)
+	generationDebugImageUrls.clear()
+	window.__wsGenerationImages = {}
+}
+
+function logGenerationDebugImage(key, label, blob) {
+	if (!(blob instanceof Blob)) return
+	const previous = generationDebugImageUrls.get(key)
+	if (previous) URL.revokeObjectURL(previous)
+	const url = URL.createObjectURL(blob)
+	generationDebugImageUrls.set(key, url)
+	window.__wsGenerationImages = Object.fromEntries(generationDebugImageUrls)
+	console.info(`[WorldSketch image] ${label} — open in a new tab:`, url)
+}
 
 // Raw one-shot scene bytes + metadata kept in memory for ZIP export and re-fitting.
 let sceneSplat = null
@@ -2828,6 +2847,7 @@ async function generateBuildGeometry(prompt) {
 		if (!geometry.ground) {
 			geometry.ground = { size: GROUND_SHEET_SIZE, complete: true, strokes: [] }
 		}
+		if (!geometryPromptRequestsGround(description)) geometry.ground.strokes = []
 		await replaceBuildGeometry(geometry)
 		world.prompt = description
 		if (els.chatPrompt) els.chatPrompt.value = description
@@ -3051,7 +3071,13 @@ function validatedGroundPaintJson(value) {
 			}
 			return [point[0], point[1]]
 		})
-		return { mode: stroke.mode, color: stroke.color.toLowerCase(), radius, points }
+		return {
+			mode: stroke.mode,
+			color: stroke.color.toLowerCase(),
+			radius,
+			closed: stroke.mode !== "erase" && stroke.closed === true,
+			points,
+		}
 	})
 	const image = typeof value.image === "string" && value.image.startsWith("data:image/") ? value.image : null
 	const complete = value.complete !== false && !image
@@ -5777,6 +5803,7 @@ async function generateWorld(prompt) {
 	beginNewSplatFrame()
 	setUiTab("build")
 	showProgress(0, 1, "Capturing complete scene…")
+	clearGenerationDebugImages()
 
 	try {
 		const genStart = performance.now()
@@ -5800,6 +5827,10 @@ async function generateWorld(prompt) {
 			phi: FRONT_PHI,
 		}
 		const capture = await captureWorld(renderer, scene, world, box, objectGroups, viewAngles)
+		logGenerationDebugImage("capture", "Block-out capture sent to FLUX", capture.guide)
+		logGenerationDebugImage("structure", useInferenceCredits
+			? "Aligned structural map (not sent on the inference-credit route)"
+			: "Aligned structural map sent to FLUX", capture.semanticMap)
 		const captureMs = performance.now() - tCap
 		// The image editor is asked to preserve the camera and composition, so the original object
 		// bounds remain the most reliable boxes for later splat segmentation.
@@ -5808,7 +5839,7 @@ async function generateWorld(prompt) {
 		sceneSplat = null
 		sceneSession = null
 		showProgress(0, 100, "Sending the scene to Hugging Face…")
-		const { bytes } = await generateSceneOnHuggingFace({
+		const { bytes, editedImage } = await generateSceneOnHuggingFace({
 			prompt,
 			image: capture.guide,
 			geometryImage: capture.semanticMap,
@@ -5816,6 +5847,7 @@ async function generateWorld(prompt) {
 			signal: generationAbort.signal,
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),
 		})
+		logGenerationDebugImage("output", "Final FLUX image sent to TripoSplat", editedImage)
 		// Fit a copy so sceneSplat retains the pristine TripoSplat bytes for ZIP/history.
 		// Preserve the one-shot reconstruction's proportions with a uniform fit. The
 		// terrain and objects share one cloud, so independently forcing X and Z onto the

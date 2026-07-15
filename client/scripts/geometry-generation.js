@@ -1,12 +1,12 @@
 import { InferenceClient } from "@huggingface/inference"
 import { getHuggingFaceAccessToken, getHuggingFaceAuth } from "/scripts/huggingface-auth.js"
-import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=geometry-dev-4"
+import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=geometry-dev-5"
 import {
 	cleanGeometryResponse,
 	GEOMETRY_TARGETS,
 	geometryGenerationRequest,
 	geometryResponseContent,
-} from "/scripts/geometry-generation-request.js?v=geometry-dev-4"
+} from "/scripts/geometry-generation-request.js?v=geometry-dev-5"
 
 function retryableProviderError(error) {
 	const status = Number(error?.httpResponse?.status)

@@ -5,7 +5,7 @@ try {
 	const runtimeConfig = await getConfig()
 	configureHuggingFaceAuth(runtimeConfig?.generation)
 	if (!getHuggingFaceAuth().signedIn) location.replace("/")
-	else await import("/scripts/renderer.js?v=geometry-dev-4")
+	else await import("/scripts/renderer.js?v=geometry-dev-5")
 } catch (error) {
 	console.error("Editor startup failed:", error)
 	location.replace("/")

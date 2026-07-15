@@ -6,6 +6,7 @@ import {
 	COURTYARD_EXAMPLE,
 	GEOMETRY_TARGETS,
 	geometryGenerationRequest,
+	geometryPromptRequestsGround,
 	geometryResponseContent,
 	MAX_GENERATED_PRIMITIVES,
 	WORLD_SKETCH_GEOMETRY_SCHEMA,
@@ -41,6 +42,19 @@ test("uses a compact valid courtyard example instead of the full reference build
 	assert.ok(COURTYARD_EXAMPLE.primitives.length < MAX_GENERATED_PRIMITIVES)
 	assert.equal(COURTYARD_EXAMPLE.version, 4)
 	assert.equal(COURTYARD_EXAMPLE.ground.complete, true)
+	assert.deepEqual(COURTYARD_EXAMPLE.ground.strokes, [])
+})
+
+test("leaves terrain empty by default and recognizes explicit ground requests", () => {
+	const request = geometryGenerationRequest("a small stone lighthouse")
+	assert.match(request.messages[0].content, /return strokes: \[\] unless/)
+	assert.match(request.messages[0].content, /Never invent[\s\S]*U-shape/)
+	assert.equal(geometryPromptRequestsGround("a small stone lighthouse"), false)
+	assert.equal(geometryPromptRequestsGround("a lighthouse with a winding path"), true)
+	assert.equal(geometryPromptRequestsGround("a lighthouse without any terrain"), false)
+	const strokeSchema = WORLD_SKETCH_GEOMETRY_SCHEMA.properties.ground.properties.strokes.items
+	assert.ok(strokeSchema.required.includes("closed"))
+	assert.deepEqual(strokeSchema.properties.closed.enum, [true])
 })
 
 test("cleans defensive JSON fences and rejects empty responses", () => {
