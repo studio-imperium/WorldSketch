@@ -7,7 +7,7 @@ import healthHandler from "../../api/healthz.mjs"
 test("Vercel config function matches the server defaults", async () => {
 	const config = runtimeConfig()
 	assert.equal(config.generation.provider, "huggingface")
-	assert.equal(config.generation.image.steps, 40)
+	assert.equal(config.generation.image.steps, 20)
 	assert.equal(config.generation.tripo.gaussians, 131072)
 
 	const response = await configHandler.fetch(new Request("https://example.com/api/config"))

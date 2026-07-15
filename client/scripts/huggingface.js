@@ -15,11 +15,11 @@ import { resolveAuthenticatedSpaceFileURL } from "/scripts/huggingface-url.js"
 const DEFAULT_CONFIG = {
 	oauthClientId: "91581ad0-d16c-4f49-9746-cff21b50ac9e",
 	redirectUrl: "",
-	imageSpace: "Qwen/Qwen-Image-Edit-2509",
+	imageSpace: "WilliamQM/Qwen-Image-Edit-2509",
 	tripoSpace: "VAST-AI/TripoSplat",
 	inferenceProvider: "fal-ai",
 	inferenceModel: "black-forest-labs/FLUX.2-dev",
-	image: { steps: 40, guidance: 4, width: 1024, height: 1024 },
+	image: { steps: 20, guidance: 4, width: 1024, height: 1024 },
 	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
 }
 
