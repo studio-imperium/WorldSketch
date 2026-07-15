@@ -8,7 +8,8 @@ import {
 	generateSceneOnHuggingFace,
 	getHuggingFaceAuth,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=splat-download-1"
+} from "/scripts/huggingface.js?v=flux-preview-1"
+import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
@@ -90,24 +91,16 @@ let generating = false
 let splatting = false // a SPLAT generation is in flight (drives the View tab's disabled+spinner gate)
 let generationAbort = null
 let geometryGenerating = false
-const generationDebugImageUrls = new Map()
+const generationImageDebugger = createGenerationImageDebugger()
 
 // Temporary inspection aid: keep the exact images sent through the one-shot pipeline
-// available as clickable blob URLs in DevTools until the next generation replaces them.
+// available through the DevTools preview helper until the next generation replaces them.
 function clearGenerationDebugImages() {
-	for (const url of generationDebugImageUrls.values()) URL.revokeObjectURL(url)
-	generationDebugImageUrls.clear()
-	window.__wsGenerationImages = {}
+	generationImageDebugger.clear()
 }
 
 function logGenerationDebugImage(key, label, blob) {
-	if (!(blob instanceof Blob)) return
-	const previous = generationDebugImageUrls.get(key)
-	if (previous) URL.revokeObjectURL(previous)
-	const url = URL.createObjectURL(blob)
-	generationDebugImageUrls.set(key, url)
-	window.__wsGenerationImages = Object.fromEntries(generationDebugImageUrls)
-	console.info(`[WorldSketch image] ${label} — open in a new tab:`, url)
+	generationImageDebugger.log(key, label, blob)
 }
 
 // Raw one-shot scene bytes + metadata kept in memory for ZIP export and re-fitting.
@@ -5873,15 +5866,15 @@ async function generateWorld(prompt) {
 		sceneSplat = null
 		sceneSession = null
 		showProgress(0, 100, "Sending the scene to Hugging Face…")
-		const { bytes, editedImage } = await generateSceneOnHuggingFace({
+		const { bytes } = await generateSceneOnHuggingFace({
 			prompt,
 			image: capture.guide,
 			geometryImage: capture.semanticMap,
 			useInferenceCredits,
 			signal: generationAbort.signal,
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),
+			onImageReady: image => logGenerationDebugImage("output", "Final FLUX image sent to TripoSplat", image),
 		})
-		logGenerationDebugImage("output", "Final FLUX image sent to TripoSplat", editedImage)
 		showProgress(97, 100, "Analyzing the 3D scene…")
 		await yieldForProgressPaint()
 		// Fit a copy so sceneSplat retains the pristine TripoSplat bytes for ZIP/history.

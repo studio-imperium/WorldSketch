@@ -166,7 +166,7 @@ function randomSeed() {
 	return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff
 }
 
-export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress }) {
+export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress, onImageReady }) {
 	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
 	try {
 		// The public Space supports multiple aligned edit images. The paid inference API
@@ -205,6 +205,7 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 			onProgress?.(0.55, "Downloading the detailed image")
 			editedImage = await downloadFile(editedFile, config.imageSpace, signal)
 		}
+		onImageReady?.(editedImage)
 		onProgress?.(0.6, "Sending the image to TripoSplat")
 		const tripoData = await runSpace(config.tripoSpace, "/generate", {
 			image: handle_file(editedImage),
