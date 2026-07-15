@@ -74,7 +74,7 @@ export async function newOutput() {
 
 // Texture and reconstruct one capture (legacy object/floor or the current whole scene).
 // The whole-scene path performs one image edit followed by one TripoSplat call.
-export async function generateSubject({ prompt, kind, steps, gaussians, output, name, groundColor, label, colors, image, materialImage, hasGround, objectCount, skipImageEdit = false, signal }) {
+export async function generateSubject({ prompt, kind, steps, gaussians, output, name, groundColor, label, image, materialImage, hasGround, objectCount, skipImageEdit = false, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt ?? "")
 	form.append("kind", kind)
@@ -83,9 +83,6 @@ export async function generateSubject({ prompt, kind, steps, gaussians, output, 
 	if (steps) form.append("steps", String(steps))
 	if (gaussians) form.append("gaussians", String(gaussians))
 	if (label) form.append("label", label)
-	// The object's actual primitive colours, so the server can lock the generated
-	// texture's hues to exactly these (WS_PALETTE_MATCH=lock).
-	if (colors && colors.length) form.append("colors", colors.join(","))
 	if (output) form.append("output", output)
 	if (name) form.append("name", name)
 	if (groundColor) form.append("ground_color", groundColor)
@@ -104,11 +101,10 @@ export async function generateSubject({ prompt, kind, steps, gaussians, output, 
 // Floor-only first stage: turn the flat top-down paint/material map into a realistic
 // top-down terrain texture. The client applies this texture to the floor, captures the
 // regular isometric guide, then sends that guide to TripoSplat without another image edit.
-export async function generateFloorTexture({ prompt, image, groundColor, colors, output, name, signal }) {
+export async function generateFloorTexture({ prompt, image, groundColor, output, name, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt ?? "")
 	if (groundColor) form.append("ground_color", groundColor)
-	if (colors && colors.length) form.append("colors", colors.join(","))
 	if (output) form.append("output", output)
 	if (name) form.append("name", name)
 	form.append("image", image, `${name || "floor-texture"}.png`)
@@ -128,11 +124,10 @@ export async function generateFloorTexture({ prompt, image, groundColor, colors,
 // as ONE splat (gaussian count scaled by tile count) so there is no seam between plots.
 // Returns { splat: Uint8Array, imageBlob: Blob } — keep imageBlob as the master for the
 // NEXT expansion's outpaint context.
-export async function generateGround({ prompt, image, mask, groundColor, colors, cols, rows, imageSize, output, name, signal }) {
+export async function generateGround({ prompt, image, mask, groundColor, cols, rows, imageSize, output, name, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt ?? "")
 	if (groundColor) form.append("ground_color", groundColor)
-	if (colors && colors.length) form.append("colors", colors.join(","))
 	form.append("cols", String(cols ?? 1))
 	form.append("rows", String(rows ?? 1))
 	if (imageSize) form.append("image_size", imageSize)
@@ -156,12 +151,11 @@ export async function generateGround({ prompt, image, mask, groundColor, colors,
 
 // ONE cohesive terrain TEXTURE for the whole footprint — no splat step. The client
 // slices the returned image per tile and reconstructs each slice as its own splat.
-export async function generateGroundTexture({ prompt, image, mask, groundColor, colors, cols, rows, imageSize, output, name, signal }) {
+export async function generateGroundTexture({ prompt, image, mask, groundColor, cols, rows, imageSize, output, name, signal }) {
 	const form = new FormData()
 	form.append("prompt", prompt ?? "")
 	form.append("texture_only", "1")
 	if (groundColor) form.append("ground_color", groundColor)
-	if (colors && colors.length) form.append("colors", colors.join(","))
 	form.append("cols", String(cols ?? 1))
 	form.append("rows", String(rows ?? 1))
 	if (imageSize) form.append("image_size", imageSize)

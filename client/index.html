@@ -137,6 +137,10 @@
 					<span>Bounds</span>
 					<input type="checkbox" id="show_splat_box_input" class="toggle toggle-sm">
 				</label>
+				<label class="settings-item settings-toggle" title="Show or hide only the generated floor splat; object and remainder splats stay visible">
+					<span>Splat floor</span>
+					<input type="checkbox" id="show_splat_floor_input" class="toggle toggle-sm" checked>
+				</label>
 			</div>
 		</div>
 		<aside class="history-panel hidden" id="history_panel" aria-label="Build history">
@@ -165,8 +169,8 @@
 			<button class="tool-btn btn btn-ghost btn-square join-item active" data-view-tool="orbit" aria-label="Orbit camera" title="Orbit the camera">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 12a2 2 0 1 0 4 0a2 2 0 0 0 -4 0"></path><path d="M21 12c-2.4 4 -5.4 6 -9 6c-3.6 0 -6.6 -2 -9 -6c2.4 -4 5.4 -6 9 -6c3.6 0 6.6 2 9 6"></path></svg>
 			</button>
-			<button class="tool-btn btn btn-ghost btn-square join-item" data-view-tool="lasso" aria-label="Lasso select splats" title="Lasso select splats — drag a rectangle, then drag selected splats to move them">
-				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5h14v14h-14z" stroke-dasharray="3 2"></path><path d="M9 12h6"></path><path d="M12 9v6"></path></svg>
+			<button class="tool-btn btn btn-ghost btn-square join-item" data-view-tool="move" aria-label="Move splat" title="Move a splat — drag an object across the ground; hold Shift to move vertically">
+				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9l3 3l-3 3"></path><path d="M15 12h6"></path><path d="M6 9l-3 3l3 3"></path><path d="M3 12h6"></path><path d="M9 18l3 3l3 -3"></path><path d="M12 15v6"></path><path d="M9 6l3 -3l3 3"></path><path d="M12 3v6"></path></svg>
 			</button>
 			<button class="tool-btn btn btn-ghost btn-square join-item" data-view-tool="scale" aria-label="Scale splat" title="Scale a splat — drag right/up to grow, left/down to shrink">
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M16 4h4v4"></path><path d="M14 10l6 -6"></path><path d="M8 20h-4v-4"></path><path d="M4 20l6 -6"></path></svg>

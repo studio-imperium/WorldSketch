@@ -1,0 +1,19 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash '/Users/wqm/Documents/Projects/WorldSketch/.codex/hooks/gofmt-go.sh'"
+          },
+          {
+            "type": "command",
+            "command": "python3 '/Users/wqm/Documents/Projects/WorldSketch/.codex/hooks/doc-reminder.py'"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -124,56 +124,6 @@ function percentile(sorted, q) {
 	return sorted[pos]
 }
 
-// --- sRGB <-> CIELAB (D65), for enforcing the block-out palette onto gaussian colours.
-// Mirrors the server's image-side palette lock so the splat gets the same treatment.
-const clamp01 = v => Math.min(1, Math.max(0, v))
-const sToLin = c => (c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4))
-const linToS = c => (c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055)
-
-function srgbToLab(r, g, b) {
-	const rl = sToLin(r), gl = sToLin(g), bl = sToLin(b)
-	let X = (rl * 0.4124 + gl * 0.3576 + bl * 0.1805) / 0.95047
-	const Y = rl * 0.2126 + gl * 0.7152 + bl * 0.0722
-	let Z = (rl * 0.0193 + gl * 0.1192 + bl * 0.9505) / 1.08883
-	const f = t => (t > 0.008856 ? Math.cbrt(t) : 7.787 * t + 16 / 116)
-	const fx = f(X), fy = f(Y), fz = f(Z)
-	return [116 * fy - 16, 500 * (fx - fy), 200 * (fy - fz)]
-}
-
-function labToSrgb(L, a, b) {
-	const fy = (L + 16) / 116, fx = fy + a / 500, fz = fy - b / 200
-	const inv = t => {
-		const t3 = t * t * t
-		return t3 > 0.008856 ? t3 : (t - 16 / 116) / 7.787
-	}
-	const X = inv(fx) * 0.95047, Y = inv(fy), Z = inv(fz) * 1.08883
-	const rl = X * 3.2406 + Y * -1.5372 + Z * -0.4986
-	const gl = X * -0.9689 + Y * 1.8758 + Z * 0.0415
-	const bl = X * 0.0557 + Y * -0.204 + Z * 1.057
-	return [clamp01(linToS(rl)), clamp01(linToS(gl)), clamp01(linToS(bl))]
-}
-
-function hexToLab(hex) {
-	const h = hex.replace("#", "")
-	return srgbToLab(parseInt(h.slice(0, 2), 16) / 255, parseInt(h.slice(2, 4), 16) / 255, parseInt(h.slice(4, 6), 16) / 255)
-}
-
-// Nearest palette colour in LAB by chroma only. Lightness is ignored so dark greens do not
-// snap to a brown palette entry just because brown has a closer brightness.
-function nearestLab(palette, L, a, b) {
-	let best = palette[0]
-	let bestD = Infinity
-	for (const p of palette) {
-		const da = p[1] - a, db = p[2] - b
-		const d = da * da + db * db
-		if (d < bestD) {
-			bestD = d
-			best = p
-		}
-	}
-	return best
-}
-
 export function ensureSplatEditBase(mesh) {
 	const packed = mesh.packedSplats
 	const total = packed?.numSplats ?? 0
@@ -234,12 +184,9 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const radiusKeep = opts.radiusKeep ?? 1 // optional floater trim; 1 keeps every opacity survivor
 	const loQ = opts.spanLo ?? 0 // robust extent percentiles, so a few strays
 	const hiQ = opts.spanHi ?? 1 // can't blow up the measured size
+	const cullAmount = Math.min(1, Math.max(0, opts.cullAmount ?? 1))
+	const cullHeightFraction = Math.min(1, Math.max(0, opts.cullHeightFraction ?? 1))
 
-	// Optional per-gaussian palette enforcement (the splat side of the palette lock): snap
-	// each gaussian's chroma to its nearest block-out colour, pull its lightness similarly.
-	const palette = opts.palette?.length ? opts.palette.map(hexToLab) : null
-	const paletteStrength = opts.paletteStrength ?? 0 // chroma blend toward the palette colour
-	const paletteLightness = opts.paletteLightness ?? 0 // lightness pull toward the palette colour
 	const exactBounds = Boolean(opts.exactBounds)
 	const clipBoxes = Array.isArray(opts.clipBoxes) ? opts.clipBoxes : null
 
@@ -258,6 +205,7 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		zs[i] = center.z
 		if (opacity < opacityFloor) keep[i] = 0
 	})
+	const opacityKeep = Uint8Array.from(keep)
 
 	// Median center (robust) of the survivors, then drop the farthest few as floaters.
 	// 3D distance so stray gaussians above/below the object are caught as well as lateral ones.
@@ -270,7 +218,16 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		survivorsY.push(ys[i])
 		survivorsZ.push(zs[i])
 	}
-	if (!survivorsX.length) return null
+	// Keep fitting robust even when every gaussian is below the opacity threshold. The
+	// threshold is a cull candidate detector; the global amount slider owns removal.
+	if (!survivorsX.length) {
+		for (let i = 0; i < total; i++) {
+			keep[i] = 1
+			survivorsX.push(xs[i])
+			survivorsY.push(ys[i])
+			survivorsZ.push(zs[i])
+		}
+	}
 	const medianX = percentile(survivorsX.slice().sort((a, b) => a - b), 0.5)
 	const medianY = percentile(survivorsY.slice().sort((a, b) => a - b), 0.5)
 	const medianZ = percentile(survivorsZ.slice().sort((a, b) => a - b), 0.5)
@@ -280,6 +237,8 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		const cut = percentile(dists.sort((a, b) => a - b), radiusKeep)
 		for (let i = 0; i < total; i++) if (keep[i] && Math.hypot(xs[i] - medianX, ys[i] - medianY, zs[i] - medianZ) > cut) keep[i] = 0
 	}
+	const renderKeep = new Uint8Array(total)
+	for (let i = 0; i < total; i++) renderKeep[i] = opacityKeep[i] && keep[i] ? 1 : 0
 
 	// For bounding-box measurement only: bin kept gaussians into a coarse 3D grid
 	// and exclude cells below `sparseDensityMin`.  Isolated floaters that survive
@@ -411,9 +370,7 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const seatStoredY = exactBounds ? percentile(keptY, 0.85) : bottomStoredY
 
 	// Compact survivors to the front of the packed buffer, baking the final fit into each
-	// gaussian center and ellipsoid. If a palette is given, recolour each kept gaussian
-	// onto it (chroma by paletteStrength, lightness by paletteLightness) — the splat-level
-	// twin of the server's image palette lock.
+	// gaussian center and ellipsoid.
 	let kept = 0
 	const targetCenterX = (box.min.x + box.max.x) / 2
 	const targetCenterZ = (box.min.z + box.max.z) / 2
@@ -431,28 +388,69 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const linear = matrix3FromMatrix4(transformMatrix)
 	const transformedOffset = new THREE.Vector3()
 	const insideClip = point => !clipBoxes || clipBoxes.some(b => b.containsPoint(point))
+	// Build robust bottom/top ranges from valid fitted material before deciding whether a
+	// cleanup candidate is low or high. A whole-scene splat uses local XZ stacks so a short
+	// rock does not inherit a lighthouse's height; single-object/floor fits use one range.
+	const localHeightRanges = Boolean(opts.localCleanupHeight)
+	const heightCellSize = Math.max(0.25, Math.max(box.max.x - box.min.x, box.max.z - box.min.z) / 64)
+	const heightKey = (x, z) => `${Math.floor((x - box.min.x) / heightCellSize)},${Math.floor((z - box.min.z) / heightCellSize)}`
+	const heightSamples = new Map()
+	const allHeightSamples = []
+	for (let i = 0; i < total; i++) {
+		if (!renderKeep[i]) continue
+		transformedOffset
+			.set(sx * (xs[i] - centerX), -sy * ys[i], mirrorZ * sz * (zs[i] - centerZ))
+			.applyQuaternion(yaw)
+		const x = targetCenterX + transformedOffset.x
+		const y = posY + yOffset + transformedOffset.y
+		const z = targetCenterZ + transformedOffset.z
+		allHeightSamples.push(y)
+		if (!localHeightRanges) continue
+		const key = heightKey(x, z)
+		let samples = heightSamples.get(key)
+		if (!samples) heightSamples.set(key, samples = [])
+		samples.push(y)
+	}
+	const robustHeightRange = samples => {
+		if (!samples?.length) return null
+		samples.sort((a, b) => a - b)
+		const low = samples[Math.floor((samples.length - 1) * 0.01)]
+		const high = samples[Math.ceil((samples.length - 1) * 0.99)]
+		return { low, high: Math.max(low, high) }
+	}
+	const globalHeightRange = robustHeightRange(allHeightSamples) ?? { low: box.min.y + yOffset, high: box.max.y + yOffset }
+	const heightRanges = new Map()
+	for (const [key, samples] of heightSamples) heightRanges.set(key, robustHeightRange(samples))
+	const heightRangeAt = (x, z) => heightRanges.get(heightKey(x, z)) ?? globalHeightRange
+	const cullHash = (x, y, z) => {
+		const value = Math.sin(x * 127.1 + y * 311.7 + z * 74.7) * 43758.5453123
+		return value - Math.floor(value)
+	}
+	const mayCullAt = (x, y, z) => {
+		if (cullAmount <= 0) return false
+		if (cullHeightFraction < 1) {
+			const range = localHeightRanges ? heightRangeAt(x, z) : globalHeightRange
+			const height = Math.max(0.05, range.high - range.low)
+			const basePad = Math.min(0.1, height * 0.03)
+			if (y > range.low + height * cullHeightFraction + basePad) return false
+		}
+		return cullAmount >= 1 || cullHash(x, y, z) < cullAmount
+	}
 
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
-		if (!keep[i]) return
-		if (palette) {
-			const [L, a, b] = srgbToLab(color.r, color.g, color.b)
-			const p = nearestLab(palette, L, a, b)
-			const [nr, ng, nb] = labToSrgb(L + (p[0] - L) * paletteLightness, a + (p[1] - a) * paletteStrength, b + (p[2] - b) * paletteStrength)
-			color.r = nr
-			color.g = ng
-			color.b = nb
-		}
 		transformedOffset
 			.set(sx * (center.x - centerX), -sy * center.y, mirrorZ * sz * (center.z - centerZ))
 			.applyQuaternion(yaw)
 		const nextX = targetCenterX + transformedOffset.x
 		const nextY = posY + yOffset + transformedOffset.y
 		const nextZ = targetCenterZ + transformedOffset.z
+		const mayCull = mayCullAt(nextX, nextY, nextZ)
+		if (!renderKeep[i] && mayCull) return
 		// Floors: anything below floor level is underground and can never be visible —
 		// cull it outright. `reliefDip` leaves headroom for SHALLOW surface relief (worn
 		// paths, ruts) that dips under the seated sheet without being underground junk.
 		// Above floor level Y is FREE (no clamp, no compression).
-		if (exactBounds && nextY < box.min.y + yOffset - reliefDip) return
+		if (exactBounds && nextY < box.min.y + yOffset - reliefDip && mayCull) return
 		// With clip boxes the fill-overscale overhang is CULLED (insideClip below), keeping
 		// interior gaussians at their true positions; clamping is only the fallback when
 		// there is nothing to cull against (edge strays pile onto the border instead).
@@ -462,7 +460,7 @@ export async function fitSplatToBox(source, box, opts = {}) {
 			nextY,
 			clampXZ ? Math.min(box.max.z, Math.max(box.min.z, nextZ)) : nextZ,
 		)
-		if (!insideClip(center)) return
+		if (!insideClip(center) && mayCull) return
 		const transformedShape = transformSplatShape(scales, quaternion, linear)
 		packed.setSplat(kept, center, transformedShape.scales, transformedShape.quaternion, opacity, color)
 		kept++

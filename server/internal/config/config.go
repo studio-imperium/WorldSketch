@@ -21,12 +21,6 @@ type ImageEditSettings struct {
 	SkipImageEdit bool
 }
 
-type PaletteSettings struct {
-	Mode      string
-	Strength  float64
-	Lightness float64
-}
-
 type TripoSettings struct {
 	Steps     string
 	Guidance  string
@@ -77,14 +71,6 @@ func SubjectImageEditSettings(kind string) ImageEditSettings {
 func SubjectSkipImageEdit(kind string) bool {
 	fallback := EnvBool("WS_SKIP_IMAGE_EDIT", EnvBool("WS_SKIP_OPENAI", false))
 	return SubjectEnvBool(kind, "SKIP_IMAGE_EDIT", nil, fallback)
-}
-
-func SubjectPaletteSettings(kind string) PaletteSettings {
-	return PaletteSettings{
-		Mode:      PaletteMode(SubjectEnv(kind, "PALETTE_MATCH", []string{"WS_PALETTE_MATCH"}, "off")),
-		Strength:  SubjectEnvFloat(kind, "PALETTE_MATCH_STRENGTH", []string{"WS_PALETTE_MATCH_STRENGTH"}, 0.75),
-		Lightness: SubjectEnvFloat(kind, "PALETTE_MATCH_LIGHTNESS", []string{"WS_PALETTE_MATCH_LIGHTNESS"}, 0),
-	}
 }
 
 func SubjectTripoSettings(kind, stepsField, gaussiansField string) TripoSettings {
@@ -328,17 +314,6 @@ func SubjectEnvFloat(kind, suffix string, legacy []string, fallback float64) flo
 		}
 	}
 	return fallback
-}
-
-func PaletteMode(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "", "0", "false", "off", "no":
-		return "off"
-	case "lock", "quantize", "snap":
-		return "lock"
-	default:
-		return "global"
-	}
 }
 
 func AtoiDefault(s string, fallback int) int {

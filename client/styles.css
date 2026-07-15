@@ -174,8 +174,8 @@ body.tab-view .view-dock {
 	display: flex;
 }
 
-body.tab-view canvas.is-splat-lasso {
-	cursor: crosshair;
+body.tab-view canvas.is-splat-move {
+	cursor: grab;
 }
 
 body.tab-view canvas.is-splat-scale {
@@ -184,16 +184,6 @@ body.tab-view canvas.is-splat-scale {
 
 body.tab-view canvas.is-splat-rotate {
 	cursor: grab;
-}
-
-.view-lasso-rect {
-	position: fixed;
-	z-index: 60;
-	pointer-events: none;
-	border: 1.5px solid #ffffff;
-	background: rgba(91, 110, 225, 0.16);
-	box-shadow: 0 0 0 1px rgba(91, 110, 225, 0.9);
-	display: none;
 }
 
 /* Draw tab: a full-screen, pannable sketch canvas — the faint grid marks 16x16 plots.
@@ -850,7 +840,7 @@ body.dev-controls-visible .settings-menu {
 	top: 1rem;
 	z-index: 30;
 	display: none;
-	width: min(23rem, calc(100vw - 2rem));
+	width: min(30rem, calc(100vw - 2rem));
 	max-height: calc(100vh - 2rem);
 	overflow: auto;
 	padding: 0.85rem;
@@ -929,6 +919,13 @@ body.dev-controls-visible .tuning-panel {
 	color: #374151;
 }
 
+.tuning-row > small {
+	display: block;
+	color: #737b87;
+	font-size: 0.68rem;
+	line-height: 1.35;
+}
+
 .tuning-row output {
 	font-variant-numeric: tabular-nums;
 	color: #5b6ee1;
@@ -940,15 +937,113 @@ body.dev-controls-visible .tuning-panel {
 	accent-color: #5b6ee1;
 }
 
+.tuning-row > .tuning-range-labels {
+	font-size: 0.63rem;
+	color: #8a929d;
+}
+
+.build-json-group {
+	padding: 0.75rem 0;
+	border-top: 1px solid #edf0f2;
+}
+
+.build-json-head {
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	gap: 0.75rem;
+}
+
+.build-json-head h3 {
+	margin: 0;
+	font-size: 0.72rem;
+	font-weight: 700;
+	text-transform: uppercase;
+	letter-spacing: 0.06em;
+	color: #6b7280;
+}
+
+.build-json-head span {
+	font-size: 0.68rem;
+	color: #64748b;
+}
+
+.build-json-head span[data-state="live"] {
+	color: #16834a;
+}
+
+.build-json-head span[data-state="dirty"] {
+	color: #a15c00;
+}
+
+.build-json-head span[data-state="error"] {
+	color: #c0362c;
+}
+
+.build-json-group > p {
+	margin: 0.35rem 0 0.5rem;
+	font-size: 0.68rem;
+	line-height: 1.35;
+	color: #737b87;
+}
+
+.build-json-group textarea {
+	display: block;
+	box-sizing: border-box;
+	width: 100%;
+	min-height: 14rem;
+	resize: vertical;
+	padding: 0.6rem;
+	border: 1px solid #d8dee4;
+	border-radius: 0.55rem;
+	background: #f8fafc;
+	color: #26313d;
+	font: 0.7rem/1.45 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+	tab-size: 2;
+}
+
+.build-json-group textarea:focus {
+	border-color: #818cf8;
+	outline: 2px solid rgba(99, 102, 241, 0.14);
+}
+
+.build-json-actions {
+	display: flex;
+	gap: 0.5rem;
+	margin-top: 0.5rem;
+}
+
+.build-json-actions button {
+	flex: 1;
+	padding: 0.45rem 0.55rem;
+	border: 1px solid #d8dee4;
+	border-radius: 0.55rem;
+	background: #f8fafc;
+	color: #374151;
+	font-size: 0.76rem;
+}
+
+.build-json-actions button:first-child {
+	border-color: #c7d2fe;
+	background: #eef2ff;
+	color: #4338ca;
+}
+
+.build-json-actions button:hover {
+	border-color: #a5b4fc;
+	background: #e0e7ff;
+}
+
 .tuning-actions {
 	display: flex;
+	flex-wrap: wrap;
 	gap: 0.5rem;
 	padding-top: 0.65rem;
 	border-top: 1px solid #edf0f2;
 }
 
 .tuning-actions button {
-	flex: 1;
+	flex: 1 1 6.5rem;
 	padding: 0.45rem 0.55rem;
 	border: 1px solid #d8dee4;
 	border-radius: 0.55rem;

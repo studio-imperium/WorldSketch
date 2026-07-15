@@ -54,7 +54,8 @@ const floorSeamOverlap = 0.18 // tiny X/Z overfit so adjacent per-plot floor spl
 const tileSeamOverlap = 0.04
 const tileSeamLift = (ix, iz) => ((ix + iz) & 1 ? 0.0015 : 0)
 const baseGroundColor = "#587553" // default terrain; painted regions layer on top
-const GROUND_SHEET_SIZE = 48 // world units the drawable ground sheet spans (paint creates ground)
+const WORKSPACE_SCALE = 3
+const GROUND_SHEET_SIZE = 48 * WORKSPACE_SCALE // 144 world units: 3× the previous drawable/buildable sheet
 // THE project accent — the single colour every UI affordance uses (tabs, selection,
 // ghosts, colliders, primary button). DB32 "bright blue"; also set in styles.css.
 const accent = 0x5b6ee1
@@ -64,9 +65,6 @@ const defaultFitSettings = {
 	opacityFloor: 0.03,
 	fitClampK: 0,
 	fitBboxPercentile: 0,
-	paletteLock: false,
-	paletteStrength: 0.75,
-	paletteLightness: 0,
 	yawDeg: 0,
 	fillOverscale: 1.08, // floors only: overscale the X/Z fit, clip boxes cull the overhang
 	reliefDip: 0.35, // floors only: how far surface relief may dip below the seated sheet
@@ -120,38 +118,48 @@ const colliderColor = accent
 const boundsColor = accent
 let showColliders = false
 let showBounds = false
+let showSplatFloor = true
 let devControlsVisible = false
 let rawSplatPreview = null
 let rawOrbitSnapshot = null
 const segmentationTuneDefaults = {
 	voxelCells: 96,
-	minBlob: 200,
-	bridgeCut: 0.25,
-	colorSplit: 0.6,
-	terrainBias: 0.45,
-	skirtGuardMinRise: 4.2,
+	minBlob: 520,
+	bridgeCut: 0.45,
+	colorSplit: 1,
+	terrainBias: 0.51,
+	skirtGuardMinRise: 5.92,
+	cullAmount: 100,
+	cleanupReach: 0.44,
 	preCullIntensity: 1.0,
 	postCullIntensity: 1.0,
 	floorBand: 0.9,
-	baseDetachStrength: 0.55,
+	baseDetachStrength: 0.84,
 	baseDetachHeight: 1.2,
 	baseDetachRadius: 2,
 	baseColumnMinHeight: 1.6,
-	wispAggression: 0.72,
-	detachedCullPct: 0.025,
-	backfillDensity: 10,
+	wispAggression: 0.77,
+	detachedCullPct: 0.03422446964537663,
+	groundSmooth: 0.63,
+	groundFill: 0.6,
+	groundFillMaxHeight: 0.25,
 	scarDilation: 1,
 	scarBaseHeight: 0.85,
 	scarBaseSurface: 1.1,
-	scarRaisedCull: 0.18,
-	scarFill: 0.18,
 }
 const segmentationTuning = { ...segmentationTuneDefaults }
 const clamp01 = value => Math.min(1, Math.max(0, value))
 const lerp = (a, b, t) => a + (b - a) * clamp01(t)
+const percent = value => `${Math.round(clamp01(value) * 100)}%`
+const adjustableSegmentationKeys = new Set([
+	"minBlob", "bridgeCut", "colorSplit", "terrainBias", "baseDetachStrength",
+	"skirtGuardMinRise", "wispAggression", "detachedCullPct", "cullAmount",
+	"cleanupReach", "groundSmooth", "groundFill", "groundFillMaxHeight",
+])
 try {
 	const saved = JSON.parse(localStorage.getItem("worldsketch.segmentationTuning") || "{}")
 	for (const key of Object.keys(segmentationTuning)) {
+		if (!adjustableSegmentationKeys.has(key)) continue
 		const value = Number(saved[key])
 		if (Number.isFinite(value)) segmentationTuning[key] = value
 	}
@@ -204,6 +212,7 @@ const els = {
 	uploadZip: document.getElementById("upload_zip_input"),
 	showColliders: document.getElementById("show_colliders_input"),
 	showBounds: document.getElementById("show_splat_box_input"),
+	showSplatFloor: document.getElementById("show_splat_floor_input"),
 	settingsBtn: document.getElementById("settings_btn"),
 	settingsMenu: document.getElementById("settings_menu"),
 	settingsPopover: document.getElementById("settings_popover"),
@@ -490,7 +499,7 @@ class World {
 	// from a downscaled alpha scan so it stays exact after erasing, and cheap enough to
 	// call per generation. Canvas x → world +X, canvas y → world +Z (top-down mapping).
 	groundInkBounds() {
-		const S = 128
+		const S = 128 * WORKSPACE_SCALE // retain the previous world-space scan precision on the larger sheet
 		const probe = document.createElement("canvas")
 		probe.width = probe.height = S
 		const pctx = probe.getContext("2d", { willReadFrequently: true })
@@ -833,6 +842,7 @@ class World {
 		this.boundsHelpers = []
 		if (!show || this.state !== "generated") return
 		for (const { mesh } of this.generated) {
+			if (!showSplatFloor && mesh.userData.genKind === "floor") continue
 			const box = mesh.userData.contentBox
 			if (!box) continue
 			const helper = new THREE.Box3Helper(box, boundsColor)
@@ -1422,7 +1432,9 @@ function applyUiTab() {
 	// the primary splat button is CSS-hidden there).
 	if (els.chatPrompt) els.chatPrompt.placeholder = uiTab === "draw" ? "Describe your drawing..." : "Describe your scene..."
 	// Splats render only in the View tab.
-	for (const { mesh } of world.generated) mesh.visible = !building
+	for (const { mesh } of world.generated) {
+		mesh.visible = !building && (showSplatFloor || mesh.userData.genKind !== "floor")
+	}
 	// Expansion ghosts are build-time UI: hide them from the camera AND the raycaster.
 	camera.layers[building ? "enable" : "disable"](GHOST_LAYER)
 	raycaster.layers[building ? "enable" : "disable"](GHOST_LAYER)
@@ -1629,7 +1641,7 @@ function updateCamera() {
 	// Raw inspection changes only the camera: the uploaded splat itself remains untouched.
 	// Its native scale can be far outside the editor's normal 4..128 orbit range.
 	const minRadius = rawSplatPreview ? 0.001 : 4
-	const maxRadius = rawSplatPreview ? 1e7 : floorSize * 8
+	const maxRadius = rawSplatPreview ? 1e7 : Math.max(floorSize * 8, GROUND_SHEET_SIZE * 2)
 	orbit.radius = Math.max(minRadius, Math.min(maxRadius, orbit.radius)) // headroom to pan/zoom across a multi-plot world
 	camera.up.set(0, 1, 0)
 	camera.position.copy(orbit.target).add(scratch.setFromSpherical(new THREE.Spherical(orbit.radius, orbit.phi, orbit.theta)))
@@ -1639,7 +1651,7 @@ function updateCamera() {
 	// previews, splat/mesh intersections) z-fight once zoomed out. Nothing ever sits
 	// within 2% of the orbit radius from the camera, so raising it never clips geometry.
 	camera.near = rawSplatPreview ? Math.max(0.00001, orbit.radius / 10000) : Math.min(2, Math.max(0.03, orbit.radius * 0.02))
-	camera.far = rawSplatPreview ? Math.max(400, orbit.radius * 20) : 400
+	camera.far = rawSplatPreview ? Math.max(400, orbit.radius * 20) : Math.max(400, orbit.radius * 2.5)
 	camera.fov = 50
 	camera.updateProjectionMatrix()
 }
@@ -2109,13 +2121,13 @@ function paintAtEvent(event) {
 }
 
 // --- View-tab splat tools -----------------------------------------------------
-// View owns its own lasso/scale/rotate: they act on the generated SplatMesh transforms
+// View owns its own move/scale/rotate: they act on the generated SplatMesh transforms
 // only, so nothing feeds back into the Build block-out. Splat scaling stays UNIFORM —
 // Spark collapses non-uniform mesh scales to an average, while a uniform scale is safe.
 // Selection raycasts invisible proxy boxes (children of each splat mesh, sized to its
 // content bounds), because gaussian clouds have no geometry a raycaster could hit.
 
-let viewTool = "orbit" // "orbit" | "lasso" | "scale" | "rotate"
+let viewTool = "orbit" // "orbit" | "move" | "scale" | "rotate"
 let selectedSplatMesh = null
 const selectedSplatMeshes = new Set()
 
@@ -2124,7 +2136,6 @@ const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: 0x5b6ee1, tr
 const splatDragPlane = new THREE.Plane()
 const splatRotQuat = new THREE.Quaternion()
 const splatDragPoint = new THREE.Vector3()
-let viewLassoRect = null
 
 // Gemini-detected 2D boxes over the generated scene image ({label, box_2d:[y0,x0,y1,x1]}
 // in 0-1000 image coords). Fetched once per generation, persisted with the build, and
@@ -2179,17 +2190,6 @@ function selectSplat(mesh) {
 	}
 }
 
-function selectSplats(meshes) {
-	deselectSplat()
-	for (const mesh of meshes) {
-		if (!mesh) continue
-		selectedSplatMeshes.add(mesh)
-		const outline = mesh.userData.splatProxy?.userData.outline
-		if (outline) outline.visible = true
-	}
-	selectedSplatMesh = selectedSplatMeshes.values().next().value ?? null
-}
-
 function deselectSplat() {
 	for (const mesh of selectedSplatMeshes) {
 		const outline = mesh.userData.splatProxy?.userData.outline
@@ -2201,116 +2201,39 @@ function deselectSplat() {
 
 function raycastSplatProxies(event) {
 	ensureSplatProxies()
-	const proxies = world.generated.map(g => g.mesh.userData.splatProxy).filter(Boolean)
-	return proxies.length ? raycast(event, proxies) : null
-}
-
-function ensureViewLassoRect() {
-	if (viewLassoRect) return viewLassoRect
-	viewLassoRect = document.createElement("div")
-	viewLassoRect.className = "view-lasso-rect"
-	document.body.appendChild(viewLassoRect)
-	return viewLassoRect
-}
-
-function setViewLassoRectVisible(visible) {
-	if (!viewLassoRect && !visible) return
-	ensureViewLassoRect().style.display = visible ? "block" : "none"
-}
-
-function updateViewLassoRect(d) {
-	const el = ensureViewLassoRect()
-	const x0 = Math.min(d.startX, d.currentX)
-	const y0 = Math.min(d.startY, d.currentY)
-	const x1 = Math.max(d.startX, d.currentX)
-	const y1 = Math.max(d.startY, d.currentY)
-	el.style.left = `${x0}px`
-	el.style.top = `${y0}px`
-	el.style.width = `${Math.max(1, x1 - x0)}px`
-	el.style.height = `${Math.max(1, y1 - y0)}px`
-}
-
-function splatProxyScreenRect(mesh) {
-	const proxy = mesh.userData.splatProxy
-	if (!proxy) return null
-	proxy.updateWorldMatrix(true, false)
-	const box = new THREE.Box3().setFromObject(proxy)
-	if (box.isEmpty()) return null
-	const point = new THREE.Vector3()
-	const rect = { minX: Infinity, minY: Infinity, maxX: -Infinity, maxY: -Infinity }
-	for (const x of [box.min.x, box.max.x]) {
-		for (const y of [box.min.y, box.max.y]) {
-			for (const z of [box.min.z, box.max.z]) {
-				point.set(x, y, z).project(camera)
-				const sx = (point.x * 0.5 + 0.5) * window.innerWidth
-				const sy = (-point.y * 0.5 + 0.5) * window.innerHeight
-				rect.minX = Math.min(rect.minX, sx)
-				rect.maxX = Math.max(rect.maxX, sx)
-				rect.minY = Math.min(rect.minY, sy)
-				rect.maxY = Math.max(rect.maxY, sy)
-			}
+	const proxies = world.generated
+		.filter(g => g.mesh.userData.genKind === "object")
+		.map(g => g.mesh.userData.splatProxy)
+		.filter(Boolean)
+	if (!proxies.length) return null
+	pointerFromEvent(event)
+	raycaster.setFromCamera(pointer, camera)
+	const hits = raycaster.intersectObjects(proxies, false)
+	if (hits.length < 2) return hits[0] ?? null
+	// Proxy boxes can overlap. Prefer the object whose projected centre is closest
+	// to the pointer, using ray distance only as a stable tie-breaker.
+	const projected = new THREE.Vector3()
+	let best = hits[0]
+	let bestScore = Infinity
+	for (const hit of hits) {
+		hit.object.getWorldPosition(projected).project(camera)
+		const score = Math.hypot(projected.x - pointer.x, projected.y - pointer.y) + hit.distance * 1e-5
+		if (score < bestScore) {
+			best = hit
+			bestScore = score
 		}
 	}
-	return rect
-}
-
-function rectsIntersect(a, b) {
-	return a.minX <= b.maxX && a.maxX >= b.minX && a.minY <= b.maxY && a.maxY >= b.minY
-}
-
-function startViewLasso(event) {
-	drag = {
-		mode: "splat-lasso",
-		pointerId: event.pointerId,
-		startX: event.clientX,
-		startY: event.clientY,
-		currentX: event.clientX,
-		currentY: event.clientY,
-	}
-	updateViewLassoRect(drag)
-	setViewLassoRectVisible(true)
-	renderer.domElement.setPointerCapture(event.pointerId)
-}
-
-function updateViewLasso(event) {
-	drag.currentX = event.clientX
-	drag.currentY = event.clientY
-	updateViewLassoRect(drag)
-}
-
-function finishViewLasso() {
-	setViewLassoRectVisible(false)
-	const x0 = Math.min(drag.startX, drag.currentX)
-	const y0 = Math.min(drag.startY, drag.currentY)
-	const x1 = Math.max(drag.startX, drag.currentX)
-	const y1 = Math.max(drag.startY, drag.currentY)
-	if (Math.hypot(x1 - x0, y1 - y0) < 4) {
-		deselectSplat()
-		return
-	}
-	ensureSplatProxies()
-	const lasso = { minX: x0, minY: y0, maxX: x1, maxY: y1 }
-	const meshes = []
-	for (const { mesh } of world.generated) {
-		// Only OBJECT pieces are lassoable: the terrain (floor/scene-ground) and the
-		// static remainder span the whole scene, so any lasso would grab them and drag
-		// the ground along with the intended prop.
-		if (mesh.userData.genKind !== "object") continue
-		const rect = splatProxyScreenRect(mesh)
-		if (rect && rectsIntersect(lasso, rect)) meshes.push(mesh)
-	}
-	selectSplats(meshes)
+	return best
 }
 
 function startSplatDrag(event, hit) {
 	const mesh = hit.object.parent
-	if (viewTool === "lasso" && !selectedSplatMeshes.has(mesh)) selectSplat(mesh)
-	else if (viewTool !== "lasso") selectSplat(mesh)
+	selectSplat(mesh)
 	const pivot = hit.object.getWorldPosition(new THREE.Vector3())
 	mesh.updateWorldMatrix(true, false)
 	const scaleAnchorLocal = splatScaleAnchorLocal(mesh, pivot)
 	const scaleAnchorWorld = mesh.localToWorld(scaleAnchorLocal.clone())
-	const group = viewTool === "lasso" ? [...selectedSplatMeshes] : [mesh]
+	const group = [mesh]
 	drag = {
 		mode: viewTool === "rotate" ? "splat-rotate" : viewTool === "scale" ? "splat-scale" : "splat-move",
 		pointerId: event.pointerId,
@@ -2352,6 +2275,7 @@ function updateSplatMove(event) {
 		for (const [mesh, start] of drag.startGroupPositions ?? [[drag.mesh, drag.startPos]]) {
 			mesh.position.set(start.x, start.y + dy, start.z)
 		}
+		if (Math.abs(dy) > 0.001) drag.mutated = true
 		return
 	}
 	splatDragPlane.set(localUp, -drag.startPoint.y)
@@ -2363,6 +2287,7 @@ function updateSplatMove(event) {
 	for (const [mesh, start] of drag.startGroupPositions ?? [[drag.mesh, drag.startPos]]) {
 		mesh.position.set(start.x + dx, start.y, start.z + dz)
 	}
+	if (Math.hypot(dx, dz) > 0.001) drag.mutated = true
 }
 
 // Uniform scale from the selected splat's bottom centre, so the object grows up/out
@@ -2375,6 +2300,7 @@ function updateSplatScale(event) {
 	// compensate position so scaling happens from the bottom anchor, not origin.
 	tmpWorld.copy(drag.scaleAnchorLocal).multiply(drag.mesh.scale).applyQuaternion(drag.startQuat)
 	drag.mesh.position.copy(drag.scaleAnchorWorld).sub(tmpWorld)
+	if (Math.abs(factor - 1) > 0.001) drag.mutated = true
 }
 
 // Match Build-mode rotation: pointer angle around the object's on-screen centre drives
@@ -2384,14 +2310,14 @@ function updateSplatRotate(event) {
 	splatRotQuat.setFromAxisAngle(drag.rollAxis, angle)
 	drag.mesh.quaternion.copy(splatRotQuat).multiply(drag.startQuat)
 	drag.mesh.position.copy(drag.startPos).sub(drag.pivot).applyQuaternion(splatRotQuat).add(drag.pivot)
+	if (Math.abs(angle) > 0.001) drag.mutated = true
 }
 
 function setViewTool(tool) {
 	viewTool = tool
 	for (const button of els.viewToolButtons) button.classList.toggle("active", button.dataset.viewTool === tool)
 	if (tool === "orbit") deselectSplat()
-	renderer.domElement.classList.toggle("is-splat-move", false)
-	renderer.domElement.classList.toggle("is-splat-lasso", tool === "lasso")
+	renderer.domElement.classList.toggle("is-splat-move", tool === "move")
 	renderer.domElement.classList.toggle("is-splat-scale", tool === "scale")
 	renderer.domElement.classList.toggle("is-splat-rotate", tool === "rotate")
 }
@@ -2422,17 +2348,8 @@ function pointerDown(event) {
 		return
 	}
 	if (uiTab === "view") {
-		// Lasso/scale/rotate act on the splat under the cursor; anywhere else (or the orbit
+		// Move/scale/rotate act on the splat under the cursor; anywhere else (or the orbit
 		// tool) the drag is the camera. Block-out editing stays a Build-only thing.
-		if (viewTool === "lasso") {
-			const hit = raycastSplatProxies(event)
-			if (hit && selectedSplatMeshes.has(hit.object.parent)) {
-				startSplatDrag(event, hit)
-				return
-			}
-			startViewLasso(event)
-			return
-		}
 		if (viewTool !== "orbit") {
 			const hit = raycastSplatProxies(event)
 			if (hit) {
@@ -2525,7 +2442,6 @@ renderer.domElement.addEventListener("pointermove", event => {
 	if (drag?.mode === "orbit") updateOrbit(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
-	else if (drag?.mode === "splat-lasso") updateViewLasso(event)
 	else if (drag?.mode === "splat-move") updateSplatMove(event)
 	else if (drag?.mode === "splat-scale") updateSplatScale(event)
 	else if (drag?.mode === "splat-rotate") updateSplatRotate(event)
@@ -2536,7 +2452,6 @@ renderer.domElement.addEventListener("pointermove", event => {
 renderer.domElement.addEventListener("pointerup", event => {
 	if (drag?.pointerId === event.pointerId) {
 		if (drag.mode === "gizmo") finishGizmoDrag()
-		if (drag.mode === "splat-lasso") finishViewLasso()
 		if (drag.mode === "orbit" && drag.pendingCell && Math.hypot(event.clientX - drag.downX, event.clientY - drag.downY) < 5) {
 			addPlotAt(drag.pendingCell) // a clean click on an empty cell → new plot
 		}
@@ -2705,7 +2620,7 @@ async function buildSceneFromPrompt(prompt) {
 // inked grid cells and includes light grid lines so Gemini can map cells to plots.
 
 const SKETCH_CELL = 324 // screen px per plot grid cell (CSS grid + export math share this)
-const SKETCH_MAX_CELLS = 3 // export crop cap per side — each cell becomes one 16x16 plot
+const SKETCH_MAX_CELLS = 3 * WORKSPACE_SCALE // 9×9 plots: 3× the previous span per side
 const drawCtx = els.drawCanvas?.getContext("2d")
 const sketchPan = { x: 0, y: 0 } // screen offset of the sketch-world origin (grabber pans this)
 let sketchStrokes = [] // [{ tool: "pen"|"eraser", color, width, pts: [{x,y}, ...] }] in sketch-world px
@@ -3757,6 +3672,7 @@ function setDevControlsVisible(visible) {
 	devControlsVisible = Boolean(visible)
 	document.body.classList.toggle("dev-controls-visible", devControlsVisible)
 	if (!devControlsVisible) toggleSettings(false)
+	else syncBuildGeometryJson(true)
 }
 
 function toggleDevControls() {
@@ -3768,32 +3684,238 @@ let segmentationTuneAutoRetune = true
 let segmentationTuneTimer = null
 let segmentationTuneRunning = false
 let segmentationTuneQueued = false
+let buildGeometryJsonField = null
+let buildGeometryJsonStatus = null
+let buildGeometryJsonLastSynced = ""
+let buildGeometryJsonLastCheck = 0
+let buildGeometryJsonApplying = false
+let buildGeometryJsonHasError = false
 const segmentationTuneControls = [
-	{ group: "Grouping", key: "voxelCells", label: "Voxel cells", min: 64, max: 320, step: 8, format: v => `${Math.round(v)}` },
-	{ group: "Grouping", key: "minBlob", label: "Min blob", min: 40, max: 1000, step: 20, format: v => `${Math.round(v)} pts` },
-	{ group: "Grouping", key: "bridgeCut", label: "Bridge cut", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Grouping", key: "colorSplit", label: "Color split", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Grouping", key: "terrainBias", label: "Terrain bias", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Ground Split", key: "skirtGuardMinRise", label: "Skirt guard height", min: 0, max: 8, step: 0.1, format: v => `${v.toFixed(1)}u` },
-	{ group: "Ground Split", key: "floorBand", label: "Floor band", min: 0.2, max: 1.8, step: 0.02, format: v => `${v.toFixed(2)}u` },
-	{ group: "Ground Split", key: "baseDetachStrength", label: "Base detach", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Ground Split", key: "baseDetachHeight", label: "Detach height", min: 0.2, max: 3.5, step: 0.05, format: v => `${v.toFixed(2)}u` },
-	{ group: "Ground Split", key: "baseDetachRadius", label: "Detach radius", min: 0, max: 5, step: 1, format: v => `${Math.round(v)} cell` + (Math.round(v) === 1 ? "" : "s") },
-	{ group: "Ground Split", key: "baseColumnMinHeight", label: "Column height", min: 0.4, max: 5, step: 0.05, format: v => `${v.toFixed(2)}u` },
-	{ group: "Cull Intensity", key: "preCullIntensity", label: "Pre-segmentation", min: 0, max: 2, step: 0.05, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Cull Intensity", key: "postCullIntensity", label: "Post-segmentation", min: 0, max: 2, step: 0.05, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Wisp Culling", key: "wispAggression", label: "Object/floor wisps", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Wisp Culling", key: "detachedCullPct", label: "Detached specks", min: 0, max: 0.12, step: 0.0025, format: v => `${(v * 100).toFixed(2)}%` },
-	{ group: "Scar Patching", key: "backfillDensity", label: "Backfill density", min: 0, max: 20, step: 1, format: v => `${Math.round(v)} pts` },
-	{ group: "Scar Patching", key: "scarFill", label: "Fill strength", min: 0, max: 1, step: 0.01, format: v => `${Math.round(v * 100)}%` },
-	{ group: "Scar Patching", key: "scarDilation", label: "Patch cells", min: 1, max: 6, step: 1, format: v => `${Math.round(v)}×${Math.round(v)}` },
-	{ group: "Scar Patching", key: "scarBaseHeight", label: "Base height", min: 0.1, max: 3.0, step: 0.05, format: v => `${v.toFixed(2)}u` },
-	{ group: "Scar Patching", key: "scarBaseSurface", label: "Base surface", min: 0.1, max: 3.0, step: 0.05, format: v => `${v.toFixed(2)}u` },
-	{ group: "Scar Patching", key: "scarRaisedCull", label: "Raised cull", min: 0.02, max: 0.8, step: 0.01, format: v => `${v.toFixed(2)}u` },
+	{
+		id: "small-objects", group: "Find objects", label: "Keep small objects", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Higher values keep smaller rocks, bushes, and props.", low: "Fewer", high: "More",
+		read: () => 1 - clamp01((segmentationTuning.minBlob - 40) / 960),
+		write: value => { segmentationTuning.minBlob = Math.round(lerp(1000, 40, value) / 20) * 20 },
+	},
+	{
+		id: "touching-objects", group: "Find objects", key: "bridgeCut", label: "Separate touching objects", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Higher values break thin joins between nearby objects.", low: "Keep together", high: "Split apart",
+	},
+	{
+		id: "ground-color", group: "Find objects", key: "colorSplit", label: "Use color at the ground", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Uses a color change at the base to separate an object from the ground.", low: "Ignore color", high: "Rely on color",
+	},
+	{
+		id: "low-ground", group: "Find objects", key: "terrainBias", label: "Leave low shapes on the ground", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Higher values keep mound-like shapes as part of the ground.", low: "Favor objects", high: "Favor ground",
+	},
+	{
+		id: "clean-bases", group: "Clean object edges", key: "baseDetachStrength", label: "Clean around object bases", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Removes nearby ground that has become stuck to a tall object.", low: "Keep nearby ground", high: "Cleaner bases",
+	},
+	{
+		id: "short-objects", group: "Clean object edges", label: "Protect short objects", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Higher values are less likely to trim low rocks, bushes, and crates.", low: "Less protection", high: "More protection",
+		read: () => clamp01(segmentationTuning.skirtGuardMinRise / 8),
+		write: value => { segmentationTuning.skirtGuardMinRise = value * 8 },
+	},
+	{
+		id: "stray-pieces", group: "Clean object edges", label: "Remove stray pieces", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Removes small, disconnected dots and floating fragments.", low: "Keep fine detail", high: "Remove more",
+		read: () => {
+			const detached = Math.pow(clamp01(segmentationTuning.detachedCullPct / 0.12), 1 / 4.8)
+			return clamp01((segmentationTuning.wispAggression + detached) / 2)
+		},
+		write: value => {
+			segmentationTuning.wispAggression = value
+			segmentationTuning.detachedCullPct = 0.12 * Math.pow(value, 4.8)
+		},
+	},
+	{
+		id: "cleanup-amount", group: "Overall cleanup", key: "cullAmount", label: "Cleanup amount", min: 0, max: 100, step: 1, format: value => `${Math.round(value)}%`,
+		description: "Controls how much unwanted material is removed.", low: "Keep everything", high: "Remove all found",
+	},
+	{
+		id: "cleanup-reach", group: "Overall cleanup", key: "cleanupReach", label: "Cleanup height", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Measures from each object's own bottom to its top.", low: "Object base", high: "Object top",
+	},
+	{
+		id: "ground-smooth", group: "Repair the ground", key: "groundSmooth", label: "Smooth ground left behind by objects", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Removes raised object remnants before the ground is filled.", low: "Keep existing shape", high: "Flatten to ground",
+	},
+	{
+		id: "ground-repair", group: "Repair the ground", key: "groundFill", label: "Fill holes left by objects", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Adds matching material directly on the local ground surface.", low: "Off", high: "Stronger fill",
+	},
+	{
+		id: "ground-fill-height", group: "Repair the ground", key: "groundFillMaxHeight", label: "Highest height to fill", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Measured from the bottom to the top of each original object.", low: "Object base", high: "Object top",
+	},
 ]
+
+const readSegmentationControl = control => control.read ? control.read() : segmentationTuning[control.key]
+const writeSegmentationControl = (control, value) => {
+	if (control.write) control.write(value)
+	else segmentationTuning[control.key] = value
+}
 
 function saveSegmentationTuning() {
 	try { localStorage.setItem("worldsketch.segmentationTuning", JSON.stringify(segmentationTuning)) } catch {}
+}
+
+function segmentationConfigText() {
+	const sliderValues = segmentationTuneControls.map(control => {
+		const value = readSegmentationControl(control)
+		return `- ${control.label}: ${control.format(value)}`
+	})
+	const exactValues = Object.fromEntries(
+		[...adjustableSegmentationKeys].map(key => [key, segmentationTuning[key]]),
+	)
+	return [
+		"WorldSketch object separation config",
+		...sliderValues,
+		"",
+		"Exact values for defaults:",
+		JSON.stringify(exactValues, null, 2),
+	].join("\n")
+}
+
+async function copyTextToClipboard(text) {
+	try {
+		if (!navigator.clipboard?.writeText) throw new Error("Clipboard API unavailable")
+		await navigator.clipboard.writeText(text)
+		return
+	} catch {
+		const textarea = document.createElement("textarea")
+		textarea.value = text
+		textarea.setAttribute("readonly", "")
+		textarea.style.position = "fixed"
+		textarea.style.opacity = "0"
+		document.body.appendChild(textarea)
+		textarea.select()
+		const copied = document.execCommand("copy")
+		textarea.remove()
+		if (!copied) throw new Error("Could not copy config")
+	}
+}
+
+function buildGeometryJsonText() {
+	return JSON.stringify({ version: 3, primitives: serializePrimitiveList() }, null, 2)
+}
+
+function setBuildGeometryJsonStatus(message, state = "") {
+	if (!buildGeometryJsonStatus) return
+	buildGeometryJsonStatus.textContent = message
+	buildGeometryJsonStatus.dataset.state = state
+}
+
+function syncBuildGeometryJson(force = false, now = performance.now()) {
+	if (!buildGeometryJsonField || (!devControlsVisible && !force)) return
+	if (!force && now - buildGeometryJsonLastCheck < 160) return
+	buildGeometryJsonLastCheck = now
+	const current = buildGeometryJsonText()
+	const dirty = buildGeometryJsonField.value !== buildGeometryJsonLastSynced
+	if (dirty && !force) {
+		if (!buildGeometryJsonHasError) {
+			setBuildGeometryJsonStatus(
+				current === buildGeometryJsonLastSynced
+					? "Edited — apply JSON to update the build"
+					: "Build changed — apply JSON or refresh",
+				"dirty",
+			)
+		}
+		return
+	}
+	buildGeometryJsonField.value = current
+	buildGeometryJsonLastSynced = current
+	buildGeometryJsonHasError = false
+	setBuildGeometryJsonStatus(`${world.primitives.length} block${world.primitives.length === 1 ? "" : "s"} · live`, "live")
+}
+
+function validatedBuildGeometryJson(text) {
+	let parsed
+	try {
+		parsed = JSON.parse(text)
+	} catch (error) {
+		throw new Error(`Invalid JSON: ${error.message}`)
+	}
+	const primitives = Array.isArray(parsed) ? parsed : parsed?.primitives
+	if (!Array.isArray(primitives)) throw new Error('Expected a "primitives" array')
+	const finiteVector = (value, name, index, positive = false) => {
+		if (!Array.isArray(value) || value.length < 3 || value.slice(0, 3).some(number => !Number.isFinite(number))) {
+			throw new Error(`Block ${index + 1} needs a numeric ${name} array with 3 values`)
+		}
+		if (positive && value.slice(0, 3).some(number => number <= 0)) {
+			throw new Error(`Block ${index + 1} scale values must be greater than 0`)
+		}
+	}
+	for (let index = 0; index < primitives.length; index++) {
+		const primitive = primitives[index]
+		if (!primitive || primitive.type !== "box") throw new Error(`Block ${index + 1} must have type "box"`)
+		finiteVector(primitive.position, "position", index)
+		finiteVector(primitive.rotation, "rotation", index)
+		finiteVector(primitive.scale, "scale", index, true)
+		if (primitive.color != null && !/^#[0-9a-f]{6}$/i.test(primitive.color)) {
+			throw new Error(`Block ${index + 1} color must look like #aabbcc`)
+		}
+		if (primitive.plotId != null && !Number.isInteger(primitive.plotId)) {
+			throw new Error(`Block ${index + 1} plotId must be a whole number`)
+		}
+		if (primitive.support != null && (!Number.isInteger(primitive.support) || primitive.support < 0 || primitive.support >= primitives.length)) {
+			throw new Error(`Block ${index + 1} support must be another block's array index or null`)
+		}
+		if (primitive.supportAxis != null) {
+			const { name, sign } = primitive.supportAxis
+			if (!["x", "y", "z"].includes(name) || ![-1, 1].includes(sign)) {
+				throw new Error(`Block ${index + 1} supportAxis needs x/y/z and sign -1 or 1`)
+			}
+		}
+	}
+	for (let index = 0; index < primitives.length; index++) {
+		const visited = new Set([index])
+		let support = primitives[index].support
+		while (Number.isInteger(support)) {
+			if (visited.has(support)) throw new Error(`Block ${index + 1} has a circular support link`)
+			visited.add(support)
+			support = primitives[support]?.support
+		}
+	}
+	// This editor owns geometry only. A pasted export may contain ground image data,
+	// but applying block edits must never erase or replace the painted ground.
+	return { version: 3, primitives }
+}
+
+async function applyBuildGeometryJson() {
+	if (!buildGeometryJsonField || buildGeometryJsonApplying) return
+	if (generating) {
+		buildGeometryJsonHasError = true
+		setBuildGeometryJsonStatus("Wait for generation to finish", "error")
+		return
+	}
+	let geometry
+	try {
+		geometry = validatedBuildGeometryJson(buildGeometryJsonField.value)
+	} catch (error) {
+		buildGeometryJsonHasError = true
+		setBuildGeometryJsonStatus(error.message, "error")
+		return
+	}
+	buildGeometryJsonApplying = true
+	beginBuildAction()
+	try {
+		const file = new File([JSON.stringify(geometry)], "build-geometry.json", { type: "application/json" })
+		const applied = await applyPrimitives(file)
+		if (!applied) throw new Error("Could not apply geometry")
+		setStatus(`Applied JSON geometry with ${world.primitives.length} block${world.primitives.length === 1 ? "" : "s"}`)
+		syncBuildGeometryJson(true)
+	} catch (error) {
+		const rollback = activeBuildHistory()?.undo.pop()
+		if (rollback) await applyBuildSnapshot(rollback)
+		buildGeometryJsonHasError = true
+		setBuildGeometryJsonStatus(error.message || "Could not apply geometry", "error")
+	} finally {
+		buildGeometryJsonApplying = false
+	}
 }
 
 function scheduleSegmentationRetune() {
@@ -3807,19 +3929,32 @@ function createSegmentationTunePanel() {
 	if (segmentationTunePanel) return
 	const panel = document.createElement("aside")
 	panel.className = "tuning-panel"
-	panel.setAttribute("aria-label", "Segmentation tuning")
+	panel.setAttribute("aria-label", "Developer controls")
 	panel.innerHTML = `
 		<header class="tuning-head">
 			<div>
-				<strong>Segmentation tuning</strong>
-				<span>Live values used by scene carving</span>
+				<strong>Developer controls</strong>
+				<span>Edit Build geometry and tune object separation</span>
 			</div>
-			<label class="tuning-live"><input type="checkbox" data-tune-live checked> Live</label>
+			<label class="tuning-live"><input type="checkbox" data-tune-live checked> Retune live</label>
 		</header>
 		<div class="tuning-groups"></div>
+		<section class="build-json-group">
+			<div class="build-json-head">
+				<h3>Build geometry JSON</h3>
+				<span data-build-json-status></span>
+			</div>
+			<p>Changes replace the blocks in the current Build. Painted ground stays as-is.</p>
+			<textarea data-build-json spellcheck="false" aria-label="Build geometry JSON"></textarea>
+			<div class="build-json-actions">
+				<button type="button" data-build-json-apply>Apply JSON</button>
+				<button type="button" data-build-json-refresh>Refresh from Build</button>
+			</div>
+		</section>
 		<footer class="tuning-actions">
-			<button type="button" data-tune-retune>Retune current</button>
-			<button type="button" data-tune-reset>Reset</button>
+			<button type="button" data-tune-retune>Apply to current scene</button>
+			<button type="button" data-tune-copy>Copy config</button>
+			<button type="button" data-tune-reset>Restore defaults</button>
 		</footer>
 	`
 	const groupsEl = panel.querySelector(".tuning-groups")
@@ -3837,18 +3972,21 @@ function createSegmentationTunePanel() {
 		row.className = "tuning-row"
 		row.innerHTML = `
 			<span><span>${control.label}</span><output></output></span>
-			<input type="range" min="${control.min}" max="${control.max}" step="${control.step}" data-tune-key="${control.key}">
+			<small>${control.description}</small>
+			<input type="range" min="${control.min}" max="${control.max}" step="${control.step}" data-tune-id="${control.id}">
+			<span class="tuning-range-labels"><span>${control.low}</span><span>${control.high}</span></span>
 		`
 		const input = row.querySelector("input")
 		const output = row.querySelector("output")
 		const sync = () => {
-			input.value = String(segmentationTuning[control.key])
-			output.textContent = control.format(segmentationTuning[control.key])
+			const value = readSegmentationControl(control)
+			input.value = String(value)
+			output.textContent = control.format(value)
 		}
 		input.addEventListener("input", () => {
 			const value = Number(input.value)
 			if (!Number.isFinite(value)) return
-			segmentationTuning[control.key] = value
+			writeSegmentationControl(control, value)
 			output.textContent = control.format(value)
 			saveSegmentationTuning()
 			scheduleSegmentationRetune()
@@ -3859,20 +3997,47 @@ function createSegmentationTunePanel() {
 	panel.querySelector("[data-tune-live]")?.addEventListener("change", event => {
 		segmentationTuneAutoRetune = Boolean(event.target.checked)
 	})
+	buildGeometryJsonField = panel.querySelector("[data-build-json]")
+	buildGeometryJsonStatus = panel.querySelector("[data-build-json-status]")
+	buildGeometryJsonField?.addEventListener("input", () => {
+		buildGeometryJsonHasError = false
+		buildGeometryJsonLastCheck = -Infinity
+		syncBuildGeometryJson()
+	})
+	buildGeometryJsonField?.addEventListener("keydown", event => {
+		if (event.key !== "Enter" || (!event.ctrlKey && !event.metaKey)) return
+		event.preventDefault()
+		applyBuildGeometryJson()
+	})
+	panel.querySelector("[data-build-json-apply]")?.addEventListener("click", () => applyBuildGeometryJson())
+	panel.querySelector("[data-build-json-refresh]")?.addEventListener("click", () => syncBuildGeometryJson(true))
 	panel.querySelector("[data-tune-retune]")?.addEventListener("click", () => retuneCurrentSceneSegmentation())
+	panel.querySelector("[data-tune-copy]")?.addEventListener("click", async event => {
+		const button = event.currentTarget
+		const originalLabel = button.textContent
+		try {
+			await copyTextToClipboard(segmentationConfigText())
+			button.textContent = "Copied!"
+		} catch {
+			button.textContent = "Copy failed"
+		}
+		window.setTimeout(() => { button.textContent = originalLabel }, 1600)
+	})
 	panel.querySelector("[data-tune-reset]")?.addEventListener("click", () => {
 		Object.assign(segmentationTuning, segmentationTuneDefaults)
 		saveSegmentationTuning()
-		for (const input of panel.querySelectorAll("[data-tune-key]")) {
-			const control = segmentationTuneControls.find(c => c.key === input.dataset.tuneKey)
+		for (const input of panel.querySelectorAll("[data-tune-id]")) {
+			const control = segmentationTuneControls.find(c => c.id === input.dataset.tuneId)
 			const output = input.closest(".tuning-row")?.querySelector("output")
-			input.value = String(segmentationTuning[control.key])
-			if (output) output.textContent = control.format(segmentationTuning[control.key])
+			const value = readSegmentationControl(control)
+			input.value = String(value)
+			if (output) output.textContent = control.format(value)
 		}
 		scheduleSegmentationRetune()
 	})
 	document.body.appendChild(panel)
 	segmentationTunePanel = panel
+	syncBuildGeometryJson(true)
 }
 
 createSegmentationTunePanel()
@@ -3889,18 +4054,6 @@ async function runPool(items, limit, worker) {
 	await Promise.all(runners)
 }
 
-// The unique hex colours of an object's primitives (painted blocks report their pre-paint
-// base colour). Sent with the subject so the server can lock the generated texture's hues
-// to exactly these — instant and exact, no palette-guessing from the screenshot.
-function primitiveColors(primitives) {
-	const colors = new Set()
-	for (const mesh of primitives) {
-		colors.add("#" + (mesh.userData.baseColor ?? mesh.material.color.getHexString()))
-		if (mesh.userData.paintedColors) for (const c of mesh.userData.paintedColors) colors.add(c)
-	}
-	return [...colors]
-}
-
 function fitSettingsFromConfig(cfg, kind) {
 	const scoped = cfg?.[kind] ?? {}
 	const legacy = {
@@ -3908,9 +4061,6 @@ function fitSettingsFromConfig(cfg, kind) {
 		opacityFloor: cfg?.opacityFloor,
 		fitClampK: cfg?.fitClampK,
 		fitBboxPercentile: cfg?.fitBboxPercentile,
-		paletteLock: cfg?.paletteLock,
-		paletteStrength: cfg?.paletteStrength,
-		paletteLightness: cfg?.paletteLightness,
 		yaw: kind === "floor" ? cfg?.floorYaw : cfg?.objectYaw,
 	}
 	const value = (key, fallbackKey = key) => (
@@ -3925,9 +4075,6 @@ function fitSettingsFromConfig(cfg, kind) {
 		opacityFloor: number("opacityFloor"),
 		fitClampK: number("fitClampK"),
 		fitBboxPercentile: number("fitBboxPercentile"),
-		paletteLock: Boolean(value("paletteLock")),
-		paletteStrength: number("paletteStrength"),
-		paletteLightness: number("paletteLightness"),
 		yawDeg: number("yawDeg", "yaw"),
 		fillOverscale: number("fillOverscale"),
 		reliefDip: number("reliefDip"),
@@ -4088,7 +4235,7 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 	const basis = captureAngles ? captureProjectionBasis(captureAngles.theta, captureAngles.phi) : { right: ISO_PROJ_RIGHT, up: ISO_PROJ_UP, yawOffsetDeg: 0 }
 	const projRight = basis.right
 	const projUp = basis.up
-	// The drawable ground sheet's geometry is always the full 48u canvas, not the actual
+	// The drawable ground sheet's geometry is always the full workspace canvas, not the actual
 	// painted outline, so it would swamp the normalized comparison. Real blocks provide
 	// the reliable position/colour anchors for both grounded and object-only scenes.
 	meshes = meshes?.filter(mesh => !mesh.userData.isGroundSheet && mesh.geometry)
@@ -4541,6 +4688,10 @@ function segmentSceneSplat(hasGround = true) {
 	// image-box clip tightness).
 	const PRE_CULL = Math.max(0, segmentationTuning.preCullIntensity ?? 1)
 	const POST_CULL = Math.max(0, segmentationTuning.postCullIntensity ?? 1)
+	// Global cleanup controls. Amount is the deterministic fraction of detected candidates
+	// removed. Reach is a fraction of each object's own robust bottom-to-top height.
+	const CULL_AMOUNT = clamp01((segmentationTuning.cullAmount ?? 100) / 100)
+	const CULL_HEIGHT_FRACTION = clamp01(segmentationTuning.cleanupReach ?? 0.25)
 	const MIN_BLOB = Math.max(40, segmentationTuning.minBlob * PRE_CULL) // smaller blobs (grass tufts) fold back into the ground
 	const ERODE = 2 // floor-map min-filter radius in cells; raise for very wide flat-bottomed objects faking an elevated floor
 	const SKIN_FLATNESS = 0.45 // pancake test: thinnest axis under this fraction of the median axis
@@ -4549,9 +4700,12 @@ function segmentSceneSplat(hasGround = true) {
 	const BRIDGE_MIN_NEIGHBORS = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 4) // bridge cutting: higher splits more thin links
 	const BRIDGE_MIN_DENSITY = Math.round(1 + clamp01(segmentationTuning.bridgeCut) * 8) // higher peels sparse bridges more aggressively
 	const CORE_MIN_VOXELS = Math.round(30 + clamp01(segmentationTuning.bridgeCut) * 120) // a peeled component must be substantial before it can split a blob
-	const COLOR_SPLIT = clamp01(segmentationTuning.colorSplit ?? 0) // higher = sharper colour boundaries can stop voxel connectivity
-	const COLOR_SPLIT_THRESHOLD = lerp(0.72, 0.025, COLOR_SPLIT * COLOR_SPLIT) // chromaticity distance; brightness-independent; 100% is intentionally harsh
-	const COLOR_SPLIT_DARK_MEAN = lerp(26, 0, COLOR_SPLIT) // at high strength, even dark colour changes can cut components
+	const COLOR_SPLIT = clamp01(segmentationTuning.colorSplit ?? 0) // higher = stronger ground-contact colour boundaries
+	// Color is supporting evidence, not an object detector. Keep a safety floor so 100%
+	// does not treat normal shading as a new object, and never trust near-black voxels
+	// whose apparent colour is mostly shadow noise.
+	const COLOR_SPLIT_THRESHOLD = lerp(0.65, 0.10, COLOR_SPLIT) // chromaticity distance; brightness-independent
+	const COLOR_SPLIT_DARK_MEAN = lerp(30, 14, COLOR_SPLIT)
 	const COLOR_SPLIT_GROUND_PAD = 1.25 // colour cuts matter most around contact/ground-level material changes
 
 	// Pass 1: positions + XZ bounds.
@@ -4697,6 +4851,48 @@ function segmentSceneSplat(hasGround = true) {
 		}
 	}
 	floorLevel.set(erodedLevel)
+	const cullHash = (x, y, z, salt = 0) => {
+		const value = Math.sin(x * 127.1 + y * 311.7 + z * 74.7 + salt * 19.19) * 43758.5453123
+		return value - Math.floor(value)
+	}
+	let cleanupHeightRanges = new Map()
+	const refreshCleanupHeightRanges = labels => {
+		const heights = new Map()
+		for (let i = 0; i < n; i++) {
+			const label = labels[i]
+			if (label < 0) continue
+			let values = heights.get(label)
+			if (!values) heights.set(label, values = [])
+			values.push(pys[i])
+		}
+		cleanupHeightRanges = new Map()
+		for (const [label, values] of heights) {
+			values.sort((a, b) => a - b)
+			// Ignore the outer 1% so a single high/low reconstruction fleck cannot redefine
+			// where an object's bottom or top is.
+			const low = values[Math.floor((values.length - 1) * 0.01)]
+			const high = values[Math.ceil((values.length - 1) * 0.99)]
+			cleanupHeightRanges.set(label, { low, high: Math.max(low, high) })
+		}
+	}
+	const withinCullHeight = (x, y, z, label = null) => {
+		if (CULL_HEIGHT_FRACTION >= 1) return true
+		const range = cleanupHeightRanges.get(label)
+		if (range) {
+			const height = Math.max(VOX, range.high - range.low)
+			const basePad = Math.min(VOX, height * 0.03)
+			return y <= range.low + height * CULL_HEIGHT_FRACTION + basePad
+		}
+		// Ground/remainder candidates have no object label. Keep their fallback local to
+		// the terrain baseline; true object candidates use the per-piece range above.
+		if (hasGround) return y <= floorLevel[cellOfXZ(x, z)] + Math.max(VOX, spanY * CULL_HEIGHT_FRACTION)
+		return y <= minY + spanY * CULL_HEIGHT_FRACTION
+	}
+	const mayCullAt = (x, y, z, salt = 0, label = null) => {
+		if (CULL_AMOUNT <= 0 || !withinCullHeight(x, y, z, label)) return false
+		return CULL_AMOUNT >= 1 || cullHash(x, y, z, salt) < CULL_AMOUNT
+	}
+	const mayCullIndex = (i, salt = 0, label = blobOf[i]) => mayCullAt(pxs[i], pys[i], pzs[i], salt, label)
 
 	// Object groups from the block-out: the source of expected-object COUNT, rough
 	// layout, size, and palette. The splat's own content decides what actually exists
@@ -4736,9 +4932,12 @@ function segmentSceneSplat(hasGround = true) {
 			v.nearGround = v.y * inv <= surfLevel[cellOfXZ(x, z)] + FLOOR_BAND + COLOR_SPLIT_GROUND_PAD
 		}
 	}
-	const canFloodConnect = (a, b) => {
+	const canFloodConnect = (a, b, dy) => {
 		if (!COLOR_SPLIT) return true
-		if (hasGround && COLOR_SPLIT < 0.95 && !(a.nearGround || b.nearGround)) return true
+		// With ground present, color may cut only a same-height contact seam. Requiring both
+		// voxels to be near the ground and preserving every vertical link keeps a striped or
+		// shaded lighthouse together even at 100%.
+		if (hasGround && (dy !== 0 || !(a.nearGround && b.nearGround))) return true
 		if (a.chroma[3] < COLOR_SPLIT_DARK_MEAN && b.chroma[3] < COLOR_SPLIT_DARK_MEAN) return true
 		const d = Math.hypot(a.chroma[0] - b.chroma[0], a.chroma[1] - b.chroma[1], a.chroma[2] - b.chroma[2])
 		return d <= COLOR_SPLIT_THRESHOLD
@@ -4763,7 +4962,7 @@ function segmentSceneSplat(hasGround = true) {
 						const nk = ((cur.kx + dx) * 2048 + (cur.kz + dz)) * 2048 + (cur.ky + dy)
 						const nb = voxels.get(nk)
 						if (nb && nb.blob < 0) {
-							if (!canFloodConnect(cur, nb)) {
+							if (!canFloodConnect(cur, nb, dy)) {
 								colorCuts++
 								continue
 							}
@@ -4887,6 +5086,7 @@ function segmentSceneSplat(hasGround = true) {
 		bigBlobIds.push(blobs.reduce((best, blob, id) => blob.count > blobs[best].count ? id : best, 0))
 		for (const v of voxels.values()) if (v.blob === bigBlobIds[0]) for (const gi of v.idx) blobOf[gi] = bigBlobIds[0]
 	}
+	refreshCleanupHeightRanges(blobOf)
 
 	// ---- Turf trim ---------------------------------------------------------------------
 	// Lumpy terrain rises above the (eroded-floor + band) threshold, flood-fills into any
@@ -4895,7 +5095,7 @@ function segmentSceneSplat(hasGround = true) {
 	// there is a thin skin (small vertical span) hugging the RAW local floor surface.
 	// Object walls are tall columns, and overhanging canopy is thin but ELEVATED — both
 	// survive. Turf columns touching a real object column are kept as its contact ring.
-	if (hasGround && bigBlobIds.length) {
+	if (hasGround && bigBlobIds.length && CULL_AMOUNT > 0) {
 		const bigSet = new Set(bigBlobIds)
 		// Tuning history: 1.3/1.6 removes terrain slabs completely but eats squat stumps
 		// (their turf-tested columns CONNECT to the surrounding slab patch, so a patch-
@@ -4969,13 +5169,28 @@ function segmentSceneSplat(hasGround = true) {
 			}
 			for (const key of finalTrim) {
 				const c = cols.get(key)
+				let columnRemoved = 0
+				let columnRemaining = 0
 				for (const v of c.voxs) {
-					for (const gi of v.idx) { blobOf[gi] = -1; turfGaussians++ }
-					blobs[blobId].count -= v.idx.length
-					v.blob = -1
+					let voxelRemaining = 0
+					for (const gi of v.idx) {
+						if (blobOf[gi] !== blobId) continue
+						if (mayCullIndex(gi)) {
+							blobOf[gi] = -1
+							turfGaussians++
+							columnRemoved++
+						} else {
+							voxelRemaining++
+							columnRemaining++
+						}
+					}
+					if (!voxelRemaining) v.blob = -1
 				}
-				blobs[blobId].cols.delete(key)
-				cols.delete(key)
+				blobs[blobId].count -= columnRemoved
+				if (!columnRemaining) {
+					blobs[blobId].cols.delete(key)
+					cols.delete(key)
+				}
 			}
 		}
 		if (turfGaussians) console.log(`[segment] turf trim → ${turfGaussians} standing-terrain gaussian(s) returned to ground`)
@@ -4986,7 +5201,7 @@ function segmentSceneSplat(hasGround = true) {
 	// terrain. That creates a same-blob "skirt" that moves with trees/towers. Unlike
 	// colour splitting, this uses shape: tall columns prove object mass, while low
 	// neighbouring columns close to the local surface are terrain and should stay ground.
-	if (hasGround && bigBlobIds.length && segmentationTuning.baseDetachStrength > 0) {
+	if (hasGround && bigBlobIds.length && CULL_AMOUNT > 0 && segmentationTuning.baseDetachStrength > 0) {
 		const strength = clamp01(segmentationTuning.baseDetachStrength * PRE_CULL)
 		const detachHeight = segmentationTuning.baseDetachHeight
 		const detachRadius = Math.max(0, Math.round(segmentationTuning.baseDetachRadius))
@@ -5062,18 +5277,27 @@ function segmentSceneSplat(hasGround = true) {
 			}
 			for (const key of finalDetach) {
 				const c = cols.get(key)
+				let columnRemoved = 0
+				let columnRemaining = 0
 				for (const v of c.voxs) {
+					let voxelRemaining = 0
 					for (const gi of v.idx) {
 						if (blobOf[gi] === blobId) {
-							blobOf[gi] = -1
-							detachedGaussians++
+							if (mayCullIndex(gi)) {
+								blobOf[gi] = -1
+								detachedGaussians++
+								columnRemoved++
+							} else {
+								voxelRemaining++
+								columnRemaining++
+							}
 						}
 					}
-					blobs[blobId].count -= v.idx.length
-					v.blob = -1
+					if (!voxelRemaining) v.blob = -1
 				}
-				blobs[blobId].cols.delete(key)
-				detachedColumns++
+				blobs[blobId].count -= columnRemoved
+				if (columnRemoved) detachedColumns++
+				if (!columnRemaining) blobs[blobId].cols.delete(key)
 			}
 		}
 		if (detachedGaussians) console.log(`[segment] base detach → ${detachedGaussians} skirt gaussian(s) across ${detachedColumns} column(s) returned to ground`)
@@ -5502,8 +5726,12 @@ function segmentSceneSplat(hasGround = true) {
 				// ground instead of promoting it to a detached piece. (Skipped for flipped
 				// scenes: the 180° piece correction breaks the image-frame correspondence.)
 				if (imageObjectBoxes && !flipScene) {
-					const objness = imageObjectness(blobIndicesOf(id))
-					if (objness != null && objness < Math.min(0.9, 0.3 * PRE_CULL)) {
+					const blobIndices = blobIndicesOf(id)
+					const objness = imageObjectness(blobIndices)
+					const wholeBlobCullable = blobIndices.length > 0
+						&& blobIndices.every(i => withinCullHeight(pxs[i], pys[i], pzs[i], id))
+						&& mayCullIndex(blobIndices[0])
+					if (wholeBlobCullable && objness != null && objness < Math.min(0.9, 0.3 * PRE_CULL)) {
 						console.log(`[segment] image-box gate → blob ${id} (${s.n} pts, ${Math.round(objness * 100)}% in object boxes) folded into ground`)
 						terrainBlobIds.add(id)
 						return false
@@ -5686,6 +5914,9 @@ function segmentSceneSplat(hasGround = true) {
 		}
 	}
 	if (interiorClaimed) console.log(`[segment] interior orphan claim → ${interiorClaimed} gaussian(s) pulled into enclosing object(s)`)
+	// Matching, fringe recovery, and orphan claims can relabel or extend a piece. Rebuild
+	// its robust vertical range before any final cleanup uses the relative-height slider.
+	refreshCleanupHeightRanges(blobOf)
 	const supportY = hasGround ? new Map([...blobParts.keys()].map(id => [id, new Float32Array(gw * gh).fill(Infinity)])) : null
 	if (supportY) {
 		for (let i = 0; i < n; i++) {
@@ -5732,7 +5963,7 @@ function segmentSceneSplat(hasGround = true) {
 			totalOf.set(label, totalOf.get(label) + 1)
 			const rise = pys[i] - groundSurf[cellOfXZ(pxs[i], pzs[i])]
 			if (rise > riseOf.get(label)) riseOf.set(label, rise)
-			if (rise <= SURF_HUG && !supportedFromAbove(label, pxs[i], pzs[i], pys[i])) {
+			if (rise <= SURF_HUG && mayCullIndex(i) && !supportedFromAbove(label, pxs[i], pzs[i], pys[i])) {
 				cullMask[i] = 1
 				cullOf.set(label, cullOf.get(label) + 1)
 			}
@@ -5779,7 +6010,7 @@ function segmentSceneSplat(hasGround = true) {
 	// gate: plain paint-canvas alpha, deliberately independent of colour content.
 	let onInk = null
 	if (hasGround && world.groundInkBounds() && world.paint?.canvas) {
-		const INK_S = 128
+		const INK_S = 128 * WORKSPACE_SCALE // keep the off-edge mask as precise as it was on the old canvas
 		const probe = document.createElement("canvas")
 		probe.width = probe.height = INK_S
 		const pctx = probe.getContext("2d", { willReadFrequently: true })
@@ -5799,8 +6030,6 @@ function segmentSceneSplat(hasGround = true) {
 	let skinCulled = 0
 	let unsupportedCulled = 0
 	let wispCulled = 0
-	const groundCellCount = hasGround ? new Int32Array(gw * gh) : null
-	const groundCellColor = hasGround ? Array.from({ length: gw * gh }, () => [0, 0, 0]) : null
 	packed.forEachSplat((i, center, scales, quaternion, opacity, color) => {
 		let part = blobParts.get(blobOf[i]) ?? ground
 		// Surface-hugging material with no object mass overhead is grabbed terrain —
@@ -5812,14 +6041,14 @@ function segmentSceneSplat(hasGround = true) {
 		}
 		// Image-box wisp clip: this gaussian belongs to a piece whose visible extent is
 		// known from the generated image; material projecting outside it is not the object.
-		if (part !== ground && pieceImageBox.has(blobOf[i]) && !inImageBox(i, pieceImageBox.get(blobOf[i]), Math.max(5, (IMG_BOX_PAD + 20) * (2 - Math.min(2, POST_CULL))))) {
+		if (part !== ground && mayCullIndex(i) && pieceImageBox.has(blobOf[i]) && !inImageBox(i, pieceImageBox.get(blobOf[i]), Math.max(5, (IMG_BOX_PAD + 20) * (2 - Math.min(2, POST_CULL))))) {
 			part = ground
 			imageBoxClipped++
 		}
 		// Water/path features are terrain even where an object's box overlaps them (a palm
 		// leaning over its pond): NEAR-FLOOR piece material projecting inside a detected
 		// pond/path box is the feature's rim, not the object — leave it with the ground.
-		if (part !== ground && imgU && !flipScene && imageFeatureBoxes.length
+		if (part !== ground && mayCullIndex(i) && imgU && !flipScene && imageFeatureBoxes.length
 			&& hasGround && center.y <= floorLevel[cellOfXZ(center.x, center.z)] + FLOOR_BAND + 0.8
 			&& imageFeatureBoxes.some(b => inImageBox(i, b, 10))) {
 			part = ground
@@ -5830,7 +6059,7 @@ function segmentSceneSplat(hasGround = true) {
 		// (they sneak in via the fringe claim and read as floor patches when moved).
 		// Genuine object material nearby survives: rock skirts are chunky (not razor
 		// thin) and tent walls are thin but stand upright (normal not vertical).
-		if (hasGround && part !== ground && center.y <= floorLevel[cellOfXZ(center.x, center.z)] + FLOOR_BAND + SKIN_BAND_PAD) {
+		if (hasGround && part !== ground && mayCullIndex(i) && center.y <= floorLevel[cellOfXZ(center.x, center.z)] + FLOOR_BAND + SKIN_BAND_PAD) {
 			const ax = Math.abs(scales.x)
 			const ay = Math.abs(scales.y)
 			const az = Math.abs(scales.z)
@@ -5851,101 +6080,14 @@ function segmentSceneSplat(hasGround = true) {
 		// the ground layer. Outside the ink footprint there is no drawn ground at all, so
 		// dark material there is shadow/haze — drop it. Bright material (the terrain's own
 		// painted edge overhang) stays.
-		if (part === ground && onInk && color && !onInk(center.x, center.z)
+		if (part === ground && mayCullIndex(i) && onInk && color && !onInk(center.x, center.z)
 			&& (color.r + color.g + color.b) / 3 < 0.24) {
 			offEdgeShadowCulled++
 			return
 		}
 		part.packed.pushSplat(center, scales, quaternion, opacity, color)
 		part.bounds.expandByPoint(center)
-		if (hasGround && part === ground && color) {
-			const cell = cellOfXZ(center.x, center.z)
-			groundCellCount[cell]++
-			const acc = groundCellColor[cell]
-			acc[0] += color.r
-			acc[1] += color.g
-			acc[2] += color.b
-		}
 	})
-
-	let patchSplats = 0
-	const BACKFILL_TARGET = Math.round(segmentationTuning.backfillDensity ?? 10)
-	if (hasGround && groundSurf && blobParts.size && BACKFILL_TARGET > 0) {
-		// Fillers may only appear ON the drawn terrain (onInk built above): an object near
-		// the island edge has off-terrain cells inside its bounding rectangle, and filling
-		// those painted dark smears floating past the edge.
-		const patchCenter = new THREE.Vector3()
-		const patchScales = new THREE.Vector3()
-		const patchQuat = new THREE.Quaternion()
-		const patchColor = new THREE.Color()
-		const cellW = spanX / gw
-		const cellD = spanZ / gh
-		const fallbackColor = new THREE.Color(world.baseGroundColor || baseGroundColor)
-		const hash01 = (cx, cz, k, salt = 0) => {
-			const v = Math.sin((cx + 1) * 127.1 + (cz + 1) * 311.7 + (k + 1) * 74.7 + salt * 19.19) * 43758.5453
-			return v - Math.floor(v)
-		}
-		const colorForCell = (cx, cz) => {
-			for (let r = 0; r <= 5; r++) {
-				const acc = [0, 0, 0, 0]
-				for (let dz = -r; dz <= r; dz++) {
-					for (let dx = -r; dx <= r; dx++) {
-						const nx = cx + dx, nz = cz + dz
-						if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
-						const cell = nz * gw + nx
-						const count = groundCellCount[cell]
-						if (!count) continue
-						const c = groundCellColor[cell]
-						acc[0] += c[0]
-						acc[1] += c[1]
-						acc[2] += c[2]
-						acc[3] += count
-					}
-				}
-				if (acc[3]) return patchColor.setRGB(acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]).clone()
-			}
-			return fallbackColor.clone()
-		}
-		for (const part of blobParts.values()) {
-			if (!part.packed.numSplats || part.bounds.isEmpty()) continue
-			const x0 = Math.max(0, Math.floor(((part.bounds.min.x - minX) / spanX) * gw) - 2)
-			const x1 = Math.min(gw - 1, Math.floor(((part.bounds.max.x - minX) / spanX) * gw) + 2)
-			const z0 = Math.max(0, Math.floor(((part.bounds.min.z - minZ) / spanZ) * gh) - 2)
-			const z1 = Math.min(gh - 1, Math.floor(((part.bounds.max.z - minZ) / spanZ) * gh) + 2)
-			for (let cz = z0; cz <= z1; cz++) {
-				for (let cx = x0; cx <= x1; cx++) {
-					const cell = cz * gw + cx
-					const target = BACKFILL_TARGET
-					if (groundCellCount[cell] >= target) continue
-					if (onInk && !onInk(minX + (cx + 0.5) * cellW, minZ + (cz + 0.5) * cellD)) continue
-					const color = colorForCell(cx, cz)
-					const need = Math.min(Math.max(4, target), target - groundCellCount[cell])
-					for (let k = 0; k < need; k++) {
-						const ox = 0.12 + hash01(cx, cz, k, 1) * 0.76
-						const oz = 0.12 + hash01(cx, cz, k, 2) * 0.76
-						const scale = 0.38 + hash01(cx, cz, k, 3) * 0.2
-						const shade = 0.92 + hash01(cx, cz, k, 4) * 0.16
-						patchScales.set(cellW * scale, 0.02, cellD * scale)
-						patchColor.setRGB(Math.min(1, color.r * shade), Math.min(1, color.g * shade), Math.min(1, color.b * shade))
-						patchCenter.set(
-							minX + (cx + ox) * cellW,
-							groundSurf[cell] + 0.008 + hash01(cx, cz, k, 5) * 0.012,
-							minZ + (cz + oz) * cellD,
-						)
-						ground.packed.pushSplat(patchCenter, patchScales, patchQuat, 0.96, patchColor)
-						ground.bounds.expandByPoint(patchCenter)
-						patchSplats++
-					}
-					groundCellCount[cell] += need
-					const acc = groundCellColor[cell]
-					acc[0] += color.r * need
-					acc[1] += color.g * need
-					acc[2] += color.b * need
-				}
-			}
-		}
-		if (patchSplats) console.log(`[segment] ground patch backfill → ${patchSplats} filler gaussian(s) under movable object footprint(s)`)
-	}
 
 	// Post-segmentation wisp prune: now that object pieces are already built, trim only
 	// tiny disconnected islands from each final object. This must not feed back into
@@ -5956,8 +6098,8 @@ function segmentSceneSplat(hasGround = true) {
 	const WISP_REL_POINTS = lerp(0.005, 0.065, wispDrive)
 	const WISP_MIN_VOXELS = Math.round(lerp(8, 160, wispDrive))
 	const WISP_MIN_AVG_NEIGHBORS = lerp(1.5, 4.25, wispDrive)
-	const pruneObjectPartWisps = (part, removedPart = ground, { keepOnlyMain = false } = {}) => {
-		if (part.packed.numSplats < 160) return 0
+	const pruneObjectPartWisps = (part, removedPart = ground, { keepOnlyMain = false, label = null } = {}) => {
+		if (CULL_AMOUNT <= 0 || part.packed.numSplats < 160) return 0
 		const WOFF = 4096
 		const entries = []
 		const objVoxels = new Map()
@@ -6031,8 +6173,12 @@ function segmentSceneSplat(hasGround = true) {
 			const tiny = component.points < pointLimit
 			const sparse = component.voxels < WISP_MIN_VOXELS || avgNeighbors < WISP_MIN_AVG_NEIGHBORS
 			if (!keepOnlyMain && (!tiny || !sparse)) continue
-			for (const i of component.indices) remove[i] = 1
-			removed += component.points
+			for (const i of component.indices) {
+				const center = entries[i].center
+				if (!mayCullAt(center.x, center.y, center.z, 0, label)) continue
+				remove[i] = 1
+				removed++
+			}
 		}
 		if (!removed) return 0
 		const kept = new PackedSplats()
@@ -6053,32 +6199,39 @@ function segmentSceneSplat(hasGround = true) {
 		part.bounds = nextBounds
 		return removed
 	}
-	for (const part of blobParts.values()) {
-		const removed = pruneObjectPartWisps(part)
+	for (const [label, part] of blobParts) {
+		const removed = pruneObjectPartWisps(part, ground, { label })
 		if (removed) {
 			wispCulled += removed
 			console.log(`[segment] wisp prune ${part.name} → ${removed} disconnected gaussian(s) returned to ground after segmentation`)
 		}
 	}
-	const movePartToGround = part => {
+	const moveCullablePartToGround = (label, part) => {
 		let moved = 0
+		const kept = new PackedSplats()
+		const keptBounds = new THREE.Box3()
 		part.packed.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
-			ground.packed.pushSplat(center, scales, quaternion, opacity, color)
-			ground.bounds.expandByPoint(center)
-			moved++
+			if (mayCullAt(center.x, center.y, center.z, 0, label)) {
+				ground.packed.pushSplat(center, scales, quaternion, opacity, color)
+				ground.bounds.expandByPoint(center)
+				moved++
+			} else {
+				kept.pushSplat(center, scales, quaternion, opacity, color)
+				keptBounds.expandByPoint(center)
+			}
 		})
-		part.packed = new PackedSplats()
-		part.bounds = new THREE.Box3()
+		part.packed = kept
+		part.bounds = keptBounds
 		return moved
 	}
 	const largestNamedObject = Math.max(1, ...[...blobParts.values()]
 		.filter(part => !part.name.startsWith("obj-detached-"))
 		.map(part => part.packed.numSplats))
 	const detachedCullLimit = Math.max(120, largestNamedObject * segmentationTuning.detachedCullPct * POST_CULL)
-	for (const part of blobParts.values()) {
+	for (const [label, part] of blobParts) {
 		if (!part.name.startsWith("obj-detached-")) continue
 		if (part.packed.numSplats > detachedCullLimit) continue
-		const moved = movePartToGround(part)
+		const moved = moveCullablePartToGround(label, part)
 		if (moved) {
 			wispCulled += moved
 			console.log(`[segment] detached wisp prune ${part.name} → ${moved} gaussian(s) returned to ground`)
@@ -6090,62 +6243,107 @@ function segmentSceneSplat(hasGround = true) {
 		const SCAR_DILATE_CELLS = segmentationTuning.scarDilation // square width: 1 = 1×1, 2 = 2×2, 3 = 3×3 scar cells
 		const SCAR_BASE_HEIGHT_BAND = segmentationTuning.scarBaseHeight // only splats this far above an object's lowest point can create scar cells
 		const SCAR_BASE_SURFACE_BAND = segmentationTuning.scarBaseSurface // and only if they are still near the terrain surface
-		const SCAR_RAISED_CULL = segmentationTuning.scarRaisedCull // lower = remove more raised object-color remnants from ground
+		const GROUND_SMOOTH = clamp01(segmentationTuning.groundSmooth ?? 0.8)
+		const GROUND_FILL = clamp01(segmentationTuning.groundFill ?? 0.5)
+		const GROUND_FILL_MAX_HEIGHT = clamp01(segmentationTuning.groundFillMaxHeight ?? 0.25)
+		const SCAR_RAISED_CULL = lerp(0.55, 0.015, GROUND_SMOOTH) // stronger smoothing removes material closer to the repaired floor
 		const SCAR_NEARBY_COLOR_RADIUS = 8 // larger = sample terrain colour farther away from the scar
-		const SCAR_TARGET_SPLATS = Math.round(lerp(0, 36, segmentationTuning.scarFill)) // higher = denser/more opaque-looking fill
-		const SCAR_MIN_SPLATS = Math.round(lerp(0, 12, segmentationTuning.scarFill)) // minimum overpaint per scar cell, even when ground remains
+		const SCAR_TARGET_SPLATS = Math.round(lerp(0, 36, GROUND_FILL)) // higher = denser/more opaque-looking fill
 		const SCAR_MAX_SPLATS = 32 // cap to avoid runaway fill cost
-		const SCAR_SCALE_MIN = lerp(0.22, 0.72, segmentationTuning.scarFill) // larger = each filler splat covers more cell area
-		const SCAR_SCALE_JITTER = lerp(0.08, 0.38, segmentationTuning.scarFill)
-		const SCAR_HEIGHT = 0.025 // raise if filler z-fights or hides under surrounding ground
-		const SCAR_HEIGHT_JITTER = 0.012
+		const SCAR_SCALE_MIN = lerp(0.22, 0.72, GROUND_FILL) // larger = each filler splat covers more cell area
+		const SCAR_SCALE_JITTER = lerp(0.08, 0.38, GROUND_FILL)
+		const SCAR_HEIGHT = 0.006 // tiny z-fighting offset; repair height itself is the measured local floor
 		const SCAR_THICKNESS = 0.018
-		const SCAR_OPACITY = lerp(0.55, 0.98, segmentationTuning.scarFill)
+		const SCAR_OPACITY = lerp(0.55, 0.98, GROUND_FILL)
 		const SCAR_SHADE_MIN = 0.95
 		const SCAR_SHADE_JITTER = 0.1
 		const SCAR_CELL_MARGIN = 0.05 // keeps random filler centers inside each terrain cell
-		const scarDilateSize = Math.max(1, Math.floor(SCAR_DILATE_CELLS))
-		const scarDilateBefore = Math.floor((scarDilateSize - 1) / 2)
-		const scarDilateAfter = scarDilateSize - 1 - scarDilateBefore
+		const smoothFootprintDrive = GROUND_SMOOTH * GROUND_SMOOTH
+		const scarDilateRadius = Math.max(0, Math.floor(SCAR_DILATE_CELLS / 2)) + Math.round(3 * smoothFootprintDrive)
 		const scarCells = new Uint8Array(gw * gh)
-		const footprintCells = new Set()
-		for (const part of blobParts.values()) {
+		const repairFillCeiling = new Float32Array(gw * gh).fill(Infinity)
+		const footprintCells = new Map()
+		for (const [label, part] of blobParts) {
 			if (!part.packed.numSplats || part.bounds.isEmpty()) continue
-			const baseTop = part.bounds.min.y + SCAR_BASE_HEIGHT_BAND
+			const partHeight = Math.max(VOX, part.bounds.max.y - part.bounds.min.y)
+			const originalRange = cleanupHeightRanges.get(label)
+			const originalBottom = originalRange?.low ?? part.bounds.min.y
+			const originalHeight = Math.max(VOX, (originalRange?.high ?? part.bounds.max.y) - originalBottom)
+			// Keep the tiny allowance needed by the anti-z-fighting offset when the
+			// slider is at 0%, while still treating that setting as the object's base.
+			const fillCeiling = originalBottom
+				+ originalHeight * GROUND_FILL_MAX_HEIGHT
+				+ Math.min(VOX * 0.5, originalHeight * 0.03)
+			// Low smoothing follows only the contact patch. At 100%, every occupied XZ
+			// column of the object contributes, catching wider upper shell sections too.
+			const footprintTop = part.bounds.min.y + lerp(Math.min(partHeight, SCAR_BASE_HEIGHT_BAND), partHeight, smoothFootprintDrive)
+			const surfaceReach = lerp(SCAR_BASE_SURFACE_BAND, partHeight + VOX, smoothFootprintDrive)
 			part.packed.forEachSplat((_i, center) => {
 				const cell = cellOfXZ(center.x, center.z)
-				if (center.y > baseTop) return
-				if (center.y > groundSurf[cell] + SCAR_BASE_SURFACE_BAND) return
-				footprintCells.add(cell)
+				if (center.y > footprintTop) return
+				if (GROUND_SMOOTH < 0.999 && center.y > groundSurf[cell] + surfaceReach) return
+				const currentCeiling = footprintCells.get(cell)
+				footprintCells.set(cell, currentCeiling == null ? fillCeiling : Math.min(currentCeiling, fillCeiling))
 			})
 		}
-		for (const cell of footprintCells) {
+		for (const [cell, fillCeiling] of footprintCells) {
 			const cx = cell % gw
 			const cz = Math.floor(cell / gw)
-			for (let dz = -scarDilateBefore; dz <= scarDilateAfter; dz++) {
-				for (let dx = -scarDilateBefore; dx <= scarDilateAfter; dx++) {
+			for (let dz = -scarDilateRadius; dz <= scarDilateRadius; dz++) {
+				for (let dx = -scarDilateRadius; dx <= scarDilateRadius; dx++) {
 					const nx = cx + dx, nz = cz + dz
 					if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
-					scarCells[nz * gw + nx] = 1
+					const targetCell = nz * gw + nx
+					scarCells[targetCell] = 1
+					repairFillCeiling[targetCell] = Math.min(repairFillCeiling[targetCell], fillCeiling)
 				}
 			}
 		}
 		if (scarCells.some(Boolean)) {
+			// Infer the floor beneath each object from nearby cells outside its footprint.
+			// Object remnants cannot lift this target because scar cells never vote for it.
+			const repairFloorHeight = Float32Array.from(groundSurf)
+			for (let cz = 0; cz < gh; cz++) {
+				for (let cx = 0; cx < gw; cx++) {
+					const targetCell = cz * gw + cx
+					if (!scarCells[targetCell]) continue
+					let samples = []
+					for (let r = 1; r <= SCAR_NEARBY_COLOR_RADIUS && !samples.length; r++) {
+						for (let dz = -r; dz <= r; dz++) {
+							for (let dx = -r; dx <= r; dx++) {
+								const nx = cx + dx, nz = cz + dz
+								if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+								const cell = nz * gw + nx
+								if (scarCells[cell]) continue
+								const wx = minX + (nx + 0.5) * (spanX / gw)
+								const wz = minZ + (nz + 0.5) * (spanZ / gh)
+								if (onInk && !onInk(wx, wz)) continue
+								samples.push(groundSurf[cell])
+							}
+						}
+					}
+					samples.sort((a, b) => a - b)
+					repairFloorHeight[targetCell] = samples.length
+						? samples[Math.floor(samples.length / 2)]
+						: floorLevel[targetCell]
+				}
+			}
 			const rebuiltGround = new PackedSplats()
 			const rebuiltBounds = new THREE.Box3()
 			const scarCellCount = new Int32Array(gw * gh)
-			const scarCellHeight = new Float32Array(gw * gh)
 			const scarCellColor = Array.from({ length: gw * gh }, () => [0, 0, 0])
+			const smoothingEnabled = GROUND_SMOOTH > 0
+			const smoothCullAmount = Math.max(GROUND_SMOOTH, CULL_AMOUNT)
 			ground.packed.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
 				const cell = cellOfXZ(center.x, center.z)
-				if (scarCells[cell] && center.y > groundSurf[cell] + SCAR_RAISED_CULL) {
+				const amountAllowsCull = smoothCullAmount >= 1 || cullHash(center.x, center.y, center.z, 83) < smoothCullAmount
+				if (smoothingEnabled && scarCells[cell] && center.y > repairFloorHeight[cell] + SCAR_RAISED_CULL && amountAllowsCull) {
 					scarRemnantsCulled++
 					return
 				}
 				rebuiltGround.pushSplat(center, scales, quaternion, opacity, color)
 				rebuiltBounds.expandByPoint(center)
 				scarCellCount[cell]++
-				scarCellHeight[cell] += center.y
 				if (color) {
 					const acc = scarCellColor[cell]
 					acc[0] += color.r
@@ -6168,7 +6366,7 @@ function segmentSceneSplat(hasGround = true) {
 			}
 			const terrainSampleForCell = (cx, cz) => {
 				for (let r = 1; r <= SCAR_NEARBY_COLOR_RADIUS; r++) {
-					const acc = [0, 0, 0, 0, 0]
+					const acc = [0, 0, 0, 0]
 					for (let dz = -r; dz <= r; dz++) {
 						for (let dx = -r; dx <= r; dx++) {
 							const nx = cx + dx, nz = cz + dz
@@ -6181,18 +6379,18 @@ function segmentSceneSplat(hasGround = true) {
 							acc[0] += c[0]
 							acc[1] += c[1]
 							acc[2] += c[2]
-							acc[3] += scarCellHeight[cell]
-							acc[4] += count
+							acc[3] += count
 						}
 					}
-					if (acc[4]) return {
-						color: patchColor.setRGB(acc[0] / acc[4], acc[1] / acc[4], acc[2] / acc[4]).clone(),
-						height: acc[3] / acc[4],
+					if (acc[3]) return {
+						color: patchColor.setRGB(acc[0] / acc[3], acc[1] / acc[3], acc[2] / acc[3]).clone(),
+						height: repairFloorHeight[cz * gw + cx],
 					}
 				}
 				return null
 			}
 			let scarSkippedSkyCells = 0
+			let scarSkippedHighCells = 0
 			for (let cz = 0; cz < gh; cz++) {
 				for (let cx = 0; cx < gw; cx++) {
 					const cell = cz * gw + cx
@@ -6202,8 +6400,15 @@ function segmentSceneSplat(hasGround = true) {
 						scarSkippedSkyCells++
 						continue
 					}
+					const patchHeight = sample.height + SCAR_HEIGHT
+					if (patchHeight > repairFillCeiling[cell]) {
+						scarSkippedHighCells++
+						continue
+					}
 					const color = sample.color || fallbackColor
-					const need = Math.min(SCAR_MAX_SPLATS, Math.max(SCAR_MIN_SPLATS, SCAR_TARGET_SPLATS - scarCellCount[cell]))
+					// Fill actual missing density only. Expanded smoothing cells that already have
+					// enough floor material are left untouched rather than overpainted.
+					const need = Math.min(SCAR_MAX_SPLATS, Math.max(0, SCAR_TARGET_SPLATS - scarCellCount[cell]))
 					for (let k = 0; k < need; k++) {
 						const ox = SCAR_CELL_MARGIN + hash01(cx, cz, k, 1) * (1 - SCAR_CELL_MARGIN * 2)
 						const oz = SCAR_CELL_MARGIN + hash01(cx, cz, k, 2) * (1 - SCAR_CELL_MARGIN * 2)
@@ -6214,7 +6419,7 @@ function segmentSceneSplat(hasGround = true) {
 						patchColor.setRGB(Math.min(1, color.r * shade), Math.min(1, color.g * shade), Math.min(1, color.b * shade))
 						patchCenter.set(
 							minX + (cx + ox) * cellW,
-							sample.height + SCAR_HEIGHT + hash01(cx, cz, k, 6) * SCAR_HEIGHT_JITTER,
+							patchHeight,
 							minZ + (cz + oz) * cellD,
 						)
 						ground.packed.pushSplat(patchCenter, patchScales, patchQuat, SCAR_OPACITY, patchColor)
@@ -6224,6 +6429,7 @@ function segmentSceneSplat(hasGround = true) {
 				}
 			}
 			if (scarSkippedSkyCells) console.log(`[segment] ground scar flatten skipped ${scarSkippedSkyCells} sky/unanchored scar cell(s)`)
+			if (scarSkippedHighCells) console.log(`[segment] ground scar flatten skipped ${scarSkippedHighCells} cell(s) above the object-relative fill ceiling`)
 		}
 		if (scarPatchSplats || scarRemnantsCulled) console.log(`[segment] ground scar flatten → ${scarPatchSplats} filler + ${scarRemnantsCulled} raised remnant gaussian(s) under object footprint(s)`)
 	}
@@ -6331,7 +6537,6 @@ async function generateWorld(prompt) {
 			name: "scene",
 			hasGround,
 			objectCount,
-			colors: primitiveColors(subjectMeshes),
 			image: capture.guide,
 			materialImage: sceneSemanticImage ? capture.semanticMap : null,
 		})
@@ -6352,7 +6557,6 @@ async function generateWorld(prompt) {
 			mirrorZ: sceneMirrorZ,
 			yOffset: sceneFit.yOffset,
 			fillXZ: false,
-			colors: primitiveColors(subjectMeshes),
 		})
 		splatStore.set("scene", bytes)
 		sessionSubjects = [{ name: "scene", kind: "scene", plotId: null, yawTurns: OBJECT_YAW_TURNS, fitHeight: false, hasGround, yawDeg: sceneYawDeg, mirrorZ: sceneMirrorZ, captureTheta: capture.theta, capturePhi: capture.phi }]
@@ -6412,7 +6616,7 @@ async function retuneCurrentSceneSegmentation() {
 	segmentationTuneQueued = false
 	try {
 		deselectSplat()
-		setStatus("Retuning segmentation…")
+		setStatus("Updating object separation…")
 		sceneImageBoxes = subject.imageBoxes ?? sceneImageBoxes
 		const hasGround = subject.hasGround !== false
 		world.resetGenerated()
@@ -6426,7 +6630,6 @@ async function retuneCurrentSceneSegmentation() {
 			mirrorZ: Boolean(subject.mirrorZ),
 			yOffset: sceneFit.yOffset,
 			fillXZ: false,
-			colors: primitiveColors(sourceMeshes),
 		})
 		try { segmentSceneSplat(hasGround) }
 		catch (error) { console.warn("retune segment:", error) }
@@ -6448,8 +6651,7 @@ async function retuneCurrentSceneSegmentation() {
 	}
 }
 
-// Reconstruct + seat one subject's splat into its target box. `colors` (hex palette) drives
-// the optional splat-side palette lock when it's enabled in config.
+// Reconstruct + seat one subject's splat into its target box.
 function floorSeamBox(box) {
 	const out = box.clone()
 	out.min.x -= floorSeamOverlap
@@ -6463,7 +6665,7 @@ function floorSeamClipBoxes(boxes) {
 	return boxes?.map(floorSeamBox) ?? null
 }
 
-async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, colors = null, plotId = null, clipBoxes = null, paletteStrength = null, paletteLightness = null, mirrorZ = false, fileName = `${name}.splat` } = {}) {
+async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object", yawTurns = 0, yawDeg = 0, yOffset = 0, fitHeight = false, fillXZ = false, plotId = null, clipBoxes = null, mirrorZ = false, fileName = `${name}.splat` } = {}) {
 	const raw = new SplatMesh({ fileBytes: bytes, fileName })
 	await raw.initialized
 	const fit = fitSettingsFor(kind)
@@ -6496,9 +6698,9 @@ async function seatSubject(bytes, box, name, sourcePrimitives, { kind = "object"
 		clampK: fit.fitClampK,
 		spanLo: fit.fitBboxPercentile,
 		spanHi: 1 - fit.fitBboxPercentile,
-		palette: fit.paletteLock && colors?.length ? colors : null,
-		paletteStrength: paletteStrength ?? fit.paletteStrength,
-		paletteLightness: paletteLightness ?? fit.paletteLightness,
+		cullAmount: clamp01((segmentationTuning.cullAmount ?? 100) / 100),
+		cullHeightFraction: clamp01(segmentationTuning.cleanupReach ?? 0.25),
+		localCleanupHeight: kind === "scene",
 	})
 	if (!fitted) {
 		disposeObject(raw)
@@ -6974,17 +7176,15 @@ async function generateSlicedGround(groundPromptText, output, newTiles = null) {
 	const size = groundImageSize(fp.cols, fp.rows)
 	const { canvas, mask } = buildGroundComposite(fp, size) // mask (if any) preserves kept terrain, outpaints the rest
 	let groundColorHex = world.baseGroundColor
-	let groundColors = primitiveColors(world.groundTiles)
 	if (groundMaster?.imageEl) {
 		const existing = sampleImageColor(groundMaster.imageEl)
 		if (existing) {
 			groundColorHex = existing
-			groundColors = [existing, ...groundColors] // keep both hues in the palette so the seam can transition
 		}
 	}
 	const res = await generateGroundTexture({
 		prompt: groundPromptText, image: await canvasToBlob(canvas), mask: mask ? await canvasToBlob(mask) : null,
-		groundColor: groundColorHex, colors: groundColors, cols: fp.cols, rows: fp.rows,
+		groundColor: groundColorHex, cols: fp.cols, rows: fp.rows,
 		imageSize: size.label, output, name: "floor",
 	})
 	const texture = await blobToImage(res.imageBlob)
@@ -7014,13 +7214,13 @@ async function generateSlicedGround(groundPromptText, output, newTiles = null) {
 			const name = `floor-p${pid}`
 			const bytes = await generateSubject({
 				prompt: groundPromptText, kind: "floor", output, name,
-				colors: primitiveColors([tile]), image: await canvasToBlob(iso), skipImageEdit: true,
+				image: await canvasToBlob(iso), skipImageEdit: true,
 			})
 			const box = world.floorBoxForTile(tile)
 			// bytes.slice(): the SplatMesh gets its own buffer in case the parser transfers it
 			const mesh = await seatSubject(bytes.slice(), box, name, null, {
 				kind: "floor", yawTurns: FLOOR_YAW_TURNS, yawDeg: floorFit.yawDeg, yOffset: floorFit.yOffset,
-				fillXZ: true, colors: primitiveColors([tile]), plotId: pid, clipBoxes: [box],
+				fillXZ: true, plotId: pid, clipBoxes: [box],
 			})
 			mesh.userData.floorCells = new Set([`${c.ix},${c.iz}`])
 			backfillFloorHoles(mesh, crop, box)
@@ -7257,15 +7457,15 @@ async function generateExpanded(prompt) {
 				const cap = await captureObject(renderer, scene, world, entry.group)
 				subjects.push({
 					image: cap.guide, box: entry.group.box, name: `p${pid}-obj-${String(entry.index + 1).padStart(3, "0")}`,
-					label: labels[String(entry.index + 1)] || "", instances: entry.instances, colors: primitiveColors(entry.group.primitives),
+					label: labels[String(entry.index + 1)] || "", instances: entry.instances,
 				})
 			}
 			await runPool(subjects, concurrency, async s => {
 				try {
-					const bytes = await generateSubject({ prompt, kind: "object", output, name: s.name, label: s.label, colors: s.colors, image: s.image })
+					const bytes = await generateSubject({ prompt, kind: "object", output, name: s.name, label: s.label, image: s.image })
 					for (const inst of s.instances) {
 						const name = `p${pid}-obj-${String(inst.index + 1).padStart(3, "0")}`
-						await seatSubject(bytes.slice(), inst.group.box, name, inst.group.primitives, { kind: "object", yawTurns: OBJECT_YAW_TURNS, yawDeg: objectFit.yawDeg, yOffset: objectFit.yOffset, fitHeight: true, colors: s.colors })
+						await seatSubject(bytes.slice(), inst.group.box, name, inst.group.primitives, { kind: "object", yawTurns: OBJECT_YAW_TURNS, yawDeg: objectFit.yawDeg, yOffset: objectFit.yOffset, fitHeight: true })
 						splatStore.set(name, bytes)
 					}
 				} catch (error) {
@@ -7442,7 +7642,6 @@ function uploadedSubjectSlots(files) {
 		kind: "object",
 		box: group.box,
 		sourcePrimitives: group.primitives,
-		colors: primitiveColors(group.primitives),
 		yawTurns: OBJECT_YAW_TURNS,
 		fitHeight: true,
 		used: false,
@@ -7452,7 +7651,6 @@ function uploadedSubjectSlots(files) {
 		kind: "floor",
 		box: world.footprintBox(),
 		sourcePrimitives: null,
-		colors: primitiveColors(world.groundTiles),
 		yawTurns: FLOOR_YAW_TURNS,
 		fitHeight: false,
 		plotId: null,
@@ -7516,7 +7714,6 @@ async function uploadSplats(files) {
 					yawDeg: fit.yawDeg,
 					yOffset: fit.yOffset,
 					fitHeight: slot.fitHeight,
-					colors: slot.colors,
 					plotId: slot.plotId,
 					clipBoxes: slot.clipBoxes,
 					fileName: file.name,
@@ -7558,25 +7755,29 @@ async function uploadSplats(files) {
 	}
 }
 
+function serializePrimitiveList() {
+	const index = new Map(world.primitives.map((mesh, i) => [mesh, i]))
+	return world.primitives.map(mesh => ({
+		type: mesh.userData.type,
+		position: mesh.position.toArray(),
+		rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
+		scale: mesh.scale.toArray(),
+		color: `#${mesh.userData.baseColor ?? mesh.material.color.getHexString()}`,
+		locked: Boolean(mesh.userData.locked),
+		plotId: mesh.userData.plotId ?? 0,
+		support: mesh.userData.support ? index.get(mesh.userData.support) ?? null : null,
+		supportAxis: mesh.userData.supportAxis ?? { name: "y", sign: 1 },
+	}))
+}
+
 // Serialize the block-out primitives to a plain object (shared by download and ZIP export).
 function serializePrimitives() {
-	const index = new Map(world.primitives.map((mesh, i) => [mesh, i]))
 	return {
 		version: 3,
 		// The drawn ground is part of the scene: without it a restored one-shot build
 		// computes a scene box from the objects alone and mis-fits the stored splat.
 		ground: world.groundInkBounds() ? world.paint.canvas.toDataURL("image/png") : null,
-		primitives: world.primitives.map(mesh => ({
-			type: mesh.userData.type,
-			position: mesh.position.toArray(),
-			rotation: [mesh.rotation.x, mesh.rotation.y, mesh.rotation.z],
-			scale: mesh.scale.toArray(),
-			color: `#${mesh.userData.baseColor ?? mesh.material.color.getHexString()}`,
-			locked: Boolean(mesh.userData.locked),
-			plotId: mesh.userData.plotId ?? 0,
-			support: mesh.userData.support ? index.get(mesh.userData.support) ?? null : null,
-			supportAxis: mesh.userData.supportAxis ?? { name: "y", sign: 1 },
-		})),
+		primitives: serializePrimitiveList(),
 	}
 }
 
@@ -7697,11 +7898,10 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 		const splatBytes = getSplat(s.name)
 		if (!splatBytes) { console.warn(`missing splat ${s.name}`); done++; showProgress(done, total); continue }
 
-		let box, sourcePrimitives, colors, plotId = null, clipBoxes = null, floorCells = null
+		let box, sourcePrimitives, plotId = null, clipBoxes = null, floorCells = null
 		if (s.kind === "scene") {
 			box = wholeSceneBox()
 			sourcePrimitives = world.allBlockoutMeshes()
-			colors = primitiveColors(sourcePrimitives)
 		} else if (s.kind === "floor") {
 			// Three floor shapes: the unified "floor" (footprint splat sliced to all tiles), an
 			// added-plot "floor-p<ids>" with no plotId (footprint splat sliced to just those plots'
@@ -7714,19 +7914,16 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 				: []
 			if (s.plotId == null && s.name === "floor") {
 				box = world.footprintBox?.() ?? world.floorBox()
-				colors = primitiveColors(world.groundTiles)
 				clipBoxes = world.floorClipBoxes()
 				floorCells = occupiedCells()
 			} else if (addedTiles.length) {
 				box = world.footprintBox()
-				colors = primitiveColors(addedTiles)
 				clipBoxes = addedTiles.map(t => world.floorBoxForTile(t))
 				floorCells = new Set(addedTiles.map(t => { const c = cellOf(t.userData.origin); return `${c.ix},${c.iz}` }))
 			} else {
 				plotId = s.plotId ?? world.groundTiles[floorIdx]?.userData.plotId ?? 0
 				const tile = world.groundTiles.find(t => t.userData.plotId === plotId) ?? world.groundTiles[floorIdx] ?? world.ground
 				box = world.floorBoxForTile(tile)
-				colors = primitiveColors([tile])
 				clipBoxes = [box]
 				const c = cellOf(tile.userData.origin)
 				floorCells = new Set([`${c.ix},${c.iz}`])
@@ -7738,7 +7935,6 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 			if (!group) { done++; showProgress(done, total); continue }
 			box = group.box
 			sourcePrimitives = group.primitives
-			colors = primitiveColors(sourcePrimitives)
 		}
 
 		const fit = fitSettingsFor(s.kind)
@@ -7777,7 +7973,6 @@ async function applyStoredBuild({ primitives, subjects, getSplat }) {
 				fitHeight: Boolean(s.fitHeight) && s.kind !== "scene",
 				// A scene's floor and objects are one cloud; keep a uniform fit on restore too.
 				fillXZ: false,
-				colors,
 				plotId,
 				clipBoxes,
 			})
@@ -7831,12 +8026,12 @@ async function applyPrimitives(file) {
 		parsed = JSON.parse(await file.text())
 	} catch {
 		setStatus("Invalid primitives file (not JSON)")
-		return
+		return false
 	}
 	const prims = Array.isArray(parsed) ? parsed : parsed?.primitives
 	if (!Array.isArray(prims)) {
 		setStatus("No primitives found in file")
-		return
+		return false
 	}
 
 	world.resetGenerated() // back to an editable draft before swapping the block-out
@@ -7885,7 +8080,14 @@ async function applyPrimitives(file) {
 		texture.needsUpdate = true
 	}
 
+	syncWorldState()
+	updateElevationHandles()
+	updateGhostTiles()
+	applyUiTab()
+	persistFramesSoon()
+	syncBuildGeometryJson(true)
 	setStatus(`Loaded ${world.primitives.length} primitive${world.primitives.length === 1 ? "" : "s"}`)
+	return true
 }
 
 function applyOverlayVisibility() {
@@ -8176,6 +8378,12 @@ els.showBounds?.addEventListener("change", () => {
 	world.setBoundsVisible(showBounds)
 })
 
+els.showSplatFloor?.addEventListener("change", () => {
+	showSplatFloor = els.showSplatFloor.checked
+	applyUiTab()
+	world.setBoundsVisible(showBounds)
+})
+
 els.settingsBtn?.addEventListener("click", event => {
 	event.stopPropagation() // don't let the document handler immediately re-close it
 	toggleSettings()
@@ -8212,10 +8420,7 @@ document.addEventListener("keydown", event => {
 			world.resetGenerated()
 			setStatus("")
 		}
-		else if (uiTab === "view" && (selectedSplatMeshes.size || drag?.mode === "splat-lasso")) {
-			setViewLassoRectVisible(false)
-			deselectSplat()
-		}
+		else if (uiTab === "view" && selectedSplatMeshes.size) deselectSplat()
 	}
 })
 
@@ -8249,6 +8454,7 @@ let lastAnimateTime = performance.now()
 function animate(now = performance.now()) {
 	const dt = Math.min(0.05, (now - lastAnimateTime) / 1000) // clamp: a background tab must not teleport the fly camera
 	lastAnimateTime = now
+	syncBuildGeometryJson(false, now)
 	// The Draw overlay covers the 3D viewport completely — skip all GPU work there
 	// (Spark otherwise re-sorts and draws every splat each frame for nothing).
 	if (uiTab !== "draw") {

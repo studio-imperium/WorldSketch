@@ -18,7 +18,6 @@ import (
 	"worldsketch/server/internal/config"
 	"worldsketch/server/internal/httpx"
 	"worldsketch/server/internal/imagegen"
-	"worldsketch/server/internal/palette"
 	"worldsketch/server/internal/prompts"
 	"worldsketch/server/internal/storage"
 	"worldsketch/server/internal/tripo"
@@ -108,7 +107,6 @@ func Config(w http.ResponseWriter, r *http.Request) {
 }
 
 func subjectClientConfig(kind string) map[string]any {
-	palette := config.SubjectPaletteSettings(kind)
 	yOffsetLegacy := []string{}
 	if kind == "object" {
 		yOffsetLegacy = []string{"WS_CULL_Y_OFFSET"}
@@ -116,9 +114,6 @@ func subjectClientConfig(kind string) map[string]any {
 	out := map[string]any{
 		"yOffset":           config.SubjectEnvFloat(kind, "Y_OFFSET", yOffsetLegacy, 0),
 		"opacityFloor":      config.SubjectEnvFloat(kind, "OPACITY_FLOOR", []string{"WS_OPACITY_FLOOR"}, 0.03),
-		"paletteLock":       palette.Mode == "lock",
-		"paletteStrength":   palette.Strength,
-		"paletteLightness":  palette.Lightness,
 		"yaw":               config.SubjectEnvFloat(kind, "YAW", nil, 0),
 		"fitClampK":         config.SubjectEnvFloat(kind, "FIT_CLAMP_K", []string{"WS_FIT_CLAMP_K"}, 0),
 		"fitBboxPercentile": config.SubjectEnvFloat(kind, "FIT_BBOX_PERCENTILE", []string{"WS_FIT_BBOX_PERCENTILE"}, 0),
@@ -199,7 +194,6 @@ func Generate(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		edited = applyPalette(kind, image, nil, edited, r.FormValue("colors"), "palette match skipped for "+name)
 		storage.SaveGeneration(dir, name, image, materialImage, edited, prompt)
 	}
 
@@ -262,7 +256,6 @@ func FloorTexture(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		edited = applyPalette("floor", image, nil, edited, r.FormValue("colors"), "floor texture palette match skipped for "+name)
 	}
 	storage.SaveGeneration(dir, name+"-topdown", image, nil, edited, promptText)
 	log.Printf("[timing] %-8s texture=%s", name, time.Since(tImage).Round(time.Millisecond))
@@ -331,7 +324,6 @@ func Ground(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
 		}
-		edited = applyPalette("floor", image, mask, edited, r.FormValue("colors"), "ground palette match skipped")
 		storage.SaveGeneration(dir, name, image, mask, edited, promptText)
 	}
 	imageDur := time.Since(tImage)
@@ -659,26 +651,4 @@ func Plan(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(plan)
-}
-
-func applyPalette(kind string, source, mask, edited []byte, colorsCSV, logPrefix string) []byte {
-	settings := config.SubjectPaletteSettings(kind)
-	var matched []byte
-	var err error
-	switch settings.Mode {
-	case "global":
-		matched, err = palette.Match(source, edited, settings.Strength)
-	case "lock":
-		matched, err = palette.Lock(edited, mask, palette.ParseColors(colorsCSV), settings.Strength, settings.Lightness)
-	default:
-		return edited
-	}
-	if err != nil {
-		log.Printf("%s: %v", logPrefix, err)
-		return edited
-	}
-	if matched == nil {
-		return edited
-	}
-	return matched
 }
