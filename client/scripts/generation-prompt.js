@@ -1,26 +1,28 @@
 export function sceneGenerationPrompt(scene = "", { hasGeometryReference = false } = {}) {
 	const geometryReference = hasGeometryReference
-		? `Image 1 is the render to edit. Image 2 is an exactly aligned segmentation map of the same block-out. The artificial colors in Image 2 are geometry masks only: use them to lock every occupied region, object boundary, and empty region, but never copy those colors or treat Image 2 as an appearance reference.`
-		: `Image 1 is the render to edit and the authoritative geometry reference.`
-	return `Perform a constrained texture-and-surface-detail edit of Image 1. This is not permission to generate or redesign a new scene.
+		? `Image 1 is the render to transform. Image 2 is an exactly aligned structural map of the same block-out. Its artificial colors identify the original major masses and terrain region; use it to preserve their placement, relative scale, and correspondence, but never copy those colors or treat Image 2 as an appearance reference.`
+		: `Image 1 is the render to transform and the authoritative spatial reference.`
+	return `Transform the supplied player-made block-out into a richly detailed, production-quality stylized 3D game environment.
 
 ${geometryReference}
 
-GEOMETRY IS IMMUTABLE. Preserve the exact camera, orthographic projection, framing, object count, connected components, position, footprint, projected silhouette, height, width, depth, orientation, occlusion, openings, terrain boundary, and negative space of the input. Do not move, resize, rotate, mirror, crop, merge, split, complete, or reinterpret any volume.
+Creatively reinterpret every primitive as a finished object or environment feature implied by the scene description. A block is a massing proxy, not a literal cube and not merely a surface to texture. It may become convincing architecture, vegetation, terrain, machinery, furniture, a vehicle, a monument, a fantasy object, or another appropriate subject. Make the interpretation bold, coherent, recognizable, and richly authored rather than leaving primitive geometry visible.
 
-Apply new materials and fine detail only inside the pixels and silhouettes already occupied by each source shape. Treat every primitive as a strict spatial mask. Surface texture, shallow joints, seams, grain, small cracks, restrained edge wear, and material variation are allowed; new masses, extensions, overhangs, roofs, branches, props, or silhouettes are forbidden.
+SPATIAL FIDELITY IS THE CONSTRAINT. Preserve the input camera, orthographic projection, framing, overall composition, terrain location, and the layout relationships between all major subjects. Keep each interpreted subject centered on its source shape with roughly the same projected footprint and height envelope. Preserve relative scale, spacing, orientation, adjacency, and occlusion. Do not move a subject to a more convenient location, merge separate subjects, or invent additional major subjects in empty regions.
 
-Preserve the exact number and scale of objects. A single cube must remain one cube-sized object in the same position; never expand it into a house, compound building, tower complex, or collection of props. A simple source shape must not become a larger or more complex structure than its original occupied volume.
+You may add the secondary geometry needed to make each interpretation convincing—for example roof forms, eaves, windows, doors, balconies, beams, vines, branches, roots, wheels, pipes, railings, carved elements, attached props, and small surrounding accents. These details may naturally refine the silhouette, but they must remain visually attached to their source subject and must not turn one small source mass into a sprawling compound. Preserve the source mass as the clear spatial anchor.
 
-Preserve the ground exactly. Keep its arbitrary outline, size, thickness, and location pixel-for-pixel. Never regularize it into a rectangle, square, oval, raised display plinth, or new diorama base. Do not place new objects, vegetation, walls, paths, rocks, buildings, or decorations on otherwise empty ground.
+Scale is essential. Read the whole block-out as one world-sized region and use the terrain and neighboring shapes as scale references. Do not enlarge a subject to fill empty ground or dominate the frame. A small block on a large terrain area should become a detailed but still small subject on a large, mostly open terrain area. Keep deliberately empty space open; use only restrained surface variation or tiny incidental dressing there.
 
-Everything outside the existing foreground silhouettes must remain the same pure black background. Do not add sky, horizon, distant scenery, shadows in empty space, borders, text, or editor overlays.
+Preserve the terrain's existing outer boundary, overall footprint, placement, and thickness. Retexture and enrich the terrain naturally, but do not regularize an irregular boundary into a rectangle, square, oval, or generic display plinth, and do not expand it beyond the source.
 
-Within those strict geometric limits, render a crisp, richly textured stylized 3D game asset with warm natural light, clear material identity, fine world-scale texture, contact shadows, and polished production detail. The flat source colors are semantic hints rather than final materials, but they do not authorize any geometric invention.
+Render in the same appealing visual language as a premium handcrafted miniature diorama: painterly realism, crisp readable forms, warm natural lighting, soft ambient shadows, strong contact shadows, saturated natural color, fine world-scale texture, and richly authored material variation. Use subject-appropriate construction and detail—weathering, joints, seams, grain, masonry, foliage clusters, worn edges, metalwork, fabric, soil, water, or other materials as appropriate—without biasing every generation toward houses or fantasy villages.
 
-The scene description supplies material and identity guidance only. It never overrides the source geometry or permits an absent feature to be added.
+The flat block-out colors are rough semantic hints, not literal final materials. Preserve the clean isolated presentation and pure black background. Do not add sky, horizon, distant scenery, editor overlays, grid lines, borders, text, or unrelated background content.
 
-Scene description: ${String(scene || "A coherent stylized environment").trim()}
+The scene description determines what the shapes become and how the finished world feels. The block-out determines where those subjects are, how large they are, and how they relate spatially.
 
-Final check before rendering: every output silhouette and occupied region must trace back to the same region in the input images. When detail conflicts with structural preservation, preserve the structure and omit the detail.`
+Scene description: ${String(scene || "A coherent handcrafted environment").trim()}
+
+Final check before rendering: the result should be substantially more imaginative and detailed than the primitive input while remaining unmistakably the same composition at the same scale.`
 }
