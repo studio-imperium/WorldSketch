@@ -1,6 +1,6 @@
 # WorldSketch
 
-WorldSketch turns a browser-built block-out into a detailed image with the official four-step FLUX.2 Klein 4B Space, then converts that image into a Gaussian splat with TripoSplat. Both models run through public Hugging Face Spaces using the signed-in user's own GPU allowance. The WorldSketch server never receives or stores the user's Hugging Face token, source image, generated image, or splat.
+WorldSketch turns a browser-built block-out into a detailed image with FLUX.2 Klein 4B, then converts that image into a Gaussian splat with TripoSplat. The image step uses a public Hugging Face Space by default, or the user's monthly inference credits when they enable that setting. TripoSplat runs through a public Space using the user's ZeroGPU allowance. The WorldSketch server never receives or stores the user's Hugging Face token, source image, generated image, or splat.
 
 ## Run locally
 
@@ -12,7 +12,7 @@ cd server
 go run .
 ```
 
-Open `http://localhost:8067/`. The included public OAuth client is already registered for that exact local URL.
+Open `http://localhost:8067/`, sign in with Hugging Face, and the landing page will take you to the editor at `/app/`. The included public OAuth client is already registered for the local landing-page URL.
 
 ## Deploy
 
@@ -35,10 +35,12 @@ The default image Space is the official `black-forest-labs/FLUX.2-klein-4B`. Wor
 
 The checked-in defaults are an inexpensive testing preset: a 512×512 image, four image-editing steps, ten TripoSplat steps with CFG disabled, and 32,768 Gaussians. For final-quality generations, set the image to 1024×1024 and use 20 TripoSplat steps, guidance 3, and 262,144 Gaussians. ZeroGPU checks that the declared reservation fits within the remaining quota before starting, then accounts for the GPU time used.
 
+`Inference credits for FLUX` is off by default. When enabled in the editor settings, the FLUX image-detail step uses Hugging Face Inference Providers (fal) instead of ZeroGPU; a 512×512 four-step edit is typically about 1–2 cents. TripoSplat still uses ZeroGPU. WorldSketch never falls back to this paid route unless the setting is enabled.
+
 ## Security and quota behavior
 
-- Sign-in uses OAuth Authorization Code with PKCE. The access token is kept only in JavaScript memory and disappears on refresh or tab close.
-- WorldSketch asks only for `openid profile`; it has no write permission to the user's Hugging Face account.
+- Sign-in uses OAuth Authorization Code with PKCE. The access token is stored in session storage for the current tab so the landing page can open the editor; it disappears when the tab is closed or the user signs out.
+- WorldSketch asks for `openid profile inference-api`; it has no repository or account write permission. The inference permission can spend monthly inference credits only when `Use inference credits` is enabled.
 - Prompt rewriting is disabled, so the image stage stays entirely on the selected Hugging Face Space.
 - Jobs are not retried automatically because retries could consume GPU allowance twice.
 - If a daily ZeroGPU allowance is exhausted, the app shows a plain-language error and leaves the build intact.

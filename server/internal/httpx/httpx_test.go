@@ -12,6 +12,7 @@ func TestStaticHeaders(t *testing.T) {
 		path, cache string
 	}{
 		{path: "/", cache: "no-cache"},
+		{path: "/app/", cache: "no-cache"},
 		{path: "/api/config", cache: "no-cache"},
 		{path: "/scripts/renderer.js", cache: "public, max-age=3600, must-revalidate"},
 	} {

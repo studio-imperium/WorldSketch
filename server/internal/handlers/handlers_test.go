@@ -16,10 +16,12 @@ func TestConfigExposesPublicHuggingFaceSettings(t *testing.T) {
 	}
 	var body struct {
 		Generation struct {
-			Provider      string `json:"provider"`
-			OAuthClientID string `json:"oauthClientId"`
-			ImageSpace    string `json:"imageSpace"`
-			Image         struct {
+			Provider          string `json:"provider"`
+			OAuthClientID     string `json:"oauthClientId"`
+			ImageSpace        string `json:"imageSpace"`
+			InferenceProvider string `json:"inferenceProvider"`
+			InferenceModel    string `json:"inferenceModel"`
+			Image             struct {
 				Steps int `json:"steps"`
 			} `json:"image"`
 		} `json:"generation"`
@@ -32,6 +34,9 @@ func TestConfigExposesPublicHuggingFaceSettings(t *testing.T) {
 	}
 	if body.Generation.ImageSpace != "black-forest-labs/FLUX.2-klein-4B" {
 		t.Fatalf("image space = %q, want official FLUX.2 Klein Space", body.Generation.ImageSpace)
+	}
+	if body.Generation.InferenceProvider != "fal-ai" || body.Generation.InferenceModel != "black-forest-labs/FLUX.2-klein-4B" {
+		t.Fatalf("unexpected inference provider config: %+v", body.Generation)
 	}
 }
 

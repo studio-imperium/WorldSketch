@@ -15,7 +15,7 @@ func StaticHeaders(next http.Handler) http.Handler {
 		w.Header().Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
 		ext := strings.ToLower(filepath.Ext(r.URL.Path))
-		if r.URL.Path == "/" || ext == ".html" || strings.HasPrefix(r.URL.Path, "/api/") {
+		if strings.HasSuffix(r.URL.Path, "/") || ext == ".html" || strings.HasPrefix(r.URL.Path, "/api/") {
 			w.Header().Set("Cache-Control", "no-cache")
 		} else {
 			w.Header().Set("Cache-Control", "public, max-age=3600, must-revalidate")

@@ -5,13 +5,10 @@ import { getConfig } from "/scripts/api.js"
 import { captureWorld, projectCaptureBoxes, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
 import {
 	configureHuggingFace,
-	finishHuggingFaceSignIn,
 	generateSceneOnHuggingFace,
 	getHuggingFaceAuth,
-	onHuggingFaceAuthChange,
-	signInHuggingFace,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=hf-errors-2"
+} from "/scripts/huggingface.js?v=auth-landing-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
@@ -89,6 +86,8 @@ const boundsColor = accent
 let showColliders = false
 let showBounds = false
 let showSplatFloor = true
+let useInferenceCredits = false
+try { useInferenceCredits = localStorage.getItem("worldsketch.useInferenceCredits") === "true" } catch {}
 let devControlsVisible = false
 let rawSplatPreview = null
 let rawOrbitSnapshot = null
@@ -189,6 +188,7 @@ const els = {
 	showColliders: document.getElementById("show_colliders_input"),
 	showBounds: document.getElementById("show_splat_box_input"),
 	showSplatFloor: document.getElementById("show_splat_floor_input"),
+	useInferenceCredits: document.getElementById("use_inference_credits_input"),
 	settingsBtn: document.getElementById("settings_btn"),
 	settingsMenu: document.getElementById("settings_menu"),
 	settingsPopover: document.getElementById("settings_popover"),
@@ -199,12 +199,10 @@ const els = {
 	historyClear: document.getElementById("history_clear_btn"),
 	historyClose: document.getElementById("history_close_btn"),
 	historyEmpty: document.getElementById("history_empty"),
-	hfSignIn: document.getElementById("hf_sign_in_btn"),
-	hfAccount: document.getElementById("hf_account"),
-	hfAvatar: document.getElementById("hf_avatar"),
-	hfName: document.getElementById("hf_name"),
 	hfSignOut: document.getElementById("hf_sign_out_btn"),
 }
+
+if (els.useInferenceCredits) els.useInferenceCredits.checked = useInferenceCredits
 
 renderer.setSize(window.innerWidth, window.innerHeight)
 renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
@@ -5695,7 +5693,7 @@ async function generateWorld(prompt) {
 	}
 	if (!getHuggingFaceAuth().signedIn) {
 		snapshotActiveBuildFrame()
-		await signInHuggingFace(prompt)
+		location.assign("/")
 		return
 	}
 	generating = true
@@ -5741,6 +5739,7 @@ async function generateWorld(prompt) {
 		const { bytes } = await generateSceneOnHuggingFace({
 			prompt,
 			image: capture.guide,
+			useInferenceCredits,
 			signal: generationAbort.signal,
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),
 		})
@@ -6568,6 +6567,14 @@ els.showSplatFloor?.addEventListener("change", () => {
 	world.setBoundsVisible(showBounds)
 })
 
+els.useInferenceCredits?.addEventListener("change", () => {
+	useInferenceCredits = els.useInferenceCredits.checked
+	try { localStorage.setItem("worldsketch.useInferenceCredits", String(useInferenceCredits)) } catch {}
+	setStatus(useInferenceCredits
+		? "Inference credits enabled for image detail. This usually costs about 1–2¢ per generation."
+		: "Image detail will use your ZeroGPU allowance.")
+})
+
 els.settingsBtn?.addEventListener("click", event => {
 	event.stopPropagation() // don't let the document handler immediately re-close it
 	toggleSettings()
@@ -6624,13 +6631,9 @@ els.chatForm.addEventListener("submit", event => {
 	generateWorld(prompt).catch(error => setStatus(error.message || "Could not start generation"))
 })
 
-els.hfSignIn?.addEventListener("click", () => {
-	signInHuggingFace(els.chatPrompt.value.trim()).catch(error => setStatus(error.message || "Could not start sign-in"))
-})
-
 els.hfSignOut?.addEventListener("click", () => {
 	signOutHuggingFace()
-	setStatus("Signed out of Hugging Face")
+	location.assign("/")
 })
 
 window.addEventListener("resize", () => {
@@ -6658,27 +6661,6 @@ function animate(now = performance.now()) {
 const runtimeConfig = await getConfig()
 applyRuntimeConfig(runtimeConfig)
 configureHuggingFace(runtimeConfig?.generation)
-onHuggingFaceAuthChange(({ signedIn, user }) => {
-	els.hfSignIn?.classList.toggle("hidden", signedIn)
-	els.hfAccount?.classList.toggle("hidden", !signedIn)
-	if (signedIn) {
-		els.hfName.textContent = user?.fullname || user?.name || "Hugging Face connected"
-		const avatar = user?.avatarUrl || user?.avatar_url || ""
-		els.hfAvatar.classList.toggle("hidden", !avatar)
-		if (avatar) els.hfAvatar.src = avatar
-		else els.hfAvatar.removeAttribute("src")
-	}
-	syncGenerateButton()
-})
-try {
-	const callback = await finishHuggingFaceSignIn()
-	if (callback.handled) {
-		if (callback.prompt) els.chatPrompt.value = callback.prompt
-		setStatus("Hugging Face connected. Press Generate when you are ready.")
-	}
-} catch (error) {
-	setStatus(error.message || "Hugging Face sign-in failed")
-}
 
 setActiveTool("pointer")
 applyColor(activeColor)

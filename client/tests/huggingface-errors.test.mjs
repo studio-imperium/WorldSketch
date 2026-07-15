@@ -45,3 +45,20 @@ test("does not claim a generic quota error means no time remains", () => {
 	assert.doesNotMatch(result.message, /used up/i)
 	assert.match(result.message, /Hugging Face details: ZeroGPU quota exceeded/)
 })
+
+test("explains when inference credits are unavailable", () => {
+	const result = friendlyHuggingFaceError(new Error("402 Payment required: insufficient inference credits"), { useInferenceCredits: true })
+	assert.match(result.message, /inference-credit image step/)
+	assert.match(result.message, /monthly inference credit or billing settings/)
+})
+
+test("explains when the inference-api OAuth permission is missing", () => {
+	const result = friendlyHuggingFaceError(new Error("403 missing inference-api scope"), { useInferenceCredits: true })
+	assert.match(result.message, /Sign out and sign in again/)
+	assert.match(result.message, /inference-api permission/)
+})
+
+test("does not mislabel a Space permission error as inference-credit billing", () => {
+	const original = new Error("403 Space permission denied")
+	assert.equal(friendlyHuggingFaceError(original), original)
+})

@@ -28,11 +28,13 @@ func Config(w http.ResponseWriter, r *http.Request) {
 			"fitBboxPercentile": config.EnvFloat("WS_SCENE_FIT_BBOX_PERCENTILE", 0),
 		},
 		"generation": map[string]any{
-			"provider":      "huggingface",
-			"oauthClientId": config.Env("WS_HF_OAUTH_CLIENT_ID", defaultOAuthClientID),
-			"redirectUrl":   config.Env("WS_HF_REDIRECT_URL", ""),
-			"imageSpace":    config.Env("WS_HF_IMAGE_SPACE", "black-forest-labs/FLUX.2-klein-4B"),
-			"tripoSpace":    config.Env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
+			"provider":          "huggingface",
+			"oauthClientId":     config.Env("WS_HF_OAUTH_CLIENT_ID", defaultOAuthClientID),
+			"redirectUrl":       config.Env("WS_HF_REDIRECT_URL", ""),
+			"imageSpace":        config.Env("WS_HF_IMAGE_SPACE", "black-forest-labs/FLUX.2-klein-4B"),
+			"tripoSpace":        config.Env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
+			"inferenceProvider": config.Env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
+			"inferenceModel":    config.Env("WS_HF_INFERENCE_MODEL", "black-forest-labs/FLUX.2-klein-4B"),
 			"image": map[string]any{
 				"steps":    config.EnvInt("WS_HF_IMAGE_STEPS", 4, 1, 100),
 				"guidance": config.EnvFloat("WS_HF_IMAGE_GUIDANCE", 1),
