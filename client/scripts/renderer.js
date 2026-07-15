@@ -8,7 +8,7 @@ import {
 	generateSceneOnHuggingFace,
 	getHuggingFaceAuth,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=flux-preview-1"
+} from "/scripts/huggingface.js?v=realistic-style-1"
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"

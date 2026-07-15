@@ -24,13 +24,17 @@ test("balances creative reinterpretation with spatial fidelity", () => {
 		"A simple roof should stay a simple roof",
 		"Avoid smooth blank surfaces",
 		"crisp contact shadows",
-		"without biasing every result toward houses",
+		"highly detailed stylized realism at the scale of a believable full-sized place",
+		"material response realistic",
+		"Architecture must feel massive, structural, and inhabitable",
+		"crisp layered detail, natural imperfections, weathering",
+		"Never depict a miniature, tabletop diorama, toy, model kit, clay sculpture",
 		"Isolate the complete terrain chunk—not merely its main object",
 		"SCENE TO CREATE: A vine-covered village house",
 	]) assert.ok(prompt.includes(invariant), `missing balanced prompt invariant: ${invariant}`)
 	assert.ok(!prompt.includes("fine storytelling details"))
 	assert.ok(!prompt.includes("attached props and nearby dressing"))
-	assert.ok(prompt.trim().split(/\s+/).length < 400, "prompt should stay focused enough for the image editor")
+	assert.ok(prompt.trim().split(/\s+/).length < 460, "prompt should stay focused enough for the image editor")
 	assert.ok(!prompt.includes("GEOMETRY IS IMMUTABLE"))
 	assert.ok(!prompt.includes("Image 2"))
 })
@@ -39,5 +43,5 @@ test("explains the second image as a geometry mask, not an appearance reference"
 	const prompt = sceneGenerationPrompt("A stone marker", { hasGeometryReference: true })
 	assert.ok(prompt.includes("Image 2 is an exactly aligned structural map"))
 	assert.ok(prompt.includes("never copy those colors"))
-	assert.ok(prompt.trim().split(/\s+/).length < 420, "geometry-reference prompt should remain concise")
+	assert.ok(prompt.trim().split(/\s+/).length < 480, "geometry-reference prompt should remain concise")
 })
