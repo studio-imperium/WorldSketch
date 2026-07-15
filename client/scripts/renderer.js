@@ -173,7 +173,9 @@ const els = {
 	viewRotateHandle: document.getElementById("view_rotate_handle"),
 	viewMoveHandle: document.getElementById("view_move_handle"),
 	viewScaleHandles: [...document.querySelectorAll("[data-view-scale-handle]")],
+	framesPanel: document.getElementById("frames_panel"),
 	framesTitle: document.getElementById("frames_title"),
+	framesCount: document.getElementById("frames_count"),
 	framesList: document.getElementById("frames_list"),
 	frameAdd: document.getElementById("frame_add_btn"),
 	flyBtn: document.getElementById("fly_btn"),
@@ -2398,7 +2400,7 @@ const frames = { build: [], view: [] }
 const activeFrameId = { build: 0, view: 0 }
 
 function frameLabel(tab, n) {
-	return tab === "build" ? `Build ${n}` : `Splat ${n}`
+	return tab === "build" ? `Build ${n}` : `Result ${n}`
 }
 
 function syncWorldState() {
@@ -2407,27 +2409,43 @@ function syncWorldState() {
 
 function renderFramesPanel() {
 	if (!els.framesList) return
-	els.framesTitle.textContent = uiTab === "build" ? "Builds" : "Splats"
+	const building = uiTab === "build"
+	const panelTitle = building ? "Builds" : "Results"
+	const addTitle = building ? "New build" : "New result"
+	els.framesTitle.textContent = panelTitle
+	if (els.framesCount) els.framesCount.textContent = String(frames[uiTab].length)
+	if (els.framesPanel) els.framesPanel.setAttribute("aria-label", panelTitle)
+	if (els.frameAdd) {
+		els.frameAdd.title = addTitle
+		els.frameAdd.setAttribute("aria-label", addTitle)
+	}
 	els.framesList.replaceChildren()
 	for (const frame of frames[uiTab]) {
-		const row = document.createElement("div")
-		row.className = "frame-row" + (frame.id === activeFrameId[uiTab] ? " active" : "")
+		const active = frame.id === activeFrameId[uiTab]
+		const item = document.createElement("li")
+		item.className = "frame-item"
+		const row = document.createElement("button")
+		row.className = "frame-row" + (active ? " menu-active" : "")
+		row.type = "button"
+		row.setAttribute("aria-pressed", String(active))
 		const name = document.createElement("span")
 		name.className = "frame-name"
 		name.textContent = frame.name
 		name.title = frame.name
 		const del = document.createElement("button")
-		del.className = "frame-del"
+		del.className = "frame-del btn btn-ghost btn-xs btn-square"
 		del.type = "button"
-		del.textContent = "×"
-		del.title = "Delete this frame"
+		del.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 6l12 12"></path><path d="M18 6l-12 12"></path></svg>'
+		del.title = `Delete ${frame.name}`
+		del.setAttribute("aria-label", `Delete ${frame.name}`)
 		del.addEventListener("click", event => {
 			event.stopPropagation()
 			deleteFrame(uiTab, frame.id)
 		})
-		row.append(name, del)
+		row.append(name)
 		row.addEventListener("click", () => activateFrame(uiTab, frame.id))
-		els.framesList.appendChild(row)
+		item.append(row, del)
+		els.framesList.appendChild(item)
 	}
 	persistFramesSoon() // every frame add/delete/switch re-renders, so this catches them all
 }

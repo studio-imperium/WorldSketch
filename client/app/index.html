@@ -44,12 +44,20 @@
 			<button class="view-tab active" data-view-tab="build" role="tab" aria-selected="true" title="Edit the block-out (splats hidden)">Build</button>
 			<button class="view-tab" data-view-tab="view" role="tab" aria-selected="false" disabled title="See and arrange the generated world">View</button>
 		</div>
-		<aside class="frames-panel" aria-label="Frames">
-			<header class="frames-head">
-				<span id="frames_title">Frames</span>
-				<button class="frames-add" id="frame_add_btn" type="button" title="New frame">+</button>
-			</header>
-			<div class="frames-list" id="frames_list"></div>
+		<aside class="frames-panel card bg-base-100 border border-base-300 shadow-xl" id="frames_panel" aria-label="Builds">
+			<div class="card-body">
+				<header class="frames-head">
+					<div class="frames-heading">
+						<svg class="frames-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m12 3l8 4.5l-8 4.5l-8 -4.5z"></path><path d="m4 12l8 4.5l8 -4.5"></path><path d="m4 16.5l8 4.5l8 -4.5"></path></svg>
+						<h2 class="card-title" id="frames_title">Builds</h2>
+						<span class="badge badge-ghost badge-sm" id="frames_count">1</span>
+					</div>
+					<button class="frames-add btn btn-ghost btn-sm btn-square" id="frame_add_btn" type="button" aria-label="New build" title="New build">
+						<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14"></path><path d="M5 12h14"></path></svg>
+					</button>
+				</header>
+				<ul class="frames-list menu menu-sm" id="frames_list"></ul>
+			</div>
 		</aside>
 		<div class="side-rail bg-base-100 shadow-xl border border-base-300" role="toolbar" aria-label="Tools, colors and brush">
 			<nav class="rail-tools" aria-label="Primitive tools">
