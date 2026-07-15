@@ -32,10 +32,10 @@ func TestConfigExposesPublicHuggingFaceSettings(t *testing.T) {
 	if body.Generation.Provider != "huggingface" || body.Generation.OAuthClientID == "" || body.Generation.Image.Steps != 33 {
 		t.Fatalf("unexpected config: %+v", body.Generation)
 	}
-	if body.Generation.ImageSpace != "black-forest-labs/FLUX.2-klein-4B" {
-		t.Fatalf("image space = %q, want official FLUX.2 Klein Space", body.Generation.ImageSpace)
+	if body.Generation.ImageSpace != "black-forest-labs/FLUX.2-dev" {
+		t.Fatalf("image space = %q, want official FLUX.2 dev Space", body.Generation.ImageSpace)
 	}
-	if body.Generation.InferenceProvider != "fal-ai" || body.Generation.InferenceModel != "black-forest-labs/FLUX.2-klein-4B" {
+	if body.Generation.InferenceProvider != "fal-ai" || body.Generation.InferenceModel != "black-forest-labs/FLUX.2-dev" {
 		t.Fatalf("unexpected inference provider config: %+v", body.Generation)
 	}
 }

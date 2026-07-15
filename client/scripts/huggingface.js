@@ -8,18 +8,18 @@ import {
 } from "/scripts/huggingface-auth.js"
 import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=minimal-default-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
-import { fluxKleinEditPayload } from "/scripts/huggingface-image.js"
+import { fluxEditPayload } from "/scripts/huggingface-image.js?v=flux2-dev-1"
 import { inferenceCreditImageRequest } from "/scripts/huggingface-provider.js"
 import { resolveAuthenticatedSpaceFileURL } from "/scripts/huggingface-url.js"
 
 const DEFAULT_CONFIG = {
 	oauthClientId: "91581ad0-d16c-4f49-9746-cff21b50ac9e",
 	redirectUrl: "",
-	imageSpace: "black-forest-labs/FLUX.2-klein-4B",
+	imageSpace: "black-forest-labs/FLUX.2-dev",
 	tripoSpace: "VAST-AI/TripoSplat",
 	inferenceProvider: "fal-ai",
-	inferenceModel: "black-forest-labs/FLUX.2-klein-4B",
-	image: { steps: 4, guidance: 1, width: 1024, height: 1024 },
+	inferenceModel: "black-forest-labs/FLUX.2-dev",
+	image: { steps: 30, guidance: 4, width: 1024, height: 1024 },
 	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
 }
 
@@ -216,12 +216,13 @@ export async function detailImageOnHuggingFace({ prompt, image, geometryImage = 
 			return editedImage
 		}
 		onProgress?.(0, "Uploading the block-out")
-		const imageData = await runSpace(config.imageSpace, "/infer", fluxKleinEditPayload({
+		const imageData = await runSpace(config.imageSpace, "/infer", fluxEditPayload({
 			file: handle_file(image),
 			geometryFile: geometryImage ? handle_file(geometryImage) : null,
 			prompt,
 			seed,
 			settings: config.image,
+			space: config.imageSpace,
 		}), "Adding detail to the block-out", label => onProgress?.(0.5, label), signal)
 		const editedFile = fileReference(imageData?.[0] ?? imageData)
 		if (!editedFile) throw new Error("The image editor returned no image")

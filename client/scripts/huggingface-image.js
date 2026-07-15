@@ -1,10 +1,11 @@
-export function fluxKleinEditPayload({ file, geometryFile = null, prompt, seed, settings }) {
+// FLUX.2 Space image-edit request. The klein Space adds a mode_choice picker
+// (distilled vs base) that the full FLUX.2-dev Space does not have.
+export function fluxEditPayload({ file, geometryFile = null, prompt, seed, settings, space = "" }) {
 	const inputImages = [{ image: file, caption: null }]
 	if (geometryFile) inputImages.push({ image: geometryFile, caption: null })
-	return {
+	const payload = {
 		prompt,
 		input_images: inputImages,
-		mode_choice: "Distilled (4 steps)",
 		seed,
 		randomize_seed: false,
 		width: Number(settings.width),
@@ -13,4 +14,6 @@ export function fluxKleinEditPayload({ file, geometryFile = null, prompt, seed, 
 		guidance_scale: Number(settings.guidance),
 		prompt_upsampling: false,
 	}
+	if (/klein/i.test(space)) payload.mode_choice = "Distilled (4 steps)"
+	return payload
 }
