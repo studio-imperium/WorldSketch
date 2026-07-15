@@ -108,7 +108,7 @@ function isoCamera(box, angles = null) {
 
 // Project the original connected-object bounds into the exact camera frame used for
 // generation. These known bounds replace the old second AI call that tried to rediscover
-// the objects from the edited image. Qwen is instructed to preserve the composition, so
+// the objects from the edited image. The image editor is instructed to preserve the composition, so
 // source-geometry boxes are deterministic, instant, and do not consume more GPU time.
 export function projectCaptureBoxes(objectGroups, groundBox, frameBox, angles = null) {
 	const camera = isoCamera(frameBox, angles)

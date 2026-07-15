@@ -6,7 +6,8 @@ const SPACE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._-]*$/
 export function huggingFaceSpaceOrigin(space) {
 	const value = String(space ?? "").trim()
 	if (SPACE_ID.test(value)) {
-		return `https://${value.toLowerCase().replaceAll("_", "-").replaceAll("/", "-")}.hf.space`
+		const subdomain = value.toLowerCase().replaceAll("/", "-").replaceAll(/[^a-z0-9-]/g, "-")
+		return `https://${subdomain}.hf.space`
 	}
 	try {
 		const url = new URL(value)

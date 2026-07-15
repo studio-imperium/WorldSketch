@@ -18,6 +18,7 @@ func TestConfigExposesPublicHuggingFaceSettings(t *testing.T) {
 		Generation struct {
 			Provider      string `json:"provider"`
 			OAuthClientID string `json:"oauthClientId"`
+			ImageSpace    string `json:"imageSpace"`
 			Image         struct {
 				Steps int `json:"steps"`
 			} `json:"image"`
@@ -28,6 +29,9 @@ func TestConfigExposesPublicHuggingFaceSettings(t *testing.T) {
 	}
 	if body.Generation.Provider != "huggingface" || body.Generation.OAuthClientID == "" || body.Generation.Image.Steps != 33 {
 		t.Fatalf("unexpected config: %+v", body.Generation)
+	}
+	if body.Generation.ImageSpace != "black-forest-labs/FLUX.2-klein-4B" {
+		t.Fatalf("image space = %q, want official FLUX.2 Klein Space", body.Generation.ImageSpace)
 	}
 }
 

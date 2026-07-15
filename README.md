@@ -1,6 +1,6 @@
 # WorldSketch
 
-WorldSketch turns a browser-built block-out into a detailed image with Qwen Image Edit, then converts that image into a Gaussian splat with TripoSplat. Both models run through public Hugging Face Spaces using the signed-in user's own GPU allowance. The WorldSketch server never receives or stores the user's Hugging Face token, source image, generated image, or splat.
+WorldSketch turns a browser-built block-out into a detailed image with the official four-step FLUX.2 Klein 4B Space, then converts that image into a Gaussian splat with TripoSplat. Both models run through public Hugging Face Spaces using the signed-in user's own GPU allowance. The WorldSketch server never receives or stores the user's Hugging Face token, source image, generated image, or splat.
 
 ## Run locally
 
@@ -29,7 +29,11 @@ Before using a production domain:
 2. Set `WS_HF_REDIRECT_URL` to that same URL in the deployment environment.
 3. Deploy the container on any service that supplies a `PORT` environment variable. `/healthz` is the health-check endpoint.
 
-No API keys or persistent volume are required. Scaling the web service horizontally is safe because generation state and user credentials stay in the browser. Public Spaces can change or become unavailable; the Space IDs are environment settings so they can be replaced without rebuilding the app.
+No API keys or persistent volume are required. Scaling the web service horizontally is safe because generation state and user credentials stay in the browser. Public Spaces can change or become unavailable; the Space ID is an environment setting, although a replacement must expose the same Gradio input and output shape or the browser adapter must be updated with it.
+
+The default image Space is the official `black-forest-labs/FLUX.2-klein-4B`. WorldSketch uses its distilled four-step image-editing mode at 512×512 with prompt upsampling disabled. The Space allows up to 85 seconds for a job; actual quota usage depends on how long the GPU function runs.
+
+The checked-in defaults are an inexpensive testing preset: a 512×512 image, four image-editing steps, ten TripoSplat steps with CFG disabled, and 32,768 Gaussians. For final-quality generations, set the image to 1024×1024 and use 20 TripoSplat steps, guidance 3, and 262,144 Gaussians. ZeroGPU checks that the declared reservation fits within the remaining quota before starting, then accounts for the GPU time used.
 
 ## Security and quota behavior
 

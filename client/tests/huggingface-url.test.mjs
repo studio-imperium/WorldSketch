@@ -9,6 +9,10 @@ const { huggingFaceSpaceOrigin, resolveAuthenticatedSpaceFileURL } = await impor
 
 test("maps a Space ID to its exact hf.space origin", () => {
 	assert.equal(huggingFaceSpaceOrigin("Qwen/Qwen-Image_Edit"), "https://qwen-qwen-image-edit.hf.space")
+	assert.equal(
+		huggingFaceSpaceOrigin("black-forest-labs/FLUX.2-klein-4B"),
+		"https://black-forest-labs-flux-2-klein-4b.hf.space",
+	)
 })
 
 test("accepts a file from the configured Space only", () => {

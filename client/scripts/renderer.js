@@ -11,7 +11,7 @@ import {
 	onHuggingFaceAuthChange,
 	signInHuggingFace,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js"
+} from "/scripts/huggingface.js?v=hf-errors-2"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
@@ -5731,7 +5731,7 @@ async function generateWorld(prompt) {
 		}
 		const capture = await captureWorld(renderer, scene, world, box, null, viewAngles)
 		const captureMs = performance.now() - tCap
-		// Qwen is asked to preserve the camera and composition, so the original object
+		// The image editor is asked to preserve the camera and composition, so the original object
 		// bounds remain the most reliable boxes for later splat segmentation.
 		sceneImageBoxes = projectCaptureBoxes(objectGroups, world.groundInkBounds(), box, capture)
 

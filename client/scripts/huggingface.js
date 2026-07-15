@@ -1,15 +1,17 @@
 import { Client, handle_file } from "@gradio/client"
 import { sceneGenerationPrompt } from "/scripts/generation-prompt.js"
+import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-errors-2"
+import { fluxKleinEditPayload } from "/scripts/huggingface-image.js"
 import { resolveAuthenticatedSpaceFileURL } from "/scripts/huggingface-url.js"
 
 const HF_ORIGIN = "https://huggingface.co"
 const DEFAULT_CONFIG = {
 	oauthClientId: "91581ad0-d16c-4f49-9746-cff21b50ac9e",
 	redirectUrl: "",
-	imageSpace: "Qwen/Qwen-Image-Edit-2511",
+	imageSpace: "black-forest-labs/FLUX.2-klein-4B",
 	tripoSpace: "VAST-AI/TripoSplat",
-	image: { steps: 28, guidance: 4, width: 1024, height: 1024 },
-	tripo: { steps: 20, guidance: 3, gaussians: 262144, format: "splat" },
+	image: { steps: 4, guidance: 1, width: 512, height: 512 },
+	tripo: { steps: 10, guidance: 1, gaussians: 32768, format: "splat" },
 }
 
 const CALLBACK_KEYS = {
@@ -229,17 +231,6 @@ async function runSpace(space, endpoint, payload, stage, progress, signal) {
 	return data
 }
 
-function friendlyError(error) {
-	const message = String(error?.message || error || "Generation failed")
-	if (/quota|zero.?gpu|gpu.?time|exceeded.*usage|insufficient.*credit/i.test(message)) {
-		return new Error("Your Hugging Face GPU time is used up for today. Try again after it resets or use a Hugging Face plan with more compute.")
-	}
-	if (/space.*(sleep|unavailable|not found)|503|502/i.test(message)) {
-		return new Error("A required Hugging Face Space is unavailable right now. Please try again later.")
-	}
-	return error instanceof Error ? error : new Error(message)
-}
-
 function randomSeed() {
 	return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff
 }
@@ -248,19 +239,14 @@ export async function generateSceneOnHuggingFace({ prompt, image, signal, onProg
 	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
 	try {
 		onProgress?.(0.12, "Uploading the block-out")
-		const imageData = await runSpace(config.imageSpace, "/infer", {
-			images: [{ image: handle_file(image), caption: null }],
+		const imageData = await runSpace(config.imageSpace, "/infer", fluxKleinEditPayload({
+			file: handle_file(image),
 			prompt: sceneGenerationPrompt(prompt),
 			seed: randomSeed(),
-			randomize_seed: false,
-			true_guidance_scale: Number(config.image.guidance),
-			num_inference_steps: Number(config.image.steps),
-			height: Number(config.image.height),
-			width: Number(config.image.width),
-			rewrite_prompt: false,
-		}, "Qwen is adding detail", label => onProgress?.(0.35, label), signal)
+			settings: config.image,
+		}), "Adding detail to the block-out", label => onProgress?.(0.35, label), signal)
 		const editedFile = fileReference(imageData?.[0] ?? imageData)
-		if (!editedFile) throw new Error("Qwen returned no edited image")
+		if (!editedFile) throw new Error("The image editor returned no image")
 		onProgress?.(0.55, "Downloading the detailed image")
 		const editedImage = await downloadFile(editedFile, config.imageSpace, signal)
 
@@ -279,6 +265,6 @@ export async function generateSceneOnHuggingFace({ prompt, image, signal, onProg
 		const splat = await downloadFile(splatFile, config.tripoSpace, signal)
 		return { bytes: new Uint8Array(await splat.arrayBuffer()), editedImage }
 	} catch (error) {
-		throw friendlyError(error)
+		throw friendlyHuggingFaceError(error)
 	}
 }
