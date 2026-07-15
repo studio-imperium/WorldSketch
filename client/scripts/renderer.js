@@ -2192,13 +2192,17 @@ function setViewTransformCursor(mode = null) {
 // ground stretches toward it like rubber. Gaussians mid-ring get elongated
 // along the pull direction; dragging back to the start restores them exactly.
 const rubberScratch = {
-	offset: new THREE.Vector3(),
+	delta: new THREE.Matrix4(),
+	startInv: new THREE.Matrix4(),
+	basis: new THREE.Matrix4(),
+	target: new THREE.Vector3(),
 	disp: new THREE.Vector3(),
 	dir: new THREE.Vector3(),
+	side: new THREE.Vector3(),
+	up: new THREE.Vector3(),
 	center: new THREE.Vector3(),
 	scales: new THREE.Vector3(),
 	quat: new THREE.Quaternion(),
-	unitX: new THREE.Vector3(1, 0, 0),
 }
 
 function beginGroundRubber() {
@@ -2228,9 +2232,16 @@ function beginGroundRubber() {
 		const dz = Math.max(worldBox.min.z - world0.z, 0, world0.z - worldBox.max.z)
 		const dist = Math.hypot(dx, dz)
 		if (dist > reach) return
+		// Baked contact shadows are near-black; carrying and elongating them
+		// smears dark streaks across the floor. Leave them mostly anchored (a
+		// shadow shouldn't travel with the object) and never stretch them.
+		const luminance = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
+		const dark = luminance < 0.16
 		entries.push({
 			index,
-			weight: 1 - dist / reach,
+			dark,
+			weight: (1 - dist / reach) * (dark ? 0.25 : 1),
+			world: world0.clone(),
 			center: center.clone(),
 			scales: scales.clone(),
 			quaternion: quaternion.clone(),
@@ -2243,28 +2254,50 @@ function beginGroundRubber() {
 	if (!entries.length) return
 	const invQuat = new THREE.Quaternion()
 	groundMesh.getWorldQuaternion(invQuat).invert()
-	drag.rubber = { packed, member, entries, invQuat, reach }
+	drag.rubber = {
+		packed,
+		member,
+		entries,
+		invQuat,
+		reach,
+		invGroundMatrix: groundMatrix.clone().invert(),
+		startMatrix: member.mesh.matrixWorld.clone(),
+	}
 	console.log(`[rubber] holding ${entries.length} floor gaussian(s) around ${member.mesh.userData.genName}`)
 }
 
 function applyGroundRubber() {
 	const rubber = drag?.rubber
 	if (!rubber) return
-	const { offset, disp, dir, quat, unitX, scales: outScales, center: outCenter } = rubberScratch
-	offset.copy(rubber.member.mesh.position).sub(rubber.member.position)
-	offset.applyQuaternion(rubber.invQuat) // world offset → ground-local space
-	const magnitude = offset.length()
-	if (magnitude > 1e-6) dir.copy(offset).normalize()
+	const { delta, startInv, basis, target, disp, dir, side, up, quat, scales: outScales, center: outCenter } = rubberScratch
+	// Full world-space transform delta of the dragged piece since grab — one
+	// formula covers moves, lifts, rotations, and scales alike.
+	rubber.member.mesh.updateMatrixWorld(true)
+	startInv.copy(rubber.startMatrix).invert()
+	delta.multiplyMatrices(rubber.member.mesh.matrixWorld, startInv)
 	for (const entry of rubber.entries) {
-		disp.copy(offset).multiplyScalar(entry.weight)
-		outCenter.copy(entry.center).add(disp)
-		// Tension peaks mid-ring: the inner edge is carried, the outer edge is
-		// anchored, and the material in between visibly stretches.
-		const tension = magnitude * entry.weight * (1 - entry.weight)
-		if (tension > 1e-4) {
-			quat.setFromUnitVectors(unitX, dir)
-			const elongation = Math.min(6, 1 + (4 * tension) / rubber.reach)
-			outScales.set(entry.planar * elongation, entry.scales.y, entry.narrow)
+		target.copy(entry.world).applyMatrix4(delta)
+		disp.copy(target).sub(entry.world)
+		const carried = disp.multiplyScalar(entry.weight)
+		outCenter.copy(entry.world).add(carried).applyMatrix4(rubber.invGroundMatrix)
+		const tension = disp.length() / Math.max(1e-6, entry.weight) * entry.weight * (1 - entry.weight)
+		if (!entry.dark && tension > 1e-3 && carried.lengthSq() > 1e-8) {
+			// Long axis along the pull, kept flat against the ground plane so the
+			// stretched pancakes never turn edge-on into dark slivers.
+			dir.copy(carried).normalize().applyQuaternion(rubber.invQuat)
+			up.set(0, 1, 0)
+			side.crossVectors(dir, up)
+			if (side.lengthSq() < 1e-6) side.set(1, 0, 0)
+			side.normalize()
+			up.crossVectors(side, dir).normalize()
+			basis.makeBasis(dir, up, side)
+			quat.setFromRotationMatrix(basis)
+			const elongation = Math.min(3.5, 1 + (3 * tension) / rubber.reach)
+			outScales.set(
+				entry.planar * elongation,
+				entry.scales.y,
+				entry.narrow * (1 + 0.2 * (elongation - 1)),
+			)
 			rubber.packed.setSplat(entry.index, outCenter, outScales, quat, entry.opacity, entry.color)
 		} else {
 			rubber.packed.setSplat(entry.index, outCenter, entry.scales, entry.quaternion, entry.opacity, entry.color)
@@ -2300,7 +2333,7 @@ function startSplatGroupDrag(event, mode) {
 		rollCenter: objectScreenPosition(pivot),
 	}
 	drag.startAngle = pointerScreenAngle(event, drag.rollCenter)
-	if (mode === "move") beginGroundRubber()
+	beginGroundRubber()
 	renderer.domElement.setPointerCapture(event.pointerId)
 	renderer.domElement.classList.add("is-dragging")
 	return true
@@ -2442,6 +2475,7 @@ function updateSplatScale(event) {
 		member.mesh.position.copy(member.position).sub(drag.pivot).multiplyScalar(factor).add(drag.pivot)
 	}
 	if (Math.abs(factor - 1) > 0.001) drag.mutated = true
+	applyGroundRubber()
 }
 
 // Pointer angle around the selection centre rotates every member and its offset from the
@@ -2454,6 +2488,7 @@ function updateSplatRotate(event) {
 		member.mesh.position.copy(member.position).sub(drag.pivot).applyQuaternion(splatRotQuat).add(drag.pivot)
 	}
 	if (Math.abs(angle) > 0.001) drag.mutated = true
+	applyGroundRubber()
 }
 
 function setViewTool(tool) {
