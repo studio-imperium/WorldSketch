@@ -15,6 +15,7 @@ import { clearSelectionOutline, createPrimitive, createSelectionOutline, dispose
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
 import { createSky } from "/scripts/sky.js"
+import { cloneGroundStrokes, closeGroundStroke, paintGroundStroke } from "/scripts/ground-strokes.js"
 
 const root = document.getElementById("canvas")
 const scene = new THREE.Scene()
@@ -60,6 +61,11 @@ const defaultFitSettings = {
 	yawDeg: 0,
 }
 let sceneFit = { ...defaultFitSettings }
+
+// Temporary safety switch: preserve every source gaussian and skip the ground-scar
+// repair pass regardless of any saved developer-slider values. Flip this back to true
+// when culling and hole filling are ready to be re-enabled.
+const SEGMENTATION_CLEANUP_ENABLED = false
 
 // Two stages: Build the block-out, then View the one-shot generated scene.
 let uiTab = "build"
@@ -343,15 +349,6 @@ function createPaintSurface(baseColor, size = 1024) {
 	return { canvas, ctx, texture }
 }
 
-function cloneGroundStrokes(strokes = []) {
-	return strokes.map(stroke => ({
-		mode: stroke.mode === "erase" ? "erase" : "paint",
-		color: stroke.color,
-		radius: stroke.radius,
-		points: stroke.points.map(point => [point[0], point[1]]),
-	}))
-}
-
 function groundPaintData(tile = world.ground) {
 	if (!tile?.userData?.paint) return { size: GROUND_SHEET_SIZE, complete: true, strokes: [] }
 	const complete = tile.userData.paintStrokesComplete !== false
@@ -370,37 +367,8 @@ function groundPaintData(tile = world.ground) {
 function paintGroundStrokeData(surface, strokes, worldSize = GROUND_SHEET_SIZE, clear = true) {
 	const { canvas, ctx, texture } = surface
 	if (clear) ctx.clearRect(0, 0, canvas.width, canvas.height)
-	const half = worldSize / 2
-	const toCanvas = point => [
-		((point[0] + half) / worldSize) * canvas.width,
-		((point[1] + half) / worldSize) * canvas.height,
-	]
 	for (const stroke of strokes) {
-		if (!stroke.points.length) continue
-		const radius = Math.max(0.001, stroke.radius) * (canvas.width / worldSize)
-		ctx.save()
-		ctx.globalCompositeOperation = stroke.mode === "erase" ? "destination-out" : "source-over"
-		ctx.fillStyle = stroke.color
-		ctx.strokeStyle = stroke.color
-		ctx.lineWidth = radius * 2
-		ctx.lineCap = "round"
-		ctx.lineJoin = "round"
-		if (stroke.points.length === 1) {
-			const [x, y] = toCanvas(stroke.points[0])
-			ctx.beginPath()
-			ctx.arc(x, y, radius, 0, Math.PI * 2)
-			ctx.fill()
-		} else {
-			const [x0, y0] = toCanvas(stroke.points[0])
-			ctx.beginPath()
-			ctx.moveTo(x0, y0)
-			for (let i = 1; i < stroke.points.length; i++) {
-				const [x, y] = toCanvas(stroke.points[i])
-				ctx.lineTo(x, y)
-			}
-			ctx.stroke()
-		}
-		ctx.restore()
+		paintGroundStroke(ctx, canvas, stroke, worldSize)
 	}
 	texture.needsUpdate = true
 }
@@ -1848,6 +1816,16 @@ function paintAtEvent(event) {
 	world.paintAt(hit, Boolean(drag?.erase))
 }
 
+function finishGroundPaintStroke() {
+	const active = drag?.groundStroke
+	if (!active || !closeGroundStroke(active.stroke)) return
+	const surface = active.tile.userData.paint
+	paintGroundStroke(surface.ctx, surface.canvas, active.stroke, GROUND_SHEET_SIZE)
+	active.tile.userData.paintVersion = (active.tile.userData.paintVersion || 0) + 1
+	active.tile.userData.paintCache = null
+	surface.texture.needsUpdate = true
+}
+
 // --- View-tab lasso + group transform ----------------------------------------
 // A freehand screen-space lasso selects the semantic SplatMesh pieces produced by the
 // one-shot segmentation pass. One contextual frame then owns all three transforms:
@@ -2385,6 +2363,10 @@ renderer.domElement.addEventListener("pointermove", event => {
 renderer.domElement.addEventListener("pointerup", event => {
 	if (drag?.pointerId === event.pointerId) {
 		if (drag.mode === "splat-lasso") finishSplatLasso(event)
+		if (drag.mode === "paint") {
+			paintAtEvent(event) // make the release position the polygon's final vertex
+			finishGroundPaintStroke()
+		}
 		if (drag.actionPushed && !drag.mutated) activeBuildHistory()?.undo.pop() // drag never moved — drop its checkpoint
 		if (drag.mutated) persistFramesSoon() // a drag can outlive the debounce its checkpoint armed
 		renderer.domElement.releasePointerCapture(event.pointerId)
@@ -3788,7 +3770,7 @@ function segmentSceneSplat(hasGround = true) {
 	const POST_CULL = Math.max(0, segmentationTuning.postCullIntensity ?? 1)
 	// Global cleanup controls. Amount is the deterministic fraction of detected candidates
 	// removed. Reach is a fraction of each object's own robust bottom-to-top height.
-	const CULL_AMOUNT = clamp01((segmentationTuning.cullAmount ?? 100) / 100)
+	const CULL_AMOUNT = SEGMENTATION_CLEANUP_ENABLED ? clamp01((segmentationTuning.cullAmount ?? 100) / 100) : 0
 	const CULL_HEIGHT_FRACTION = clamp01(segmentationTuning.cleanupReach ?? 0.25)
 	const MIN_BLOB = Math.max(40, segmentationTuning.minBlob * PRE_CULL) // smaller blobs (grass tufts) fold back into the ground
 	const ERODE = 2 // floor-map min-filter radius in cells; raise for very wide flat-bottomed objects faking an elevated floor
@@ -5436,7 +5418,7 @@ function segmentSceneSplat(hasGround = true) {
 	}
 	let scarPatchSplats = 0
 	let scarRemnantsCulled = 0
-	if (hasGround && groundSurf && blobParts.size) {
+	if (SEGMENTATION_CLEANUP_ENABLED && hasGround && groundSurf && blobParts.size) {
 		const SCAR_DILATE_CELLS = segmentationTuning.scarDilation // square width: 1 = 1×1, 2 = 2×2, 3 = 3×3 scar cells
 		const SCAR_BASE_HEIGHT_BAND = segmentationTuning.scarBaseHeight // only splats this far above an object's lowest point can create scar cells
 		const SCAR_BASE_SURFACE_BAND = segmentationTuning.scarBaseSurface // and only if they are still near the terrain surface
@@ -5847,11 +5829,11 @@ async function seatScene(bytes, box, { yawDeg = 0, yOffset = 0, mirrorZ = false,
 		yawDeg,
 		mirrorZ,
 		yOffset,
-		opacityFloor: sceneFit.opacityFloor,
+		opacityFloor: SEGMENTATION_CLEANUP_ENABLED ? sceneFit.opacityFloor : 0,
 		spanLo: sceneFit.fitBboxPercentile,
 		spanHi: 1 - sceneFit.fitBboxPercentile,
-		cullAmount: clamp01((segmentationTuning.cullAmount ?? 100) / 100),
-		cullHeightFraction: clamp01(segmentationTuning.cleanupReach ?? 0.25),
+		cullAmount: SEGMENTATION_CLEANUP_ENABLED ? clamp01((segmentationTuning.cullAmount ?? 100) / 100) : 0,
+		cullHeightFraction: SEGMENTATION_CLEANUP_ENABLED ? clamp01(segmentationTuning.cleanupReach ?? 0.25) : 0,
 	})
 	if (!fitted) {
 		disposeObject(raw)
