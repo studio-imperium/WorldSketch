@@ -51,16 +51,16 @@
 			</div>
 			<div class="grid grid-cols-1 md:grid-cols-2 gap-4">
 				<div>
-					<div class="flex items-center justify-between mb-1">
+					<div class="flex items-center justify-between gap-2 mb-1 flex-wrap">
 						<span class="font-semibold text-sm">Prompt A</span>
-						<button class="btn btn-ghost btn-xs" id="fill_a">Fill with current prompt</button>
+						<div class="flex gap-1 flex-wrap" id="presets_a"></div>
 					</div>
 					<textarea class="textarea textarea-bordered prompt-box w-full" rows="12" id="prompt_a"></textarea>
 				</div>
 				<div>
-					<div class="flex items-center justify-between mb-1">
+					<div class="flex items-center justify-between gap-2 mb-1 flex-wrap">
 						<span class="font-semibold text-sm">Prompt B</span>
-						<button class="btn btn-ghost btn-xs" id="fill_b">Fill with current prompt</button>
+						<div class="flex gap-1 flex-wrap" id="presets_b"></div>
 					</div>
 					<textarea class="textarea textarea-bordered prompt-box w-full" rows="12" id="prompt_b"></textarea>
 				</div>

@@ -5,7 +5,7 @@ import {
 	configureHuggingFace,
 	detailImageOnHuggingFace,
 } from "/scripts/huggingface.js"
-import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=realistic-style-1"
+import { promptPresets } from "/scripts/generation-prompt-presets.js"
 
 const el = id => document.getElementById(id)
 
@@ -16,12 +16,19 @@ if (!getHuggingFaceAuth().signedIn) el("auth_warning").classList.remove("hidden"
 
 let controller = null
 
-function fillPrompt(target) {
-	const hasGeometryReference = Boolean(el("geometry_image").files[0])
-	target.value = sceneGenerationPrompt(el("scene_text").value, { hasGeometryReference })
+for (const [container, textarea] of [["presets_a", "prompt_a"], ["presets_b", "prompt_b"]]) {
+	for (const preset of promptPresets) {
+		const button = document.createElement("button")
+		button.className = "btn btn-ghost btn-xs"
+		button.textContent = preset.label
+		button.title = `Fill with the ${preset.label} prompt`
+		button.addEventListener("click", () => {
+			const hasGeometryReference = Boolean(el("geometry_image").files[0])
+			el(textarea).value = preset.build(el("scene_text").value, { hasGeometryReference })
+		})
+		el(container).append(button)
+	}
 }
-el("fill_a").addEventListener("click", () => fillPrompt(el("prompt_a")))
-el("fill_b").addEventListener("click", () => fillPrompt(el("prompt_b")))
 
 function parseSeeds(text) {
 	const seeds = text.split(/[\s,]+/).map(Number).filter(n => Number.isInteger(n) && n >= 0)
