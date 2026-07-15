@@ -8,7 +8,7 @@ test("Vercel config function matches the server defaults", async () => {
 	const config = runtimeConfig()
 	assert.equal(config.generation.provider, "huggingface")
 	assert.equal(config.generation.image.steps, 4)
-	assert.equal(config.generation.tripo.gaussians, 131072)
+	assert.equal(config.generation.tripo.gaussians, 262144)
 
 	const response = await configHandler.fetch(new Request("https://example.com/api/config"))
 	assert.equal(response.status, 200)

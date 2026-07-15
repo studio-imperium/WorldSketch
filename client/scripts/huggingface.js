@@ -20,7 +20,7 @@ const DEFAULT_CONFIG = {
 	inferenceProvider: "fal-ai",
 	inferenceModel: "black-forest-labs/FLUX.2-klein-4B",
 	image: { steps: 4, guidance: 1, width: 1024, height: 1024 },
-	tripo: { steps: 20, guidance: 3, gaussians: 131072, format: "splat" },
+	tripo: { steps: 30, guidance: 3, gaussians: 262144, format: "splat" },
 }
 
 let config = structuredClone(DEFAULT_CONFIG)
