@@ -250,7 +250,12 @@ export async function detailImageOnHuggingFace({ prompt, image, geometryImage = 
 // ZeroGPU quota is exhausted.
 export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), useInferenceCredits = false, signal, onProgress }) {
 	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
-	const tripoSpace = useInferenceCredits && config.tripoDirectUrl ? config.tripoDirectUrl : config.tripoSpace
+	// An http:// direct server is unreachable from an https:// page (browser
+	// mixed-content rule), so only honor it when the app itself runs on http
+	// (i.e. the local server). Otherwise fall back to the ZeroGPU Space.
+	const directReachable = config.tripoDirectUrl
+		&& (!/^http:/i.test(config.tripoDirectUrl) || location.protocol === "http:")
+	const tripoSpace = useInferenceCredits && directReachable ? config.tripoDirectUrl : config.tripoSpace
 	try {
 		onProgress?.(0, "Sending the image to TripoSplat")
 		const payload = {
