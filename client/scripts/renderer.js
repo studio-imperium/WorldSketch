@@ -2218,29 +2218,41 @@ function beginGroundRubber() {
 	const contentBox = member.mesh.userData.contentBox
 	if (!contentBox || contentBox.isEmpty()) return
 	const worldBox = contentBox.clone().applyMatrix4(member.mesh.matrixWorld)
+	// Loosely segmented pieces can carry a wide ground skirt in their bounding
+	// box; clamp the reach so one object never recruits half the island.
 	const footprint = Math.min(worldBox.max.x - worldBox.min.x, worldBox.max.z - worldBox.min.z)
-	const reach = Math.min(3, Math.max(0.8, 0.45 * footprint))
+	const baseReach = Math.min(2.2, Math.max(0.8, 0.45 * footprint))
+	// Capture a generous candidate pool up front; the active ring grows with the
+	// pull distance at apply time, recruiting farther material like real rubber.
+	const maxReach = Math.min(6, Math.max(3, 3 * footprint))
 	const baseY = worldBox.min.y
 	const groundMatrix = groundMesh.matrixWorld
 	const world0 = new THREE.Vector3()
 	const entries = []
+	const meanColor = { r: 0, g: 0, b: 0, n: 0 }
 	packed.forEachSplat((index, center, scales, quaternion, opacity, color) => {
-		if (entries.length >= 9000) return
+		if (entries.length >= 20000) return
 		world0.copy(center).applyMatrix4(groundMatrix)
 		if (world0.y < baseY - 1.2 || world0.y > baseY + 1.2) return
 		const dx = Math.max(worldBox.min.x - world0.x, 0, world0.x - worldBox.max.x)
 		const dz = Math.max(worldBox.min.z - world0.z, 0, world0.z - worldBox.max.z)
 		const dist = Math.hypot(dx, dz)
-		if (dist > reach) return
+		if (dist > maxReach) return
 		// Baked contact shadows are near-black; carrying and elongating them
 		// smears dark streaks across the floor. Leave them mostly anchored (a
 		// shadow shouldn't travel with the object) and never stretch them.
 		const luminance = 0.2126 * color.r + 0.7152 * color.g + 0.0722 * color.b
 		const dark = luminance < 0.16
+		if (!dark) {
+			meanColor.r += color.r
+			meanColor.g += color.g
+			meanColor.b += color.b
+			meanColor.n++
+		}
 		entries.push({
 			index,
 			dark,
-			weight: (1 - dist / reach) * (dark ? 0.25 : 1),
+			dist,
 			world: world0.clone(),
 			center: center.clone(),
 			scales: scales.clone(),
@@ -2252,6 +2264,18 @@ function beginGroundRubber() {
 		})
 	})
 	if (!entries.length) return
+	// Splats far from the terrain's dominant palette are usually object fringe
+	// (tent canvas, walls) left in the ground layer — stretching them paints
+	// alien-coloured streaks across the floor, so treat them like shadows.
+	if (meanColor.n) {
+		meanColor.r /= meanColor.n
+		meanColor.g /= meanColor.n
+		meanColor.b /= meanColor.n
+		for (const entry of entries) {
+			const off = Math.hypot(entry.color.r - meanColor.r, entry.color.g - meanColor.g, entry.color.b - meanColor.b)
+			if (off > 0.42) entry.dark = true
+		}
+	}
 	const invQuat = new THREE.Quaternion()
 	groundMesh.getWorldQuaternion(invQuat).invert()
 	drag.rubber = {
@@ -2259,7 +2283,8 @@ function beginGroundRubber() {
 		member,
 		entries,
 		invQuat,
-		reach,
+		baseReach,
+		maxReach,
 		invGroundMatrix: groundMatrix.clone().invert(),
 		startMatrix: member.mesh.matrixWorld.clone(),
 	}
@@ -2278,12 +2303,31 @@ function applyGroundRubber() {
 	for (const entry of rubber.entries) {
 		target.copy(entry.world).applyMatrix4(delta)
 		disp.copy(target).sub(entry.world)
-		const carried = disp.multiplyScalar(entry.weight)
+		const pull = disp.length()
+		// The active band widens with the pull, so long drags recruit farther
+		// material instead of tearing a hole at the origin, and the stretch
+		// ratio stays bounded (~2.3×) no matter how far the piece travels.
+		const reach = Math.min(rubber.maxReach, rubber.baseReach + pull * 1.1)
+		// Linear falloff = uniform stretch across the whole band; a smoothstep
+		// concentrates the stretch mid-band and tears the edges instead. Shadow
+		// and off-palette splats stay fully anchored — a shadow patch left at
+		// the old spot reads far more natural than a travelling dark smear.
+		const weight = entry.dark ? 0 : Math.max(0, 1 - entry.dist / reach)
+		const carried = disp.multiplyScalar(weight)
 		outCenter.copy(entry.world).add(carried).applyMatrix4(rubber.invGroundMatrix)
-		const tension = disp.length() / Math.max(1e-6, entry.weight) * entry.weight * (1 - entry.weight)
-		if (!entry.dark && tension > 1e-3 && carried.lengthSq() > 1e-8) {
-			// Long axis along the pull, kept flat against the ground plane so the
-			// stretched pancakes never turn edge-on into dark slivers.
+		// Anchored shadow / off-palette fringe fades out as its object departs —
+		// a contact shadow with no caster left reads as a burnt black crater.
+		if (entry.dark) {
+			const faded = entry.opacity * Math.max(0.08, 1 - pull * 0.45)
+			rubber.packed.setSplat(entry.index, outCenter, entry.scales, entry.quaternion, faded, entry.color)
+			continue
+		}
+		// Real rubber stretches the whole band by the same ratio (pull ÷ band
+		// width). Elongating every ring splat by that ratio keeps neighbours
+		// overlapping, so the stretched surface stays continuous instead of
+		// tearing into stripes. Splats inside the footprint ride rigidly.
+		const ring = !entry.dark && weight > 0.03 && weight < 0.97
+		if (ring && pull > 1e-3 && carried.lengthSq() > 1e-8) {
 			dir.copy(carried).normalize().applyQuaternion(rubber.invQuat)
 			up.set(0, 1, 0)
 			side.crossVectors(dir, up)
@@ -2292,11 +2336,11 @@ function applyGroundRubber() {
 			up.crossVectors(side, dir).normalize()
 			basis.makeBasis(dir, up, side)
 			quat.setFromRotationMatrix(basis)
-			const elongation = Math.min(3.5, 1 + (3 * tension) / rubber.reach)
+			const elongation = Math.min(3.5, 1 + pull / Math.max(0.3, reach))
 			outScales.set(
 				entry.planar * elongation,
 				entry.scales.y,
-				entry.narrow * (1 + 0.2 * (elongation - 1)),
+				Math.min(entry.narrow * 2.5, entry.narrow * (1 + 0.8 * (elongation - 1))),
 			)
 			rubber.packed.setSplat(entry.index, outCenter, outScales, quat, entry.opacity, entry.color)
 		} else {
