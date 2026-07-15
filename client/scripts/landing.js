@@ -25,15 +25,26 @@ button.addEventListener("click", () => {
 	button.disabled = true
 	errorBox.classList.add("hidden")
 	label.textContent = "Opening Hugging Face…"
-	signInHuggingFace().catch(showError)
+	window.posthog?.capture("login_started")
+	signInHuggingFace().catch(error => {
+		window.posthog?.capture("login_failed", { error: error?.message })
+		showError(error)
+	})
 })
 
 try {
 	const runtimeConfig = await getConfig()
 	configureHuggingFaceAuth(runtimeConfig?.generation)
-	await finishHuggingFaceSignIn()
-	if (getHuggingFaceAuth().signedIn) enterEditor()
-	else button.disabled = false
+	const finished = await finishHuggingFaceSignIn()
+	if (getHuggingFaceAuth().signedIn) {
+		// Only a completed OAuth round-trip counts as a conversion; returning
+		// visitors with a stored session skip straight to the editor.
+		if (finished?.handled) window.posthog?.capture("login_completed", {}, { send_instantly: true })
+		enterEditor()
+	} else {
+		button.disabled = false
+	}
 } catch (error) {
+	window.posthog?.capture("login_failed", { error: error?.message })
 	showError(error)
 }

@@ -5824,6 +5824,7 @@ async function generateWorld(prompt) {
 	generating = true
 	splatting = true
 	world.prompt = prompt
+	window.posthog?.capture("generate_started", { has_ground: hasGround, prompt_length: prompt.length })
 	syncGenerateButton()
 	setStatus("")
 	clearRawSplatPreview()
@@ -5923,10 +5924,12 @@ async function generateWorld(prompt) {
 		setUiTab("view")
 		frameGeneratedSplats()
 		saveBuildToHistory(world.prompt)
+		window.posthog?.capture("generate_completed", { duration_s: Math.round((performance.now() - genStart) / 1000) })
 		showProgress(1, 1, "Done")
 		if (segmentationSkipped) setStatus("Scene loaded as one piece because it was too dense to separate safely in the browser")
 		window.setTimeout(hideProgress, 1000)
 	} catch (error) {
+		window.posthog?.capture("generate_failed", { error: error?.message })
 		setStatus(error.message || "Generation failed")
 		hideProgress()
 	} finally {
