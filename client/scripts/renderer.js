@@ -145,6 +145,7 @@ const segmentationTuneDefaults = {
 	groundSmooth: 0.63,
 	groundFill: 0.6,
 	groundFillMaxHeight: 0.25,
+	groundStretch: 0,
 	scarDilation: 1,
 	scarBaseHeight: 0.85,
 	scarBaseSurface: 1.1,
@@ -157,6 +158,7 @@ const adjustableSegmentationKeys = new Set([
 	"minBlob", "bridgeCut", "colorSplit", "terrainBias", "baseDetachStrength",
 	"skirtGuardMinRise", "wispAggression", "detachedCullPct", "cullAmount",
 	"cleanupReach", "edgeOutliers", "groundSmooth", "groundFill", "groundFillMaxHeight",
+	"groundStretch",
 ])
 try {
 	const saved = JSON.parse(localStorage.getItem("worldsketch.segmentationTuning") || "{}")
@@ -3090,6 +3092,10 @@ const segmentationTuneControls = [
 		id: "ground-fill-height", group: "Repair the ground", key: "groundFillMaxHeight", label: "Highest height to fill", min: 0, max: 1, step: 0.01, format: percent,
 		description: "Measured from the bottom to the top of each original object.", low: "Object base", high: "Object top",
 	},
+	{
+		id: "ground-stretch", group: "Repair the ground", key: "groundStretch", label: "Stretch edges over holes (instead of fill)", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Pulls the surrounding ground gaussians over the hole like rubber instead of adding filler material.", low: "Fill (off)", high: "Full stretch",
+	},
 ]
 
 const readSegmentationControl = control => control.read ? control.read() : segmentationTuning[control.key]
@@ -5668,6 +5674,7 @@ function segmentSceneSplat(hasGround = true) {
 		const GROUND_SMOOTH = clamp01(segmentationTuning.groundSmooth ?? 0.8)
 		const GROUND_FILL = clamp01(segmentationTuning.groundFill ?? 0.5)
 		const GROUND_FILL_MAX_HEIGHT = clamp01(segmentationTuning.groundFillMaxHeight ?? 0.25)
+		const GROUND_STRETCH = clamp01(segmentationTuning.groundStretch ?? 0)
 		const SCAR_RAISED_CULL = lerp(0.55, 0.015, GROUND_SMOOTH) // stronger smoothing removes material closer to the repaired floor
 		const SCAR_NEARBY_COLOR_RADIUS = 8 // larger = sample terrain colour farther away from the scar
 		const SCAR_TARGET_SPLATS = Math.round(lerp(0, 36, GROUND_FILL)) // higher = denser/more opaque-looking fill
@@ -5813,6 +5820,112 @@ function segmentSceneSplat(hasGround = true) {
 			}
 			let scarSkippedSkyCells = 0
 			let scarSkippedHighCells = 0
+			if (GROUND_STRETCH > 0) {
+				// Rubber-sheet repair prototype: instead of paving the hole with synthetic
+				// filler, pull the ground gaussians ringing the scar inward and elongate
+				// them toward the hole, so the surrounding material stretches over the gap.
+				const RIM_CELLS = 3
+				const NEIGHBORS = [[1, 0], [-1, 0], [0, 1], [0, -1]]
+				const rimDist = new Int32Array(gw * gh).fill(-1)
+				const nearestScar = new Int32Array(gw * gh).fill(-1)
+				const scarDepth = new Int32Array(gw * gh)
+				let frontier = []
+				for (let cell = 0; cell < gw * gh; cell++) {
+					if (!scarCells[cell]) continue
+					rimDist[cell] = 0
+					nearestScar[cell] = cell
+					frontier.push(cell)
+				}
+				const scarCellTotal = frontier.length
+				// Depth of each scar cell from open ground: deeper cells need a longer pull.
+				let edge = []
+				for (const cell of frontier) {
+					const cx = cell % gw, cz = (cell / gw) | 0
+					const open = NEIGHBORS.some(([dx, dz]) => {
+						const nx = cx + dx, nz = cz + dz
+						return nx < 0 || nx >= gw || nz < 0 || nz >= gh || !scarCells[nz * gw + nx]
+					})
+					if (open) {
+						scarDepth[cell] = 1
+						edge.push(cell)
+					}
+				}
+				while (edge.length) {
+					const next = []
+					for (const cell of edge) {
+						const cx = cell % gw, cz = (cell / gw) | 0
+						for (const [dx, dz] of NEIGHBORS) {
+							const nx = cx + dx, nz = cz + dz
+							if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+							const n = nz * gw + nx
+							if (scarCells[n] && !scarDepth[n]) {
+								scarDepth[n] = scarDepth[cell] + 1
+								next.push(n)
+							}
+						}
+					}
+					edge = next
+				}
+				// Ring distances outward from the scar, remembering the nearest scar cell.
+				while (frontier.length) {
+					const next = []
+					for (const cell of frontier) {
+						const d = rimDist[cell]
+						if (d >= RIM_CELLS) continue
+						const cx = cell % gw, cz = (cell / gw) | 0
+						for (const [dx, dz] of NEIGHBORS) {
+							const nx = cx + dx, nz = cz + dz
+							if (nx < 0 || nx >= gw || nz < 0 || nz >= gh) continue
+							const n = nz * gw + nx
+							if (rimDist[n] !== -1) continue
+							rimDist[n] = d + 1
+							nearestScar[n] = nearestScar[cell]
+							next.push(n)
+						}
+					}
+					frontier = next
+				}
+				const stretched = new PackedSplats()
+				const stretchedBounds = new THREE.Box3()
+				const pullDir = new THREE.Vector3()
+				let stretchedCount = 0
+				ground.packed.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
+					const cell = cellOfXZ(center.x, center.z)
+					const d = rimDist[cell]
+					const ns = nearestScar[cell]
+					if (d > 0 && d <= RIM_CELLS && ns >= 0) {
+						const tx = minX + ((ns % gw) + 0.5) * cellW
+						const tz = minZ + (((ns / gw) | 0) + 0.5) * cellD
+						pullDir.set(tx - center.x, 0, tz - center.z)
+						const reach = pullDir.length()
+						if (reach > 1e-6) {
+							pullDir.multiplyScalar(1 / reach)
+							const falloff = (RIM_CELLS + 1 - d) / RIM_CELLS
+							const depth = Math.max(1, scarDepth[ns])
+							// Pull toward the hole, capped so a splat never overshoots its target
+							// cell; deeper holes recruit a longer reach from their rim.
+							const pull = GROUND_STRETCH * falloff * Math.min(reach, cellW * (0.4 + depth * 0.6))
+							center.x += pullDir.x * pull
+							center.z += pullDir.z * pull
+							// Drape slightly down toward the repaired floor height inside the hole.
+							center.y = lerp(center.y, repairFloorHeight[ns] + SCAR_HEIGHT, 0.3 * GROUND_STRETCH * falloff)
+							// Elongate along the pull direction (rotate the gaussian's long axis
+							// toward the hole), keeping thickness and the narrow axis as they were.
+							const planar = Math.max(scales.x, scales.z)
+							const narrow = Math.min(scales.x, scales.z)
+							const elongation = 1 + GROUND_STRETCH * falloff * (0.8 + depth * 0.8)
+							quaternion.setFromAxisAngle(localUp, Math.atan2(-pullDir.z, pullDir.x))
+							scales.set(planar * elongation, scales.y, narrow)
+							stretchedCount++
+						}
+					}
+					stretched.pushSplat(center, scales, quaternion, opacity, color)
+					stretchedBounds.expandByPoint(center)
+				})
+				ground.packed = stretched
+				ground.bounds = stretchedBounds
+				console.log(`[segment] ground scar stretch → ${stretchedCount} rim gaussian(s) pulled over ${scarCellTotal} scar cell(s) (fill skipped)`)
+			} else {
 			for (let cz = 0; cz < gh; cz++) {
 				for (let cx = 0; cx < gw; cx++) {
 					const cell = cz * gw + cx
@@ -5852,6 +5965,7 @@ function segmentSceneSplat(hasGround = true) {
 			}
 			if (scarSkippedSkyCells) console.log(`[segment] ground scar flatten skipped ${scarSkippedSkyCells} sky/unanchored scar cell(s)`)
 			if (scarSkippedHighCells) console.log(`[segment] ground scar flatten skipped ${scarSkippedHighCells} cell(s) above the object-relative fill ceiling`)
+			}
 		}
 		if (scarPatchSplats || scarRemnantsCulled) console.log(`[segment] ground scar flatten → ${scarPatchSplats} filler + ${scarRemnantsCulled} raised remnant gaussian(s) under object footprint(s)`)
 	}
