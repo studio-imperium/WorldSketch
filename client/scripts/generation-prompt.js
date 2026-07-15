@@ -1,28 +1,23 @@
 export function sceneGenerationPrompt(scene = "", { hasGeometryReference = false } = {}) {
 	const geometryReference = hasGeometryReference
-		? `Image 1 is the render to transform. Image 2 is an exactly aligned structural map of the same block-out. Its artificial colors identify the original major masses and terrain region; use it to preserve their placement, relative scale, and correspondence, but never copy those colors or treat Image 2 as an appearance reference.`
+		? `Image 1 is the render to transform. Image 2 is an exactly aligned structural map; its artificial colors identify major masses and terrain only. Use it for placement and relative scale, but never copy those colors or treat it as an appearance reference.`
 		: `Image 1 is the render to transform and the authoritative spatial reference.`
+	const description = String(scene || "A coherent handcrafted environment").trim()
 	return `Transform the supplied player-made block-out into a richly detailed, production-quality stylized 3D game environment.
+
+SCENE TO CREATE: ${description}
 
 ${geometryReference}
 
-Creatively reinterpret every primitive as a finished object or environment feature implied by the scene description. A block is a massing proxy, not a literal cube and not merely a surface to texture. It may become convincing architecture, vegetation, terrain, machinery, furniture, a vehicle, a monument, a fantasy object, or another appropriate subject. Make the interpretation bold, coherent, recognizable, and richly authored rather than leaving primitive geometry visible.
+Creatively reinterpret every primitive as a finished subject implied by the scene. A block is a massing proxy, never a literal cube or surface to texture. Create any appropriate architecture, vegetation, terrain, machinery, furnishing, vehicle, monument, or fantastical object; leave no primitive geometry visible.
 
-SPATIAL FIDELITY IS THE CONSTRAINT. Preserve the input camera, orthographic projection, framing, overall composition, terrain location, and the layout relationships between all major subjects. Keep each interpreted subject centered on its source shape with roughly the same projected footprint and height envelope. Preserve relative scale, spacing, orientation, adjacency, and occlusion. Do not move a subject to a more convenient location, merge separate subjects, or invent additional major subjects in empty regions.
+SPATIAL FIDELITY IS THE CONSTRAINT. Preserve the camera, orthographic projection, framing, composition, and terrain. Keep every subject centered on its source with roughly the same projected footprint and height envelope. Preserve relative scale, spacing, orientation, adjacency, and occlusion. Keep separate subjects separate and empty regions open. Secondary details may refine silhouettes locally, but add no new major subjects.
 
-You may add the secondary geometry needed to make each interpretation convincing—for example roof forms, eaves, windows, doors, balconies, beams, vines, branches, roots, wheels, pipes, railings, carved elements, attached props, and small surrounding accents. These details may naturally refine the silhouette, but they must remain visually attached to their source subject and must not turn one small source mass into a sprawling compound. Preserve the source mass as the clear spatial anchor.
+RICHNESS AND DETAIL DENSITY ARE REQUIRED. Make every major subject a fully art-directed asset with detail at three readable scales: strong primary forms; abundant subject-specific secondary construction such as trim, supports, ledges, panels, joints, openings, layered foliage, and material transitions; and fine storytelling details such as fixtures, cables, planters, tools, vessels, attached props, flowers, moss, stains, chips, cracks, and wear. Use several coordinated, context-appropriate materials. Break up large surfaces with localized color, roughness, age, construction variation, and crisp contact shadows. Favor dense, intentional asymmetry. Avoid smooth blank walls, empty facades, uniform lawns, simple foliage blobs, toy-like plastic, clay-like materials, and unfinished areas.
 
-Scale is essential. Read the whole block-out as one world-sized region and use the terrain and neighboring shapes as scale references. Do not enlarge a subject to fill empty ground or dominate the frame. A small block on a large terrain area should become a detailed but still small subject on a large, mostly open terrain area. Keep deliberately empty space open; use only restrained surface variation or tiny incidental dressing there.
+Spend the detail budget inside and immediately around the existing source masses; keep attached props and nearby dressing subordinate to their anchors. Use terrain and neighboring shapes as scale references. Do not enlarge a subject to fill empty ground. Preserve the terrain boundary, footprint, placement, and thickness while enriching its surface.
 
-Preserve the terrain's existing outer boundary, overall footprint, placement, and thickness. Retexture and enrich the terrain naturally, but do not regularize an irregular boundary into a rectangle, square, oval, or generic display plinth, and do not expand it beyond the source.
+STYLE: premium handcrafted miniature diorama, painterly realism, crisp readable forms, warm natural light, saturated natural color, fine world-scale texture, authored material variation, soft ambient shadows, and strong contact shadows. Apply this generation-agnostically without biasing every result toward houses or fantasy villages.
 
-Render in the same appealing visual language as a premium handcrafted miniature diorama: painterly realism, crisp readable forms, warm natural lighting, soft ambient shadows, strong contact shadows, saturated natural color, fine world-scale texture, and richly authored material variation. Use subject-appropriate construction and detail—weathering, joints, seams, grain, masonry, foliage clusters, worn edges, metalwork, fabric, soil, water, or other materials as appropriate—without biasing every generation toward houses or fantasy villages.
-
-The flat block-out colors are rough semantic hints, not literal final materials. Preserve the clean isolated presentation and pure black background. Do not add sky, horizon, distant scenery, editor overlays, grid lines, borders, text, or unrelated background content.
-
-The scene description determines what the shapes become and how the finished world feels. The block-out determines where those subjects are, how large they are, and how they relate spatially.
-
-Scene description: ${String(scene || "A coherent handcrafted environment").trim()}
-
-Final check before rendering: the result should be substantially more imaginative and detailed than the primitive input while remaining unmistakably the same composition at the same scale.`
+Treat block-out colors as semantic hints, not final materials. Keep the isolated pure black background with no sky, horizon, distant scenery, editor UI, grid, border, legible text, or unrelated content. The result must feel richly inhabited and materially varied while remaining unmistakably the same composition and scale.`
 }

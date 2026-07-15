@@ -143,9 +143,12 @@ try {
 
 const els = {
 	status: document.getElementById("status"),
+	chatDock: document.querySelector(".chat-dock"),
 	progress: document.getElementById("progress"),
+	progressTrack: document.getElementById("progress_track"),
 	progressFill: document.getElementById("progress_fill"),
 	progressLabel: document.getElementById("progress_label"),
+	progressPercent: document.getElementById("progress_percent"),
 	toolButtons: [...document.querySelectorAll("[data-tool]")],
 	viewTabs: [...document.querySelectorAll("[data-view-tab]")],
 	colorGrid: document.querySelector(".swatch-grid"),
@@ -2757,14 +2760,20 @@ function setStatus(message) {
 
 function showProgress(done, total, label) {
 	els.progress.classList.remove("hidden")
-	const pct = total ? Math.round((done / total) * 100) : 0
+	els.chatDock.classList.add("is-showing-progress")
+	const pct = total ? Math.min(100, Math.max(0, Math.round((done / total) * 100))) : 0
 	els.progressFill.style.width = `${pct}%`
+	els.progressPercent.textContent = `${pct}%`
+	els.progressTrack.setAttribute("aria-valuenow", String(pct))
 	if (label !== undefined) els.progressLabel.textContent = label
 }
 
 function hideProgress() {
 	els.progress.classList.add("hidden")
+	els.chatDock.classList.remove("is-showing-progress")
 	els.progressFill.style.width = "0%"
+	els.progressPercent.textContent = "0%"
+	els.progressTrack.setAttribute("aria-valuenow", "0")
 }
 
 function syncGenerateButton() {

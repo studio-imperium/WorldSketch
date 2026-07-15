@@ -187,8 +187,14 @@
 		<div class="bottom-dock">
 			<div class="chat-dock">
 				<div class="gen-progress hidden" id="progress" aria-live="polite">
-					<div class="gen-progress-track"><span class="gen-progress-fill" id="progress_fill"></span></div>
-					<span class="gen-progress-label" id="progress_label"></span>
+					<div class="gen-progress-copy">
+						<span class="gen-progress-pulse" aria-hidden="true"></span>
+						<span class="gen-progress-label" id="progress_label">Preparing your scene…</span>
+						<span class="gen-progress-percent" id="progress_percent">0%</span>
+					</div>
+					<div class="gen-progress-track" id="progress_track" role="progressbar" aria-label="World generation progress" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+						<span class="gen-progress-fill" id="progress_fill"></span>
+					</div>
 				</div>
 				<form class="chat-bar" id="chat_form">
 					<input class="chat-input" id="chat_prompt" type="text" autocomplete="off" placeholder="Describe your scene...">
