@@ -1,7 +1,6 @@
 package storage
 
 import (
-	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -86,26 +85,6 @@ func SaveSplat(dir, name string, splat []byte) {
 	path := filepath.Join(dir, name+".splat")
 	if err := os.WriteFile(path, splat, 0o644); err != nil {
 		log.Printf("saveSplat: write %s: %v", path, err)
-	}
-}
-
-func SaveIdentify(dir string, image []byte, raw string, labels map[string]string, ground string) {
-	if !config.EnvBool("WS_SAVE_GENERATIONS", true) {
-		return
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		log.Printf("saveIdentify: mkdir %s: %v", dir, err)
-		return
-	}
-	if err := os.WriteFile(filepath.Join(dir, "identify.png"), image, 0o644); err != nil {
-		log.Printf("saveIdentify: write image: %v", err)
-	}
-	payload, err := json.MarshalIndent(map[string]any{"raw": raw, "labels": labels, "ground": ground}, "", "  ")
-	if err != nil {
-		payload = []byte(raw)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "identify-response.json"), payload, 0o644); err != nil {
-		log.Printf("saveIdentify: write response: %v", err)
 	}
 }
 

@@ -1,8 +1,7 @@
-// Persistent frames state. The Draw + Build frame lists (sketch strokes, block-out
-// snapshots) are small JSON — one record, rewritten whole on every (debounced) change
-// and restored at boot, so past builds survive reloads. Splat frames are deliberately
-// absent: their data is the fitted GPU splats, and the build-history store (history.js)
-// already keeps the durable raw bytes for those.
+// Persistent frame state. Build snapshots are small JSON — one record, rewritten whole
+// on every debounced change and restored at boot, so past builds survive reloads.
+// Splat frames are deliberately absent: their data is the fitted GPU splats, and the
+// build-history store (history.js) already keeps the durable raw bytes for those.
 
 const DB_NAME = "worldsketch_frames"
 const DB_VERSION = 1

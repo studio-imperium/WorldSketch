@@ -28,120 +28,27 @@ type TripoSettings struct {
 	Format    string
 }
 
-func SubjectImageEditSettings(kind string) ImageEditSettings {
-	if kind == "scene" {
-		return ImageEditSettings{
-			Provider:      SubjectEnv(kind, "IMAGE_PROVIDER", []string{"WS_IMAGE_PROVIDER"}, "openai"),
-			GeminiModel:   SubjectEnv(kind, "GEMINI_IMAGE_MODEL", []string{"WS_GEMINI_IMAGE_MODEL"}, "gemini-2.5-flash-image"),
-			OpenAIModel:   SubjectEnv(kind, "IMAGE_MODEL", []string{"WS_IMAGE_MODEL"}, "gpt-image-1"),
-			Size:          SubjectEnv(kind, "IMAGE_SIZE", []string{"WS_IMAGE_SIZE"}, "1024x1024"),
-			Quality:       SubjectEnv(kind, "IMAGE_QUALITY", []string{"WS_IMAGE_QUALITY"}, "medium"),
-			Fidelity:      SubjectEnv(kind, "IMAGE_FIDELITY", []string{"WS_IMAGE_FIDELITY"}, "high"),
-			Background:    SubjectEnv(kind, "IMAGE_BACKGROUND", []string{"WS_IMAGE_BACKGROUND"}, "opaque"),
-			Format:        SubjectEnv(kind, "IMAGE_FORMAT", []string{"WS_IMAGE_FORMAT"}, "png"),
-			SkipImageEdit: SubjectSkipImageEdit(kind),
-		}
-	}
-	if kind == "floor" {
-		return ImageEditSettings{
-			Provider:      SubjectEnv(kind, "IMAGE_PROVIDER", []string{"WS_IMAGE_PROVIDER"}, "openai"),
-			GeminiModel:   SubjectEnv(kind, "GEMINI_IMAGE_MODEL", []string{"WS_GEMINI_IMAGE_MODEL"}, "gemini-2.5-flash-image"),
-			OpenAIModel:   SubjectEnv(kind, "IMAGE_MODEL", []string{"WS_FLOOR_IMAGE_MODEL", "WS_IMAGE_MODEL"}, "gpt-image-1"),
-			Size:          SubjectEnv(kind, "IMAGE_SIZE", []string{"WS_IMAGE_SIZE"}, "1024x1024"),
-			Quality:       SubjectEnv(kind, "IMAGE_QUALITY", []string{"WS_IMAGE_QUALITY"}, "medium"),
-			Fidelity:      SubjectEnv(kind, "IMAGE_FIDELITY", []string{"WS_FLOOR_IMAGE_FIDELITY", "WS_IMAGE_FIDELITY"}, "high"),
-			Background:    SubjectEnv(kind, "IMAGE_BACKGROUND", []string{"WS_IMAGE_BACKGROUND"}, "transparent"),
-			Format:        SubjectEnv(kind, "IMAGE_FORMAT", []string{"WS_IMAGE_FORMAT"}, "png"),
-			SkipImageEdit: SubjectSkipImageEdit(kind),
-		}
-	}
+func SceneImageEditSettings() ImageEditSettings {
 	return ImageEditSettings{
-		Provider:      SubjectEnv(kind, "IMAGE_PROVIDER", []string{"WS_IMAGE_PROVIDER"}, "openai"),
-		GeminiModel:   SubjectEnv(kind, "GEMINI_IMAGE_MODEL", []string{"WS_GEMINI_IMAGE_MODEL"}, "gemini-2.5-flash-image"),
-		OpenAIModel:   SubjectEnv(kind, "IMAGE_MODEL", []string{"WS_IMAGE_MODEL"}, "gpt-image-1-mini"),
-		Size:          SubjectEnv(kind, "IMAGE_SIZE", []string{"WS_IMAGE_SIZE"}, "1024x1024"),
-		Quality:       SubjectEnv(kind, "IMAGE_QUALITY", []string{"WS_IMAGE_QUALITY"}, "medium"),
-		Fidelity:      SubjectEnv(kind, "IMAGE_FIDELITY", []string{"WS_IMAGE_FIDELITY"}, "low"),
-		Background:    SubjectEnv(kind, "IMAGE_BACKGROUND", []string{"WS_IMAGE_BACKGROUND"}, "transparent"),
-		Format:        SubjectEnv(kind, "IMAGE_FORMAT", []string{"WS_IMAGE_FORMAT"}, "png"),
-		SkipImageEdit: SubjectSkipImageEdit(kind),
+		Provider:      Env("WS_SCENE_IMAGE_PROVIDER", "openai"),
+		GeminiModel:   Env("WS_SCENE_GEMINI_IMAGE_MODEL", "gemini-2.5-flash-image"),
+		OpenAIModel:   Env("WS_SCENE_IMAGE_MODEL", "gpt-image-1"),
+		Size:          Env("WS_SCENE_IMAGE_SIZE", "1024x1024"),
+		Quality:       Env("WS_SCENE_IMAGE_QUALITY", "medium"),
+		Fidelity:      Env("WS_SCENE_IMAGE_FIDELITY", "high"),
+		Background:    Env("WS_SCENE_IMAGE_BACKGROUND", "opaque"),
+		Format:        Env("WS_SCENE_IMAGE_FORMAT", "png"),
+		SkipImageEdit: EnvBool("WS_SCENE_SKIP_IMAGE_EDIT", false),
 	}
 }
 
-func SubjectSkipImageEdit(kind string) bool {
-	fallback := EnvBool("WS_SKIP_IMAGE_EDIT", EnvBool("WS_SKIP_OPENAI", false))
-	return SubjectEnvBool(kind, "SKIP_IMAGE_EDIT", nil, fallback)
-}
-
-func SubjectTripoSettings(kind, stepsField, gaussiansField string) TripoSettings {
-	stepsDefault := "24"
-	gaussiansDefault := "32768"
-	stepsLegacy := []string{"WS_TRIPO_STEPS"}
-	guidanceDefault := "7"
-	guidanceLegacy := []string{"WS_TRIPO_GUIDANCE"}
-	if kind == "object" {
-		stepsDefault = "14"
-		stepsLegacy = []string{"OBJECT_STEPS", "WS_TRIPO_STEPS"}
-		guidanceDefault = "3"
-		guidanceLegacy = []string{"OBJECT_GUIDANCE", "WS_TRIPO_GUIDANCE"}
-	} else if kind == "scene" {
-		// One reconstruction now carries the entire 16x16 world, so give it the full
-		// Gaussian budget that was previously spread across many subject calls.
-		gaussiansDefault = "262144"
-	}
+func SceneTripoSettings() TripoSettings {
 	return TripoSettings{
-		Steps:     ClampIntString(SubjectEnv(kind, "TRIPO_STEPS", stepsLegacy, stepsField), stepsDefault, 1, 64),
-		Guidance:  SubjectEnv(kind, "TRIPO_GUIDANCE", guidanceLegacy, guidanceDefault),
-		Gaussians: ClampIntString(SubjectEnv(kind, "TRIPO_GAUSSIANS", []string{"WS_TRIPO_GAUSSIANS"}, gaussiansField), gaussiansDefault, 1024, 262144),
-		Format:    SubjectEnv(kind, "TRIPO_FORMAT", []string{"WS_TRIPO_FORMAT"}, "splat"),
+		Steps:     ClampIntString(Env("WS_SCENE_TRIPO_STEPS", "24"), "24", 1, 64),
+		Guidance:  Env("WS_SCENE_TRIPO_GUIDANCE", "7"),
+		Gaussians: ClampIntString(Env("WS_SCENE_TRIPO_GAUSSIANS", "262144"), "262144", 1024, 262144),
+		Format:    Env("WS_SCENE_TRIPO_FORMAT", "splat"),
 	}
-}
-
-func GroundGaussians(tiles int) string {
-	base := 32768
-	if v := strings.TrimSpace(Env("WS_FLOOR_TRIPO_GAUSSIANS", Env("WS_TRIPO_GAUSSIANS", ""))); v != "" {
-		if n, e := strconv.Atoi(v); e == nil && n > 0 {
-			base = n
-		}
-	}
-	if tiles < 1 {
-		tiles = 1
-	}
-	mult := 1
-	for mult < tiles {
-		mult <<= 1
-	}
-	g := base * mult
-	if g > 262144 {
-		g = 262144
-	}
-	if g < 1024 {
-		g = 1024
-	}
-	return strconv.Itoa(g)
-}
-
-func GroundSteps(tiles int) string {
-	if v := strings.TrimSpace(Env("WS_FLOOR_TRIPO_STEPS", Env("WS_TRIPO_STEPS", ""))); v != "" {
-		return ClampIntString(v, "24", 1, 64)
-	}
-	base := 24
-	if tiles < 1 {
-		tiles = 1
-	}
-	extra := 0
-	for m := 1; m < tiles; m <<= 1 {
-		extra += 4
-	}
-	return strconv.Itoa(ClampInt(base+extra, 1, 64))
-}
-
-func OpenAIGroundSize(size string) string {
-	switch strings.TrimSpace(size) {
-	case "1024x1024", "1536x1024", "1024x1536":
-		return size
-	}
-	return ""
 }
 
 func GeminiAPIKey() string {
@@ -222,36 +129,6 @@ func Env(name, fallback string) string {
 	return value
 }
 
-func EnvMaybe(name string) (string, bool) {
-	value := strings.TrimSpace(os.Getenv(name))
-	if value == "" {
-		return "", false
-	}
-	return value, true
-}
-
-func SubjectPrefix(kind string) string {
-	if kind == "floor" {
-		return "WS_FLOOR_"
-	}
-	if kind == "scene" {
-		return "WS_SCENE_"
-	}
-	return "WS_OBJECT_"
-}
-
-func SubjectEnv(kind, suffix string, legacy []string, fallback string) string {
-	if value, ok := EnvMaybe(SubjectPrefix(kind) + suffix); ok {
-		return value
-	}
-	for _, key := range legacy {
-		if value, ok := EnvMaybe(key); ok {
-			return value
-		}
-	}
-	return fallback
-}
-
 func EnvBool(name string, fallback bool) bool {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -264,26 +141,6 @@ func EnvBool(name string, fallback bool) bool {
 	return parsed
 }
 
-func ParseBoolDefault(value string, fallback bool) bool {
-	parsed, err := strconv.ParseBool(value)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func SubjectEnvBool(kind, suffix string, legacy []string, fallback bool) bool {
-	if value, ok := EnvMaybe(SubjectPrefix(kind) + suffix); ok {
-		return ParseBoolDefault(value, fallback)
-	}
-	for _, key := range legacy {
-		if value, ok := EnvMaybe(key); ok {
-			return ParseBoolDefault(value, fallback)
-		}
-	}
-	return fallback
-}
-
 func EnvFloat(name string, fallback float64) float64 {
 	value := strings.TrimSpace(os.Getenv(name))
 	if value == "" {
@@ -294,33 +151,6 @@ func EnvFloat(name string, fallback float64) float64 {
 		return fallback
 	}
 	return parsed
-}
-
-func ParseFloatDefault(value string, fallback float64) float64 {
-	parsed, err := strconv.ParseFloat(value, 64)
-	if err != nil {
-		return fallback
-	}
-	return parsed
-}
-
-func SubjectEnvFloat(kind, suffix string, legacy []string, fallback float64) float64 {
-	if value, ok := EnvMaybe(SubjectPrefix(kind) + suffix); ok {
-		return ParseFloatDefault(value, fallback)
-	}
-	for _, key := range legacy {
-		if value, ok := EnvMaybe(key); ok {
-			return ParseFloatDefault(value, fallback)
-		}
-	}
-	return fallback
-}
-
-func AtoiDefault(s string, fallback int) int {
-	if n, err := strconv.Atoi(strings.TrimSpace(s)); err == nil {
-		return n
-	}
-	return fallback
 }
 
 func ClampIntString(value, fallback string, min, max int) string {

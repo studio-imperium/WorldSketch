@@ -29,13 +29,13 @@ export function createPrimitive(type, id, seed = {}) {
 
 // --- Edge outlines ------------------------------------------------------------
 // Every block-out mesh carries a line outline on its edges, tinted to the mesh's own
-// base colour at 70% brightness, so blocks and floor tiles read as distinct volumes.
+// base colour at 70% brightness, so adjacent blocks read as distinct volumes.
 // The outline is a child of its mesh (it follows moves/scales/rolls for free) and is
 // flagged with userData.isEdgeOutline so captures and hide-paths can switch it off.
 
 const EDGE_DARKEN = 0.7 // "30% darker" than the base colour
 
-export function edgeOutlineColor(baseColor) {
+function edgeOutlineColor(baseColor) {
 	const color = new THREE.Color(baseColor)
 	color.convertLinearToSRGB() // darken in display space so the 30% matches what the eye sees
 	color.multiplyScalar(EDGE_DARKEN)
@@ -43,7 +43,7 @@ export function edgeOutlineColor(baseColor) {
 	return color
 }
 
-export function addEdgeOutline(mesh, baseColor, { threshold = 1 } = {}) {
+function addEdgeOutline(mesh, baseColor, { threshold = 1 } = {}) {
 	const edges = new THREE.LineSegments(
 		new THREE.EdgesGeometry(mesh.geometry, threshold),
 		new THREE.LineBasicMaterial({ color: edgeOutlineColor(baseColor) }),

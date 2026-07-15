@@ -8,7 +8,7 @@ import (
 // The single scene prompt covers both grounded and floorless block-outs: floors render
 // only when the block-out contains one, and nothing may be invented around the shapes.
 func TestScenePromptCoreInvariants(t *testing.T) {
-	prompt := Scene("a spaceship", false)
+	prompt := Scene("a spaceship")
 	for _, want := range []string{
 		"ISOMETRIC BLOCK-OUT",
 		"SPATIAL FIDELITY IS THE TOP PRIORITY",
@@ -26,18 +26,5 @@ func TestScenePromptCoreInvariants(t *testing.T) {
 		if !strings.Contains(prompt, want) {
 			t.Fatalf("scene prompt missing %q", want)
 		}
-	}
-}
-
-func TestScenePromptIdenticalForGroundedScenes(t *testing.T) {
-	if Scene("a campsite", true) != Scene("a campsite", false) {
-		t.Fatal("grounded and floorless scenes should share the one block-out prompt")
-	}
-}
-
-func TestImageForRoutesSceneKind(t *testing.T) {
-	prompt := ImageFor("scene", "forest", "", "", true, 3)
-	if !strings.Contains(prompt, "Scene context: forest") {
-		t.Fatal("scene description was not propagated through ImageFor")
 	}
 }

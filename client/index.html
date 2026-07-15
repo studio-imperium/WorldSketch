@@ -92,7 +92,7 @@
 				<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.325 4.317c.426 -1.756 2.924 -1.756 3.35 0a1.724 1.724 0 0 0 2.573 1.066c1.543 -.94 3.31 .826 2.37 2.37a1.724 1.724 0 0 0 1.065 2.572c1.756 .426 1.756 2.924 0 3.35a1.724 1.724 0 0 0 -1.066 2.573c.94 1.543 -.826 3.31 -2.37 2.37a1.724 1.724 0 0 0 -2.572 1.065c-.426 1.756 -2.924 1.756 -3.35 0a1.724 1.724 0 0 0 -2.573 -1.066c-1.543 .94 -3.31 -.826 -2.37 -2.37a1.724 1.724 0 0 0 -1.065 -2.572c-1.756 -.426 -1.756 -2.924 0 -3.35a1.724 1.724 0 0 0 1.066 -2.573c-.94 -1.543 .826 -3.31 2.37 -2.37c1 .608 2.296 .07 2.572 -1.065z"></path><path d="M9 12a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
 			</button>
 			<div class="settings-popover hidden" id="settings_popover" role="menu">
-				<button class="settings-item" id="floor_shot_btn" title="Download the complete isometric scene capture used for generation">
+				<button class="settings-item" id="scene_shot_btn" title="Download the complete isometric scene capture used for generation">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 7h2l2 -2h6l2 2h2a2 2 0 0 1 2 2v9a2 2 0 0 1 -2 2h-14a2 2 0 0 1 -2 -2v-9a2 2 0 0 1 2 -2"></path><path d="M9 13a3 3 0 1 0 6 0a3 3 0 0 0 -6 0"></path></svg>
 					<span>Screenshot scene</span>
 				</button>
@@ -101,10 +101,10 @@
 					<span>View raw splat</span>
 					<input type="file" id="view_raw_splat_input" accept=".splat,.ply" hidden>
 				</label>
-				<label class="settings-item" id="upload_splats_label" title="Upload one or more .splat/.ply files and fit them to the current primitives">
+				<label class="settings-item" id="upload_scene_splat_label" title="Upload one complete-scene .splat/.ply file and fit it to the current block-out">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"></path><path d="M7 9l5 -5l5 5"></path><path d="M12 4l0 12"></path></svg>
-					<span>Upload + fit splats</span>
-					<input type="file" id="upload_splats_input" accept=".splat,.ply" multiple hidden>
+					<span>Upload + fit scene</span>
+					<input type="file" id="upload_scene_splat_input" accept=".splat,.ply" hidden>
 				</label>
 				<button class="settings-item" id="download_prims_btn" title="Save the block-out primitives to a JSON file">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h10l4 4v10a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2"></path><path d="M12 14m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"></path><path d="M14 4l0 4l-6 0l0 -4"></path></svg>
@@ -137,7 +137,7 @@
 					<span>Bounds</span>
 					<input type="checkbox" id="show_splat_box_input" class="toggle toggle-sm">
 				</label>
-				<label class="settings-item settings-toggle" title="Show or hide only the generated floor splat; object and remainder splats stay visible">
+				<label class="settings-item settings-toggle" title="Show or hide the segmented floor piece; object and remainder pieces stay visible">
 					<span>Splat floor</span>
 					<input type="checkbox" id="show_splat_floor_input" class="toggle toggle-sm" checked>
 				</label>

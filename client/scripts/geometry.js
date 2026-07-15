@@ -1,13 +1,9 @@
 import * as THREE from "three"
 
-// Object grouping + sizing for modular world generation.
-//
-// A cluster of connected primitives is one logical object (a whole house = walls +
-// roof + door), where "connected" is general: face-snapped, touching, OR overlapping. We recover
-// those groups at generation time as connected components of the primitives whose
-// (slightly expanded) axis-aligned boxes overlap. The ground is NOT in this graph —
-// it is generated separately as the floor — so objects that merely rest on the
-// ground stay distinct from each other.
+// Group connected block-out primitives for one-shot scene segmentation and selection.
+// A cluster of face-snapped, touching, or overlapping blocks is one logical object
+// (for example, a house made from walls, roof, and door). Ground is deliberately not
+// part of this graph, so separate objects resting on it remain distinct.
 
 const TOUCH_EPS = 0.06 // world units of slack so snapped-face neighbours read as touching
 
@@ -16,7 +12,7 @@ const _corner = new THREE.Vector3()
 // AABB of a single primitive in world/plot-local space. The world group sits at the
 // origin with no transform, so the two frames coincide. Computed from the geometry's
 // bounding box (not setFromObject) so selection-outline children never inflate it.
-export function primitiveBox(mesh, target = new THREE.Box3()) {
+function primitiveBox(mesh, target = new THREE.Box3()) {
 	if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
 	const bb = mesh.geometry.boundingBox
 	mesh.updateMatrixWorld(true)
@@ -29,9 +25,8 @@ export function primitiveBox(mesh, target = new THREE.Box3()) {
 	return target
 }
 
-// Group primitives into objects by touching-box connectivity (union-find). Each
-// object carries its source meshes and the union AABB of its colliders (the target
-// the splat is fitted into). Shape count (primitives.length) drives the step budget.
+// Group primitives by touching-box connectivity (union-find). Each group carries its
+// source meshes and their union AABB for selection and segmentation matching.
 export function computeObjects(primitives) {
 	const n = primitives.length
 	if (!n) return []
@@ -65,4 +60,3 @@ export function computeObjects(primitives) {
 		return { primitives: idxs.map(i => primitives[i]), box }
 	})
 }
-

@@ -16,39 +16,6 @@ import (
 	"worldsketch/server/internal/httpx"
 )
 
-func OpenAIGround(image, mask []byte, promptText string, settings config.ImageEditSettings) ([]byte, error) {
-	key := os.Getenv("OPENAI_API_KEY")
-	if key == "" {
-		return nil, errors.New("OPENAI_API_KEY is not set (required for ground expansion)")
-	}
-
-	var body bytes.Buffer
-	writer := multipart.NewWriter(&body)
-	writeImageEditFields(writer, settings, promptText)
-
-	part, err := httpx.CreatePNGFormFile(writer, "image", "ground.png")
-	if err != nil {
-		return nil, err
-	}
-	if _, err := part.Write(image); err != nil {
-		return nil, err
-	}
-	if len(mask) > 0 {
-		mpart, err := httpx.CreatePNGFormFile(writer, "mask", "mask.png")
-		if err != nil {
-			return nil, err
-		}
-		if _, err := mpart.Write(mask); err != nil {
-			return nil, err
-		}
-	}
-	if err := writer.Close(); err != nil {
-		return nil, err
-	}
-
-	return doOpenAIImageEdit(key, &body, writer.FormDataContentType(), "openai ground edit")
-}
-
 func OpenAIEdit(image, materialImage []byte, promptText string, settings config.ImageEditSettings) ([]byte, error) {
 	key := os.Getenv("OPENAI_API_KEY")
 	if key == "" {
@@ -187,68 +154,16 @@ func GeminiEdit(image, materialImage []byte, promptText, model string) ([]byte, 
 	return nil, errors.New("gemini image edit returned no image")
 }
 
-// GeminiText runs a JSON-mode prompt (optionally with one inline image, e.g. the
-// user's top-down sketch for the scene planner) and returns the raw text response.
-// thinkingBudget caps Gemini 2.5's hidden reasoning tokens — the default (unlimited)
-// thinking costs 20-30s of wall time on a plan call; a low cap keeps a little planning
-// depth at a few seconds. Negative = no cap (model default).
-func GeminiText(promptText string, image []byte, model string, thinkingBudget int) (string, error) {
+// GeminiText runs a JSON-mode prompt with an optional inline image and returns the raw
+// text response.
+func GeminiText(promptText string, image []byte, model string) (string, error) {
 	key := config.GeminiAPIKey()
 	if key == "" {
 		return "", errors.New("GEMINI_API_KEY is not set (and not found in the Viggle backend .env)")
-	}
-	generationConfig := map[string]any{"responseMimeType": "application/json"}
-	if thinkingBudget >= 0 {
-		generationConfig["thinkingConfig"] = map[string]any{"thinkingBudget": thinkingBudget}
 	}
 	parts := []map[string]any{{"text": promptText}}
 	if len(image) > 0 {
 		parts = append(parts, map[string]any{"inlineData": map[string]string{"mimeType": "image/png", "data": base64.StdEncoding.EncodeToString(image)}})
-	}
-	payload, err := json.Marshal(map[string]any{
-		"contents":         []map[string]any{{"role": "user", "parts": parts}},
-		"generationConfig": generationConfig,
-	})
-	if err != nil {
-		return "", err
-	}
-
-	data, err := doGemini(model, key, payload, "gemini plan")
-	if err != nil {
-		return "", err
-	}
-
-	var parsed struct {
-		Candidates []struct {
-			Content struct {
-				Parts []struct {
-					Text string `json:"text"`
-				} `json:"parts"`
-			} `json:"content"`
-		} `json:"candidates"`
-	}
-	if err := json.Unmarshal(data, &parsed); err != nil {
-		return "", err
-	}
-	var sb strings.Builder
-	for _, candidate := range parsed.Candidates {
-		for _, part := range candidate.Content.Parts {
-			sb.WriteString(part.Text)
-		}
-	}
-	return strings.TrimSpace(sb.String()), nil
-}
-
-func GeminiIdentify(image []byte, promptText string) (string, error) {
-	key := config.GeminiAPIKey()
-	if key == "" {
-		return "", errors.New("GEMINI_API_KEY is not set (and not found in the Viggle backend .env)")
-	}
-	model := config.Env("WS_GEMINI_IDENTIFY_MODEL", "gemini-2.5-flash")
-
-	parts := []map[string]any{
-		{"text": promptText},
-		{"inlineData": map[string]string{"mimeType": "image/png", "data": base64.StdEncoding.EncodeToString(image)}},
 	}
 	payload, err := json.Marshal(map[string]any{
 		"contents":         []map[string]any{{"role": "user", "parts": parts}},
@@ -258,7 +173,7 @@ func GeminiIdentify(image []byte, promptText string) (string, error) {
 		return "", err
 	}
 
-	data, err := doGemini(model, key, payload, "gemini identify")
+	data, err := doGemini(model, key, payload, "gemini scene boxes")
 	if err != nil {
 		return "", err
 	}

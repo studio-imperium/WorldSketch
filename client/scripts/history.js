@@ -1,5 +1,5 @@
 // Persistent build history. Each completed generateWorld() build — the block-out at
-// build time, every subject's raw splat bytes, the prompt + a thumbnail — is saved to
+// build time, its pristine one-shot scene splat, the prompt + a thumbnail — is saved to
 // IndexedDB so prior builds survive reloads and can be restored without regenerating.
 // Storage is split into a light `meta` store (prompt + thumbnail + manifest, listed
 // cheaply in the history panel) and a heavy `splats` store (the RAW splat bytes,
@@ -8,8 +8,8 @@
 
 const DB_NAME = "worldsketch_builds"
 const DB_VERSION = 1
-const META_STORE = "meta"     // { id, ts, prompt, thumb, subjectCount, subjects, primitives }
-const SPLAT_STORE = "splats"  // { id, splats: { [name]: Uint8Array } }
+const META_STORE = "meta"     // { id, ts, prompt, thumb, scene, primitives }
+const SPLAT_STORE = "splats"  // { id, scene: Uint8Array }
 const MAX_ENTRIES = 20        // cap so the splat blobs don't grow without bound
 
 let dbPromise = null
@@ -34,28 +34,24 @@ function openDB() {
 	return dbPromise
 }
 
-// Save one completed build. `splats` is the live `splatStore` (Map name → Uint8Array)
-// or a plain {name: bytes} object; the bytes are COPIED (slice) so the splat loader
-// can't detach the originals out from under us. `subjects` is the sessionSubjects
-// manifest and `primitives` the serialized block-out (JSON string) — both are needed
-// to re-seat on restore. Returns the stored meta incl. its assigned id.
-export async function addBuild({ prompt, thumb, subjects, primitives, splats }) {
-	const pairs = splats instanceof Map ? [...splats] : Object.entries(splats || {})
-	const splatMap = {}
-	for (const [name, bytes] of pairs) splatMap[name] = bytes.slice() // independent copy
+// Save one completed one-shot build. The raw scene bytes are copied so the splat loader
+// cannot detach the live buffer. Scene fit metadata and the serialized block-out are
+// both needed to re-seat it on restore.
+export async function addBuild({ prompt, thumb, scene, primitives, splat }) {
+	if (!splat) throw new Error("cannot save build without a scene splat")
+	const sceneBytes = splat.slice()
 	const meta = {
 		ts: Date.now(),
 		prompt: prompt || "",
 		thumb: thumb || "",
-		subjectCount: pairs.length,
-		subjects: (subjects || []).map(s => ({ ...s })),
+		scene: { ...(scene || {}) },
 		primitives: primitives || "",
 	}
 	const db = await openDB()
 	const id = await new Promise((resolve, reject) => {
 		const t = db.transaction([META_STORE, SPLAT_STORE], "readwrite")
 		const addReq = t.objectStore(META_STORE).add(meta)
-		addReq.onsuccess = () => t.objectStore(SPLAT_STORE).put({ id: addReq.result, splats: splatMap })
+		addReq.onsuccess = () => t.objectStore(SPLAT_STORE).put({ id: addReq.result, scene: sceneBytes })
 		t.oncomplete = () => resolve(addReq.result)
 		t.onerror = () => reject(t.error)
 		t.onabort = () => reject(t.error)
@@ -74,12 +70,13 @@ export async function listBuilds() {
 	})
 }
 
-// The raw splat bytes map ({name: Uint8Array}) for one build, or null if missing.
-export async function getBuildSplats(id) {
+// The raw one-shot scene bytes for a build, or null if missing. The fallback reads
+// one-shot entries saved before the storage shape was narrowed from a named map.
+export async function getBuildSceneSplat(id) {
 	const db = await openDB()
 	return new Promise((resolve, reject) => {
 		const req = db.transaction(SPLAT_STORE, "readonly").objectStore(SPLAT_STORE).get(id)
-		req.onsuccess = () => resolve(req.result?.splats || null)
+		req.onsuccess = () => resolve(req.result?.scene ?? req.result?.splats?.scene ?? null)
 		req.onerror = () => reject(req.error)
 	})
 }
