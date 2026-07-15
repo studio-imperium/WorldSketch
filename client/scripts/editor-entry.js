@@ -5,7 +5,7 @@ try {
 	const runtimeConfig = await getConfig()
 	configureHuggingFaceAuth(runtimeConfig?.generation)
 	if (!getHuggingFaceAuth().signedIn) location.replace("/")
-	else await import("/scripts/renderer.js?v=auth-landing-1")
+	else await import("/scripts/renderer.js?v=ui-nav-3")
 } catch (error) {
 	console.error("Editor startup failed:", error)
 	location.replace("/")

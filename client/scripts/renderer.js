@@ -2420,14 +2420,16 @@ function renderFramesPanel() {
 		els.frameAdd.setAttribute("aria-label", addTitle)
 	}
 	els.framesList.replaceChildren()
+	let activeRow = null
 	for (const frame of frames[uiTab]) {
 		const active = frame.id === activeFrameId[uiTab]
 		const item = document.createElement("li")
-		item.className = "frame-item"
+		item.className = "frame-item" + (active ? " is-active" : "")
 		const row = document.createElement("button")
 		row.className = "frame-row" + (active ? " menu-active" : "")
 		row.type = "button"
 		row.setAttribute("aria-pressed", String(active))
+		if (active) activeRow = row
 		const name = document.createElement("span")
 		name.className = "frame-name"
 		name.textContent = frame.name
@@ -2447,6 +2449,7 @@ function renderFramesPanel() {
 		item.append(row, del)
 		els.framesList.appendChild(item)
 	}
+	activeRow?.scrollIntoView({ block: "nearest" })
 	persistFramesSoon() // every frame add/delete/switch re-renders, so this catches them all
 }
 
@@ -5727,7 +5730,7 @@ async function generateWorld(prompt) {
 			theta: FRONT_THETA + Math.round((orbit.theta - FRONT_THETA) / QUARTER) * QUARTER,
 			phi: FRONT_PHI,
 		}
-		const capture = await captureWorld(renderer, scene, world, box, null, viewAngles)
+		const capture = await captureWorld(renderer, scene, world, box, objectGroups, viewAngles)
 		const captureMs = performance.now() - tCap
 		// The image editor is asked to preserve the camera and composition, so the original object
 		// bounds remain the most reliable boxes for later splat segmentation.
@@ -5739,6 +5742,7 @@ async function generateWorld(prompt) {
 		const { bytes } = await generateSceneOnHuggingFace({
 			prompt,
 			image: capture.guide,
+			geometryImage: capture.semanticMap,
 			useInferenceCredits,
 			signal: generationAbort.signal,
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),

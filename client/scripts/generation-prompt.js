@@ -1,19 +1,26 @@
-export function sceneGenerationPrompt(scene = "") {
-	return `Transform the supplied block-out into a richly detailed, production-quality isometric environment.
+export function sceneGenerationPrompt(scene = "", { hasGeometryReference = false } = {}) {
+	const geometryReference = hasGeometryReference
+		? `Image 1 is the render to edit. Image 2 is an exactly aligned segmentation map of the same block-out. The artificial colors in Image 2 are geometry masks only: use them to lock every occupied region, object boundary, and empty region, but never copy those colors or treat Image 2 as an appearance reference.`
+		: `Image 1 is the render to edit and the authoritative geometry reference.`
+	return `Perform a constrained texture-and-surface-detail edit of Image 1. This is not permission to generate or redesign a new scene.
 
-The image is a player-made 3D block-out. Preserve its exact camera angle, orthographic perspective, framing, footprint, silhouette, height relationships, major volumes, paths, terrain boundaries, openings, and object placement. The result must clearly depict the same structure. Do not rotate, mirror, flatten, simplify, crop, or substantially redesign it.
+${geometryReference}
 
-Interpret every primitive shape as finished architecture or environment design. Turn the blocks into believable buildings, towers, walls, gatehouses, roofs, windows, doors, balconies, supports, stairs, fences, paths, terrain, trees, water, and other appropriate features. The flat colors are rough semantic hints, not final materials.
+GEOMETRY IS IMMUTABLE. Preserve the exact camera, orthographic projection, framing, object count, connected components, position, footprint, projected silhouette, height, width, depth, orientation, occlusion, openings, terrain boundary, and negative space of the input. Do not move, resize, rotate, mirror, crop, merge, split, complete, or reinterpret any volume.
 
-Render a highly detailed handcrafted miniature diorama with warm natural lighting, painterly realism, crisp readable forms, soft ambient shadows, strong contact shadows, and richly authored materials. Add weathered stone, aged plaster, dark ceramic roof tiles, exposed wooden beams, carved doors, small balconies, railings, windows, gutters, pipes, lanterns, flower pots, vines, moss, shrubs, grass, flowers, dirt, chipped edges, and believable material variation where appropriate. Add environmental storytelling without hiding or moving the source construction.
+Apply new materials and fine detail only inside the pixels and silhouettes already occupied by each source shape. Treat every primitive as a strict spatial mask. Surface texture, shallow joints, seams, grain, small cracks, restrained edge wear, and material variation are allowed; new masses, extensions, overhangs, roofs, branches, props, or silhouettes are forbidden.
 
-Replace natural-geometry blocks with organic trees, layered foliage, branches, roots, rocks, grasses, soil, flowers, and worn paths while preserving their original position, scale, and silhouette.
+Preserve the exact number and scale of objects. A single cube must remain one cube-sized object in the same position; never expand it into a house, compound building, tower complex, or collection of props. A simple source shape must not become a larger or more complex structure than its original occupied volume.
 
-Keep the entire environment visible and centered with comfortable margins. Preserve the input's three-quarter isometric view. Keep the clean isolated diorama base and pure black background. Do not add sky, horizon, distant scenery, editor overlays, grid lines, selection outlines, text, or white borders.
+Preserve the ground exactly. Keep its arbitrary outline, size, thickness, and location pixel-for-pixel. Never regularize it into a rectangle, square, oval, raised display plinth, or new diorama base. Do not place new objects, vegetation, walls, paths, rocks, buildings, or decorations on otherwise empty ground.
 
-Do not produce flat colored cubes, voxel art, Minecraft-style graphics, low-poly prototype geometry, plastic materials, simplified cartoon buildings, blurry surfaces, or generic concept art that ignores the input.
+Everything outside the existing foreground silhouettes must remain the same pure black background. Do not add sky, horizon, distant scenery, shadows in empty space, borders, text, or editor overlays.
 
-Mentally trace the input's major silhouette and edges before editing. Add detail directly onto the existing geometry. Structural preservation is mandatory.
+Within those strict geometric limits, render a crisp, richly textured stylized 3D game asset with warm natural light, clear material identity, fine world-scale texture, contact shadows, and polished production detail. The flat source colors are semantic hints rather than final materials, but they do not authorize any geometric invention.
 
-Scene description: ${String(scene || "A coherent handcrafted environment").trim()}`
+The scene description supplies material and identity guidance only. It never overrides the source geometry or permits an absent feature to be added.
+
+Scene description: ${String(scene || "A coherent stylized environment").trim()}
+
+Final check before rendering: every output silhouette and occupied region must trace back to the same region in the input images. When detail conflicts with structural preservation, preserve the structure and omit the detail.`
 }

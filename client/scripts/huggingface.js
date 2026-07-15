@@ -121,10 +121,13 @@ function randomSeed() {
 	return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff
 }
 
-export async function generateSceneOnHuggingFace({ prompt, image, useInferenceCredits = false, signal, onProgress }) {
+export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress }) {
 	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
 	try {
-		const detailPrompt = sceneGenerationPrompt(prompt)
+		// The public Space supports multiple aligned edit images. The paid inference API
+		// accepts one image only, so mention the geometry map only on the path that sends it.
+		const useGeometryReference = !useInferenceCredits && Boolean(geometryImage)
+		const detailPrompt = sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference })
 		let editedImage
 		if (useInferenceCredits) {
 			onProgress?.(0.12, "Using inference credits for image detail")
@@ -147,6 +150,7 @@ export async function generateSceneOnHuggingFace({ prompt, image, useInferenceCr
 			onProgress?.(0.12, "Uploading the block-out")
 			const imageData = await runSpace(config.imageSpace, "/infer", fluxKleinEditPayload({
 				file: handle_file(image),
+				geometryFile: useGeometryReference ? handle_file(geometryImage) : null,
 				prompt: detailPrompt,
 				seed: randomSeed(),
 				settings: config.image,

@@ -1,4 +1,6 @@
 html {
+	--color-primary: #5b6ee1;
+	--color-primary-content: #fff;
 	background: #fcfcfc;
 	color: #1f2328;
 	font-size: 0.9rem;
@@ -319,7 +321,8 @@ body.tab-view canvas.is-splat-rotate {
 	width: 100%;
 	padding: 0;
 	gap: 0.2rem;
-	max-height: 50vh;
+	flex-wrap: nowrap;
+	max-height: min(30vh, 11rem);
 	overflow-y: auto;
 }
 
@@ -337,6 +340,8 @@ body.tab-view canvas.is-splat-rotate {
 }
 
 .frame-row.menu-active {
+	background-color: var(--color-primary);
+	color: var(--color-primary-content);
 	font-weight: 650;
 }
 
@@ -364,6 +369,10 @@ body.tab-view canvas.is-splat-rotate {
 .frame-item:hover .frame-del,
 .frame-item:focus-within .frame-del {
 	opacity: 1;
+}
+
+.frame-item.is-active .frame-del {
+	color: var(--color-primary-content);
 }
 
 @media (hover: none) {

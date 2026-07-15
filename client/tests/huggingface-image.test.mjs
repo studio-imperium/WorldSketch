@@ -23,3 +23,19 @@ test("builds the live FLUX.2 Klein image-edit request", () => {
 		prompt_upsampling: false,
 	})
 })
+
+test("adds the aligned geometry map as a second Flux edit image", () => {
+	const file = { blob: "guide" }
+	const geometryFile = { blob: "geometry" }
+	const payload = fluxKleinEditPayload({
+		file,
+		geometryFile,
+		prompt: "Preserve every mask",
+		seed: 42,
+		settings: { width: 1024, height: 1024, steps: 4, guidance: 1 },
+	})
+	assert.deepEqual(payload.input_images, [
+		{ image: file, caption: null },
+		{ image: geometryFile, caption: null },
+	])
+})
