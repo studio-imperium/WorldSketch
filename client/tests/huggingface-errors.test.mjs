@@ -52,6 +52,14 @@ test("explains when inference credits are unavailable", () => {
 	assert.match(result.message, /monthly inference credit or billing settings/)
 })
 
+test("names a non-image inference task accurately", () => {
+	const result = friendlyHuggingFaceError(new Error("402 Payment required: insufficient inference credits"), {
+		useInferenceCredits: true,
+		inferenceTask: "geometry generation",
+	})
+	assert.match(result.message, /run geometry generation/)
+})
+
 test("explains when the inference-api OAuth permission is missing", () => {
 	const result = friendlyHuggingFaceError(new Error("403 missing inference-api scope"), { useInferenceCredits: true })
 	assert.match(result.message, /Sign out and sign in again/)

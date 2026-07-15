@@ -893,6 +893,10 @@ body.tab-view .side-rail {
 	display: none;
 }
 
+body.tab-view .geometry-prompt-dock {
+	display: none;
+}
+
 .inspector {
 	width: 18rem;
 }
@@ -1753,6 +1757,48 @@ input[type="color"] {
 
 /* --- Camera bar: fly mode + shot path (bottom-right) ------------------------- */
 
+.geometry-prompt-dock {
+	position: absolute;
+	right: 1rem;
+	bottom: 4.55rem;
+	display: flex;
+	align-items: center;
+	gap: 0.25rem;
+	width: min(22rem, calc(100vw - 2rem));
+	box-sizing: border-box;
+	padding: 0.35rem;
+	border-radius: 0.85rem;
+}
+
+.geometry-prompt-input {
+	flex: 1;
+	min-width: 0;
+	border: 0;
+	outline: 0;
+	box-shadow: none;
+}
+
+.geometry-prompt-input:focus,
+.geometry-prompt-input:focus-within {
+	border: 0;
+	outline: 0;
+	box-shadow: none;
+}
+
+.geometry-prompt-submit svg {
+	width: 1.05rem;
+	height: 1.05rem;
+	fill: none;
+	stroke: currentColor;
+	stroke-width: 1.8;
+	stroke-linecap: round;
+	stroke-linejoin: round;
+}
+
+.geometry-prompt-submit.is-loading svg {
+	display: none;
+}
+
 .cam-bar {
 	position: absolute;
 	right: 1rem;
@@ -1883,7 +1929,7 @@ input[type="color"] {
 
 /* Flying: fade the editing chrome so the world fills the screen (the hint stays). */
 body.is-flying .view-tabs, body.is-flying .frames-panel, body.is-flying .side-rail,
-body.is-flying .bottom-dock, body.is-flying .settings-menu, body.is-flying .cam-bar {
+body.is-flying .bottom-dock, body.is-flying .settings-menu, body.is-flying .geometry-prompt-dock, body.is-flying .cam-bar {
 	opacity: 0.12;
 	pointer-events: none;
 	transition: opacity 0.25s ease;

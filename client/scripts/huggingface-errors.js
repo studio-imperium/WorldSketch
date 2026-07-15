@@ -16,7 +16,10 @@ function providerDetails(message) {
 	return ` Hugging Face details: ${message}`
 }
 
-export function friendlyHuggingFaceError(error, { useInferenceCredits = false } = {}) {
+export function friendlyHuggingFaceError(error, {
+	useInferenceCredits = false,
+	inferenceTask = "the inference-credit image step",
+} = {}) {
 	const message = String(error?.message || error || "Generation failed")
 	if (/requested GPU duration.*larger than the maximum allowed/i.test(message)) {
 		const requested = message.match(/requested GPU duration\s*\(\s*(\d+(?:\.\d+)?)s\s*\)/i)?.[1]
@@ -38,10 +41,10 @@ export function friendlyHuggingFaceError(error, { useInferenceCredits = false } 
 		return new Error(`Hugging Face declined this GPU job because your account's daily run limit was reached.${retrySentence(message)}${providerDetails(message)}`)
 	}
 	if (useInferenceCredits && /inference.*(?:permission|scope)|missing.*inference-api|(?:^|\D)(?:401|403)(?:\D|$)/i.test(message)) {
-		return new Error(`Hugging Face did not allow the inference-credit image step. Sign out and sign in again so WorldSketch can request the inference-api permission.${providerDetails(message)}`)
+		return new Error(`Hugging Face did not allow ${inferenceTask}. Sign out and sign in again so WorldSketch can request the inference-api permission.${providerDetails(message)}`)
 	}
 	if (useInferenceCredits && /inference.*credit|monthly.*credit|insufficient.*credit|payment required|(?:^|\D)402(?:\D|$)/i.test(message)) {
-		return new Error(`Hugging Face could not run the inference-credit image step. Check your monthly inference credit or billing settings.${providerDetails(message)}`)
+		return new Error(`Hugging Face could not run ${inferenceTask}. Check your monthly inference credit or billing settings.${providerDetails(message)}`)
 	}
 
 	if (/quota|gpu.?time|exceeded.*usage/i.test(message)) {

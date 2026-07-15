@@ -14,6 +14,8 @@ import { computeObjects } from "/scripts/geometry.js"
 import { clearSelectionOutline, createPrimitive, createSelectionOutline, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js"
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
+import { generateGeometryOnHuggingFace } from "/scripts/geometry-generation.js?v=geometry-dev-1"
+import { MAX_GENERATED_PRIMITIVES } from "/scripts/geometry-generation-request.js?v=geometry-dev-1"
 import { createSky } from "/scripts/sky.js"
 import { cloneGroundStrokes, closeGroundStroke, paintGroundStroke } from "/scripts/ground-strokes.js"
 
@@ -80,6 +82,7 @@ let nextPrimitiveId = 1
 let generating = false
 let splatting = false // a SPLAT generation is in flight (drives the View tab's disabled+spinner gate)
 let generationAbort = null
+let geometryGenerating = false
 
 // Raw one-shot scene bytes + metadata kept in memory for ZIP export and re-fitting.
 let sceneSplat = null
@@ -187,6 +190,9 @@ const els = {
 	shotAdd: document.getElementById("shot_add_btn"),
 	shotPlay: document.getElementById("shot_play_btn"),
 	shotExport: document.getElementById("shot_export_btn"),
+	geometryPromptForm: document.getElementById("geometry_prompt_form"),
+	geometryPromptInput: document.getElementById("geometry_prompt_input"),
+	geometryPromptSubmit: document.getElementById("geometry_prompt_submit"),
 	chatForm: document.getElementById("chat_form"),
 	chatPrompt: document.getElementById("chat_prompt"),
 	sceneShot: document.getElementById("scene_shot_btn"),
@@ -2776,6 +2782,20 @@ function hideProgress() {
 	els.progressTrack.setAttribute("aria-valuenow", "0")
 }
 
+function syncGeometryPrompt() {
+	if (!els.geometryPromptSubmit) return
+	const signedIn = getHuggingFaceAuth().signedIn
+	els.geometryPromptSubmit.disabled = generating || !signedIn
+	if (els.geometryPromptInput) els.geometryPromptInput.disabled = generating
+	els.geometryPromptSubmit.classList.toggle("is-loading", geometryGenerating)
+	els.geometryPromptSubmit.querySelector(".loading")?.classList.toggle("hidden", !geometryGenerating)
+	els.geometryPromptSubmit.title = geometryGenerating
+		? "Generating a replacement build…"
+		: signedIn
+			? "Replace this build with generated geometry (uses inference credits)"
+			: "Sign in with Hugging Face to generate geometry"
+}
+
 function syncGenerateButton() {
 	els.generate.disabled = generating
 	els.generate.classList.toggle("is-disabled", generating)
@@ -2788,7 +2808,38 @@ function syncGenerateButton() {
 	if (generating) {
 		if (placementPreview) placementPreview.visible = false // no frozen ghost block mid-air
 	}
+	syncGeometryPrompt()
 	syncViewGate()
+}
+
+async function generateBuildGeometry(prompt) {
+	const description = String(prompt ?? "").trim()
+	if (!description || generating) return
+	geometryGenerating = true
+	generating = true
+	syncGenerateButton()
+	setStatus("Generating a compact replacement build…")
+	try {
+		const json = await generateGeometryOnHuggingFace(description)
+		const geometry = validatedBuildGeometryJson(json)
+		if (geometry.primitives.length > MAX_GENERATED_PRIMITIVES) {
+			throw new Error(`The geometry model returned more than ${MAX_GENERATED_PRIMITIVES} blocks`)
+		}
+		if (!geometry.ground) {
+			geometry.ground = { size: GROUND_SHEET_SIZE, complete: true, strokes: [] }
+		}
+		await replaceBuildGeometry(geometry)
+		world.prompt = description
+		if (els.chatPrompt) els.chatPrompt.value = description
+		persistFramesSoon()
+		setStatus(`Replaced the build with ${world.primitives.length} generated block${world.primitives.length === 1 ? "" : "s"}`)
+	} catch (error) {
+		setStatus(error.message || "Could not generate block geometry")
+	} finally {
+		geometryGenerating = false
+		generating = false
+		syncGenerateButton()
+	}
 }
 
 // Build is always available; View unlocks once the single scene splat has landed.
@@ -3075,19 +3126,28 @@ async function applyBuildGeometryJson() {
 		setBuildGeometryJsonStatus(error.message, "error")
 		return
 	}
+	try {
+		await replaceBuildGeometry(geometry)
+		setStatus(`Applied JSON build with ${world.primitives.length} block${world.primitives.length === 1 ? "" : "s"}`)
+	} catch (error) {
+		buildGeometryJsonHasError = true
+		setBuildGeometryJsonStatus(error.message || "Could not apply geometry", "error")
+	}
+}
+
+async function replaceBuildGeometry(geometry) {
+	if (buildGeometryJsonApplying) throw new Error("Another geometry update is already running")
 	buildGeometryJsonApplying = true
 	beginBuildAction()
 	try {
 		const file = new File([JSON.stringify(geometry)], "build-geometry.json", { type: "application/json" })
 		const applied = await applyPrimitives(file)
 		if (!applied) throw new Error("Could not apply geometry")
-		setStatus(`Applied JSON build with ${world.primitives.length} block${world.primitives.length === 1 ? "" : "s"}`)
 		syncBuildGeometryJson(true)
 	} catch (error) {
 		const rollback = activeBuildHistory()?.undo.pop()
 		if (rollback) await applyBuildSnapshot(rollback)
-		buildGeometryJsonHasError = true
-		setBuildGeometryJsonStatus(error.message || "Could not apply geometry", "error")
+		throw error
 	} finally {
 		buildGeometryJsonApplying = false
 	}
@@ -6642,6 +6702,18 @@ els.chatForm.addEventListener("submit", event => {
 	if (els.generate.disabled) return
 	const prompt = els.chatPrompt.value.trim()
 	generateWorld(prompt).catch(error => setStatus(error.message || "Could not start generation"))
+})
+
+els.geometryPromptForm?.addEventListener("submit", event => {
+	event.preventDefault()
+	if (els.geometryPromptSubmit?.disabled) return
+	const prompt = els.geometryPromptInput?.value.trim()
+	if (!prompt) {
+		setStatus("Describe the block geometry you want")
+		els.geometryPromptInput?.focus()
+		return
+	}
+	generateBuildGeometry(prompt)
 })
 
 els.hfSignOut?.addEventListener("click", () => {
