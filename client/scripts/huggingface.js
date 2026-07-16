@@ -8,14 +8,14 @@ import {
 } from "/scripts/huggingface-auth.js"
 import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=flat-ground-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
-import { imageEditRequest } from "/scripts/huggingface-image.js?v=akhaliq-edit-1"
+import { imageEditRequest, spaceSupportsGeometry } from "/scripts/huggingface-image.js?v=kontext-1"
 import { inferenceCreditImageRequest } from "/scripts/huggingface-provider.js"
 import { resolveAuthenticatedSpaceFileURL, resolveDirectGradioFileURL } from "/scripts/huggingface-url.js?v=direct-tripo-1"
 
 const DEFAULT_CONFIG = {
 	oauthClientId: "91581ad0-d16c-4f49-9746-cff21b50ac9e",
 	redirectUrl: "",
-	imageSpace: "akhaliq/Qwen-Image-Edit-2509",
+	imageSpace: "black-forest-labs/FLUX.1-Kontext-Dev",
 	tripoSpace: "VAST-AI/TripoSplat",
 	tripoDirectUrl: "",
 	inferenceProvider: "fal-ai",
@@ -314,9 +314,10 @@ export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), useI
 }
 
 export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress, onImageReady }) {
-	// The public Space supports multiple aligned edit images. The paid inference API
-	// accepts one image only, so mention the geometry map only on the path that sends it.
-	const useGeometryReference = !useInferenceCredits && Boolean(geometryImage)
+	// Multi-image Spaces take the aligned geometry map alongside the block-out;
+	// single-image routes (Kontext, the paid inference API) can't, so the prompt
+	// only mentions the geometry map on paths that actually send it.
+	const useGeometryReference = !useInferenceCredits && Boolean(geometryImage) && spaceSupportsGeometry(config.imageSpace)
 	const editedImage = await detailImageOnHuggingFace({
 		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference }),
 		image,

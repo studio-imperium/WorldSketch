@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { fluxEditPayload, imageEditRequest, qwenEditPayload } from "../scripts/huggingface-image.js"
+import { fluxEditPayload, imageEditRequest, qwenEditPayload, spaceSupportsGeometry } from "../scripts/huggingface-image.js"
 
 test("builds the live FLUX.2-dev image-edit request (no mode_choice)", () => {
 	const file = { blob: "guide" }
@@ -75,6 +75,25 @@ test("dispatches endpoint and payload builder by Space name", () => {
 	const akhaliq = imageEditRequest({ ...base, space: "akhaliq/Qwen-Image-Edit-2509" })
 	assert.equal(akhaliq.endpoint, "/edit_images")
 	assert.equal(akhaliq.payload.image2, file)
+	// Kontext must win over the generic /flux/ fallback (its name contains FLUX):
+	// single input image, the Space's own tuned sampler, no width/height knobs.
+	const kontext = imageEditRequest({ ...base, space: "black-forest-labs/FLUX.1-Kontext-Dev" })
+	assert.equal(kontext.endpoint, "/infer")
+	assert.deepEqual(kontext.payload, {
+		input_image: file,
+		prompt: "p",
+		seed: 1,
+		randomize_seed: false,
+		guidance_scale: 2.5,
+		steps: 28,
+	})
+})
+
+test("only multi-image Spaces advertise geometry-map support", () => {
+	assert.equal(spaceSupportsGeometry("black-forest-labs/FLUX.1-Kontext-Dev"), false)
+	assert.equal(spaceSupportsGeometry("akhaliq/Qwen-Image-Edit-2509"), true)
+	assert.equal(spaceSupportsGeometry("Qwen/Qwen-Image-Edit-2509"), true)
+	assert.equal(spaceSupportsGeometry("black-forest-labs/FLUX.2-dev"), true)
 })
 
 test("adds the aligned geometry map as a second Flux edit image", () => {

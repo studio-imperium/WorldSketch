@@ -59,10 +59,35 @@ export function akhaliqEditPayload({ file, geometryFile = null, prompt, seed }) 
 	}
 }
 
+// black-forest-labs/FLUX.1-Kontext-Dev: 12B editing model on the most popular
+// ZeroGPU Space on HF (warm workers ≈ no cold-load window to blow) — chosen
+// after every 20B Qwen route kept dying in the GPU queue. Single input image
+// only, so the geometry map is dropped on this Space (spaceSupportsGeometry
+// below keeps the prompt from referencing it). The Space's own tuned sampler
+// (28 steps, guidance 2.5) — WS_HF_IMAGE_STEPS/GUIDANCE do not apply.
+export function kontextEditPayload({ file, prompt, seed }) {
+	return {
+		input_image: file,
+		prompt,
+		seed,
+		randomize_seed: false,
+		guidance_scale: 2.5,
+		steps: 28,
+	}
+}
+
+// Single-image Spaces can't take the aligned geometry map; the scene prompt
+// must not mention a reference image that never arrives.
+export function spaceSupportsGeometry(space) {
+	return !/kontext/i.test(space || "")
+}
+
 // Space name → { endpoint, payload }: Spaces differ in both the endpoint name
-// and the /infer parameters, so both are chosen together.
+// and the /infer parameters, so both are chosen together. Kontext is matched
+// before the generic /flux/ fallback (its Space name contains "FLUX" too).
 export function imageEditRequest(request) {
 	const space = request.space || ""
+	if (/kontext/i.test(space)) return { endpoint: "/infer", payload: kontextEditPayload(request) }
 	if (/akhaliq\/qwen-image-edit-2509/i.test(space)) return { endpoint: "/edit_images", payload: akhaliqEditPayload(request) }
 	if (/qwen/i.test(space)) return { endpoint: "/infer", payload: qwenEditPayload(request) }
 	return { endpoint: "/infer", payload: fluxEditPayload(request) }
