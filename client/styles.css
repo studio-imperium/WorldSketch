@@ -363,6 +363,11 @@ body.tab-view canvas.is-splat-rotate {
 .frame-row {
 	display: flex !important;
 	align-items: center;
+	/* daisyUI's menu lets the button size to its label, overflowing the panel and
+	   running the name under the × — pin it to the item so the ellipsis can kick in. */
+	width: 100%;
+	max-width: 100%;
+	box-sizing: border-box;
 	min-height: 2.25rem;
 	padding: 0.45rem 2.5rem 0.45rem 0.65rem !important;
 	border-radius: 0.7rem;
