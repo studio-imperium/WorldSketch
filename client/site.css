@@ -3,8 +3,8 @@
 
 :root {
 	--paper: #fbfbfa;      /* page background */
-	--card: #efeeea;       /* showcase shell + tab strip */
-	--panel: #f5f4f1;      /* stage behind the splat — landing.js clears to this */
+	--card: #efeeea;       /* card shells (login) */
+	--panel: #f5f4f1;      /* soft panel tint (login) — the landing stage clears to white */
 	--ink: #0d0d0c;
 	--ink-soft: #3f3f3b;
 	--ink-faint: #6e6e68;
