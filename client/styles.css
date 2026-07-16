@@ -322,7 +322,7 @@ body.tab-view canvas.is-splat-rotate {
 	stroke-width: 1.8;
 	stroke-linecap: round;
 	stroke-linejoin: round;
-	color: color-mix(in srgb, var(--color-base-content) 58%, transparent);
+	color: var(--color-base-content);
 }
 
 .frames-head .card-title {

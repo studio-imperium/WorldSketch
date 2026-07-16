@@ -34,6 +34,18 @@ export async function loadFramesState() {
 	})
 }
 
+// Remove the saved record entirely so the next boot looks like a first visit.
+export async function clearFramesState() {
+	const db = await openDB()
+	return new Promise((resolve, reject) => {
+		const t = db.transaction(STORE, "readwrite")
+		t.objectStore(STORE).delete(KEY)
+		t.oncomplete = () => resolve()
+		t.onerror = () => reject(t.error)
+		t.onabort = () => reject(t.error)
+	})
+}
+
 // Overwrite the single saved record with the current state (last write wins).
 export async function saveFramesState(state) {
 	const db = await openDB()

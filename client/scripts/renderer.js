@@ -16,7 +16,7 @@ import { closestAxisDistance } from "/scripts/axis-drag.js?v=direct-tools-1"
 import { createPlayer } from "/scripts/player.js"
 import { createPrimitive, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js?v=direct-tools-1"
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
-import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
+import { clearFramesState, loadFramesState, saveFramesState } from "/scripts/frames-store.js"
 import { loadDefaultBuildSeeds } from "/scripts/default-builds.js"
 import { createSky } from "/scripts/sky.js"
 import { cloneGroundStrokes, closeGroundStroke, paintGroundStroke } from "/scripts/ground-strokes.js"
@@ -114,6 +114,11 @@ let showBounds = false
 let showSplatFloor = true
 let useInferenceCredits = false
 try { useInferenceCredits = localStorage.getItem("worldsketch.useInferenceCredits") === "true" } catch {}
+// Automatic per-object separation after generation is OFF by default: it runs
+// synchronously over every gaussian and freezes the tab for seconds. The devtools
+// checkbox turns it back on; "Apply to current scene" can always separate after the fact.
+let autoSegmentationEnabled = false
+try { autoSegmentationEnabled = localStorage.getItem("worldsketch.autoSegmentation") === "true" } catch {}
 let devControlsVisible = false
 let rawSplatPreview = null
 let rawOrbitSnapshot = null
@@ -2954,7 +2959,29 @@ function persistFramesSoon() {
 
 function persistFramesNow() {
 	clearTimeout(persistTimer)
+	if (wipingAccountData) return // a fresh-account wipe is in flight — don't resurrect state
 	saveFramesState(serializeFramesState()).catch(err => console.warn("Frame save failed:", err))
+}
+
+// Dev-panel "Simulate new account": wipe everything a first-time visitor wouldn't have
+// (saved frames, splat history, worldsketch.* settings — the HF sign-in stays) and
+// reload, so the boot path seeds two random default maps exactly like a fresh browser.
+let wipingAccountData = false
+
+async function simulateNewAccount() {
+	if (wipingAccountData) return
+	wipingAccountData = true // also blocks the pagehide flush from re-saving during reload
+	setStatus("Wiping saved data…")
+	const wipes = await Promise.allSettled([clearFramesState(), clearBuilds()])
+	for (const wipe of wipes) {
+		if (wipe.status === "rejected") console.warn("Account wipe step failed:", wipe.reason)
+	}
+	try {
+		for (const key of Object.keys(localStorage)) {
+			if (key.startsWith("worldsketch.")) localStorage.removeItem(key)
+		}
+	} catch {}
+	location.reload()
 }
 
 // Flush on tab-hide/close — the debounce window would otherwise drop the last edits.
@@ -3417,6 +3444,7 @@ function createSegmentationTunePanel() {
 				<strong>Developer controls</strong>
 				<span>Edit Build geometry and tune object separation</span>
 			</div>
+			<label class="tuning-live" title="Carve each generation into movable per-object pieces. Freezes the tab for a few seconds, so it is off by default; 'Apply to current scene' can still separate afterwards."><input type="checkbox" data-tune-auto-segment> Separate objects</label>
 			<label class="tuning-live"><input type="checkbox" data-tune-live checked> Retune live</label>
 		</header>
 		<div class="tuning-groups"></div>
@@ -3440,6 +3468,7 @@ function createSegmentationTunePanel() {
 			<button type="button" data-tune-retune>Apply to current scene</button>
 			<button type="button" data-tune-copy>Copy config</button>
 			<button type="button" data-tune-reset>Restore defaults</button>
+			<button type="button" data-tune-fresh-account title="Wipe all saved builds, splat history, and settings, then reload as a first-time visitor (stays signed in)">Simulate new account</button>
 		</footer>
 	`
 	const groupsEl = panel.querySelector(".tuning-groups")
@@ -3482,6 +3511,17 @@ function createSegmentationTunePanel() {
 	panel.querySelector("[data-tune-live]")?.addEventListener("change", event => {
 		segmentationTuneAutoRetune = Boolean(event.target.checked)
 	})
+	const autoSegmentInput = panel.querySelector("[data-tune-auto-segment]")
+	if (autoSegmentInput) {
+		autoSegmentInput.checked = autoSegmentationEnabled
+		autoSegmentInput.addEventListener("change", () => {
+			autoSegmentationEnabled = autoSegmentInput.checked
+			try { localStorage.setItem("worldsketch.autoSegmentation", String(autoSegmentationEnabled)) } catch {}
+			setStatus(autoSegmentationEnabled
+				? "New generations will be separated into movable objects (freezes the tab briefly)"
+				: "New generations stay as one piece — use Apply to current scene to separate later")
+		})
+	}
 	buildGeometryJsonField = panel.querySelector("[data-build-json]")
 	buildGeometryJsonStatus = panel.querySelector("[data-build-json-status]")
 	buildGeometryJsonField?.addEventListener("input", () => {
@@ -3496,6 +3536,7 @@ function createSegmentationTunePanel() {
 	})
 	panel.querySelector("[data-build-json-apply]")?.addEventListener("click", () => applyBuildGeometryJson())
 	panel.querySelector("[data-build-json-refresh]")?.addEventListener("click", () => syncBuildGeometryJson(true))
+	panel.querySelector("[data-tune-fresh-account]")?.addEventListener("click", () => simulateNewAccount())
 	const buildSpeedInput = panel.querySelector("[data-build-speed]")
 	const buildSpeedOut = panel.querySelector("[data-build-speed-out]")
 	const syncBuildSpeed = () => {
@@ -6131,12 +6172,17 @@ async function generateWorld(prompt) {
 		}
 		// Carve the one splat into per-object pieces so View can move them; a segmentation
 		// failure must never sink the completed generation — the monolith is a fine fallback.
+		// Off by default (it freezes the tab); the devtools checkbox opts back in, and the
+		// dev panel's "Apply to current scene" can still separate this scene afterwards.
 		const splatCount = seatedScene?.packedSplats?.numSplats ?? 0
-		const segmentationSkipped = splatCount > MAX_AUTOMATIC_SEGMENT_SPLATS
+		const tooDenseToSegment = splatCount > MAX_AUTOMATIC_SEGMENT_SPLATS
+		const segmentationSkipped = !autoSegmentationEnabled || tooDenseToSegment
 		showProgress(99, 100, segmentationSkipped ? "Finalizing the 3D scene…" : "Separating scene objects…")
 		await yieldForProgressPaint()
-		if (segmentationSkipped) {
+		if (tooDenseToSegment) {
 			console.warn(`[segment] skipped automatic separation for ${splatCount.toLocaleString()} splats to keep the browser responsive`)
+		} else if (!autoSegmentationEnabled) {
+			console.log("[segment] automatic separation is off (devtools checkbox) — scene kept as one piece")
 		} else {
 			try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment:", error) }
 		}
@@ -6151,7 +6197,7 @@ async function generateWorld(prompt) {
 		saveBuildToHistory(world.prompt)
 		window.posthog?.capture("generate_completed", { duration_s: Math.round((performance.now() - genStart) / 1000) })
 		showProgress(1, 1, "Done")
-		if (segmentationSkipped) setStatus("Scene loaded as one piece because it was too dense to separate safely in the browser")
+		if (tooDenseToSegment) setStatus("Scene loaded as one piece because it was too dense to separate safely in the browser")
 		window.setTimeout(hideProgress, 1000)
 	} catch (error) {
 		window.posthog?.capture("generate_failed", { error: error?.message })
@@ -7054,7 +7100,7 @@ setActiveTool("pointer")
 applyColor(activeColor)
 applyBrushScale(activeBrushScale)
 if (!(await restoreFramesState())) {
-	// Nothing saved from an earlier session — seed the two checked-in example builds.
+	// Nothing saved from an earlier session — seed two random checked-in default maps.
 	try {
 		await seedDefaultBuildFrames()
 	} catch (error) {
