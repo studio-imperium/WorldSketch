@@ -60,7 +60,7 @@
 		}
 		.tabs {
 			display: grid;
-			grid-template-columns: 1fr 1fr 1fr;
+			grid-template-columns: 1fr 1fr;
 			gap: 8px;
 			padding: 2px 2px 10px;
 		}
@@ -85,7 +85,6 @@
 		.orb { width: 15px; height: 15px; border-radius: 50%; flex: none; }
 		.orb-sketch { background: radial-gradient(circle at 35% 30%, #f2a56b, #d96b2b 75%); }
 		.orb-splat { background: radial-gradient(circle at 35% 30%, #a8c6e8, #5e8a5e 55%, #2e4a3a); }
-		.orb-explore { background: radial-gradient(circle at 35% 30%, #dcdad4, #8e8c86); }
 
 		.stage {
 			position: relative;
@@ -165,7 +164,6 @@
 			<div class="tabs">
 				<button class="tab active" type="button" data-phase="sketch"><span class="orb orb-sketch"></span><span class="tab-word">Sketch</span></button>
 				<button class="tab" type="button" data-phase="splat"><span class="orb orb-splat"></span><span class="tab-word">Splat</span></button>
-				<a class="tab" href="/app"><span class="orb orb-explore"></span><span class="tab-word">Explore</span></a>
 			</div>
 			<div class="stage" id="stage">
 				<div class="stage-hint" id="stage-hint">loading world&hellip;</div>
