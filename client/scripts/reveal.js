@@ -64,7 +64,7 @@ export function initReveal() {
 }
 
 // Staged copy: "A world is a" arrives with the first blocks, "a cloud of
-// splats." only once the gaussian has fully materialized.
+// splats." rides in with the first gaussians.
 function showCopy(band, part) {
 	band.querySelector(`.reveal-${part}`)?.classList.add("show")
 }
@@ -205,9 +205,9 @@ async function main(band, canvas) {
 	if (!blocks) {
 		// No block-out to dissolve — still enter with the radial materialize.
 		for (const mesh of chunks) tilt.add(mesh)
+		showCopy(band, "tail") // the copy rides in with the first gaussians
 		await animate(GROW_S * 1000, growStep)
 		for (const mesh of chunks) mesh.opacity = 1
-		showCopy(band, "tail")
 		return
 	}
 
@@ -218,8 +218,10 @@ async function main(band, canvas) {
 	await new Promise(resolve => window.setTimeout(resolve, WARM_MS))
 
 	// The payoff: the materialize clock starts as the blocks begin dissolving,
-	// so the world forms through the ghost geometry — no empty stage.
+	// so the world forms through the ghost geometry — no empty stage. The tail
+	// copy arrives with the first gaussians, not after the last.
 	const materialize = animate(GROW_S * 1000, growStep)
+	showCopy(band, "tail")
 	const mats = []
 	for (const block of blocks.children) {
 		mats.push(block.material)
@@ -241,7 +243,6 @@ async function main(band, canvas) {
 	disposeObject(blocks)
 	await materialize
 	for (const mesh of chunks) mesh.opacity = 1
-	showCopy(band, "tail") // the gaussian is fully there — close the sentence
 
 	// The block-out is baked in the splat's display frame (see the generator),
 	// so the boxes drop straight into the tilt group with the editor's look.
