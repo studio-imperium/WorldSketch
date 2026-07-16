@@ -31,16 +31,18 @@ export function runtimeConfig() {
 			imageSpace: env("WS_HF_IMAGE_SPACE", "black-forest-labs/FLUX.1-Kontext-Dev"),
 			tripoSpace: env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
 			tripoDirectUrl: env("TRIPOSPLAT_URL", ""),
-			// fal-ai runs the real Qwen pipeline with our steps/guidance; wavespeed's Qwen
-			// endpoint is a fixed consistency-preserving preset that ignores both.
+			// fal-ai runs the real pipelines with our steps/guidance; wavespeed's
+			// endpoints are fixed presets that ignore both. FLUX.2-dev (32B)
+			// replaced Qwen-Edit (20B) as the default: Qwen only shaded the
+			// block-out instead of interpreting its geometry into real structures.
 			inferenceProvider: env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
-			inferenceModel: env("WS_HF_INFERENCE_MODEL", "Qwen/Qwen-Image-Edit-2509"),
+			inferenceModel: env("WS_HF_INFERENCE_MODEL", "black-forest-labs/FLUX.2-dev"),
 			// Image detail ALWAYS runs on inference credits by default — ZeroGPU
 			// queues kept starving the image step while credits deliver reliably.
 			// Set WS_HF_IMAGE_CREDITS=0 to fall back to the imageSpace route.
 			imageCredits: env("WS_HF_IMAGE_CREDITS", "1") !== "0",
 			image: {
-				steps: envInt("WS_HF_IMAGE_STEPS", 20, 1, 100),
+				steps: envInt("WS_HF_IMAGE_STEPS", 28, 1, 100), // FLUX.2-dev's comfortable range (Qwen ran 20)
 				guidance: envFloat("WS_HF_IMAGE_GUIDANCE", 4),
 				width: envInt("WS_HF_IMAGE_WIDTH", 1024, 256, 2048),
 				height: envInt("WS_HF_IMAGE_HEIGHT", 1024, 256, 2048),

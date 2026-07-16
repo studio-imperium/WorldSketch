@@ -2,14 +2,14 @@ import * as THREE from "three"
 import { PackedSplats, SparkRenderer, SplatMesh } from "spark"
 import { zip, unzip } from "fflate"
 import { getConfig } from "/scripts/api.js"
-import { captureWorld, projectCaptureBoxes, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js"
+import { captureWorld, projectCaptureBoxes, FRONT_THETA, FRONT_PHI } from "/scripts/capture.js?v=tight-crop-1"
 import {
 	configureHuggingFace,
 	generateSceneOnHuggingFace,
 	getHuggingFaceAuth,
 	imageStepUsesCredits,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=style-ref-1"
+} from "/scripts/huggingface.js?v=seed303-1"
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"

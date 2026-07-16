@@ -105,8 +105,10 @@ function isoCamera(box, angles = null) {
 	camera.lookAt(center)
 	camera.updateMatrixWorld(true)
 	// Project the box's eight corners into camera space and frame the tightest square
-	// that holds them (square because the capture target is square), plus a thin black
-	// margin so the silhouette never touches the frame edge.
+	// that holds them (square because the capture target is square), plus a sliver of
+	// black margin — just enough that the silhouette never touches the frame edge
+	// (TripoSplat's background cutout needs that), tight so the image model spends
+	// its pixels on the geometry instead of empty void (was 1.06).
 	const corner = new THREE.Vector3()
 	let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
 	for (let i = 0; i < 8; i++) {
@@ -120,7 +122,7 @@ function isoCamera(box, angles = null) {
 		minY = Math.min(minY, corner.y)
 		maxY = Math.max(maxY, corner.y)
 	}
-	const half = Math.max(0.3, 0.5 * Math.max(maxX - minX, maxY - minY) * 1.06)
+	const half = Math.max(0.3, 0.5 * Math.max(maxX - minX, maxY - minY) * 1.02)
 	const cx = (minX + maxX) / 2
 	const cy = (minY + maxY) / 2
 	camera.left = cx - half

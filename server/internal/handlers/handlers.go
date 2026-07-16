@@ -35,10 +35,10 @@ func Config(w http.ResponseWriter, r *http.Request) {
 			"tripoSpace":        config.Env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
 			"tripoDirectUrl":    config.Env("TRIPOSPLAT_URL", ""),
 			"inferenceProvider": config.Env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
-			"inferenceModel":    config.Env("WS_HF_INFERENCE_MODEL", "Qwen/Qwen-Image-Edit-2509"),
+			"inferenceModel":    config.Env("WS_HF_INFERENCE_MODEL", "black-forest-labs/FLUX.2-dev"),
 			"imageCredits":      config.Env("WS_HF_IMAGE_CREDITS", "1") != "0",
 			"image": map[string]any{
-				"steps":    config.EnvInt("WS_HF_IMAGE_STEPS", 20, 1, 100),
+				"steps":    config.EnvInt("WS_HF_IMAGE_STEPS", 28, 1, 100),
 				"guidance": config.EnvFloat("WS_HF_IMAGE_GUIDANCE", 4),
 				"width":    config.EnvInt("WS_HF_IMAGE_WIDTH", 1024, 256, 2048),
 				"height":   config.EnvInt("WS_HF_IMAGE_HEIGHT", 1024, 256, 2048),

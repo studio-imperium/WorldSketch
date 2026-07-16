@@ -1,7 +1,10 @@
-// fal's provider id for Qwen/Qwen-Image-Edit-2509 on the HF router (from the
-// model's inferenceProviderMapping). The multi-image path below needs it
-// because it bypasses @huggingface/inference entirely.
-const FAL_QWEN_EDIT_PROVIDER_ID = "fal-ai/qwen-image-edit-2509"
+// fal provider ids on the HF router (from each model's
+// inferenceProviderMapping). The multi-image path below needs them because it
+// bypasses @huggingface/inference entirely; both endpoints accept image_urls.
+const FAL_EDIT_PROVIDER_IDS = {
+	"Qwen/Qwen-Image-Edit-2509": "fal-ai/qwen-image-edit-2509",
+	"black-forest-labs/FLUX.2-dev": "fal-ai/flux-2/edit",
+}
 
 // Multi-image edit on fal-ai through the Hugging Face router. The official
 // @huggingface/inference client can never carry more than one image: its fal
@@ -10,11 +13,13 @@ const FAL_QWEN_EDIT_PROVIDER_ID = "fal-ai/qwen-image-edit-2509"
 // (submit → poll status → fetch result), so a geometry map and/or a style
 // reference can ride alongside the block-out. Billing is identical — the HF
 // router meters it as inference credits either way.
-export async function falQueueImageEdit({ images, prompt, seed, settings, accessToken, signal, onProgress }) {
+export async function falQueueImageEdit({ images, prompt, seed, settings, model, accessToken, signal, onProgress }) {
+	const providerId = FAL_EDIT_PROVIDER_IDS[model]
+	if (!providerId) throw new Error(`No fal multi-image mapping for ${model} — add it to FAL_EDIT_PROVIDER_IDS`)
 	const image_urls = await Promise.all(images.map(toDataUrl))
 	const base = "https://router.huggingface.co/fal-ai"
 	const auth = { Authorization: `Bearer ${accessToken}` }
-	const submit = await fetch(`${base}/${FAL_QWEN_EDIT_PROVIDER_ID}?_subdomain=queue`, {
+	const submit = await fetch(`${base}/${providerId}?_subdomain=queue`, {
 		method: "POST",
 		headers: { ...auth, "Content-Type": "application/json" },
 		body: JSON.stringify({

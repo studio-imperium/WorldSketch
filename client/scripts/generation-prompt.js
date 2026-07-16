@@ -20,5 +20,7 @@ FLAT GROUND
 無顛簸
 平坦
 
+The blocks are rough massing stand-ins, not final shapes: give every structure its natural silhouette — pitched roofs, eaves, overhangs, irregular canopies — so nothing still reads as a plain box; keep each footprint and size.
+
 Same camera, same composition, same proportions — every block becomes a full-sized real structure exactly in place, and painted ground colors become the terrain features they mark. Crisp realistic materials with visible construction detail. Never a miniature, toy, or diorama. Pure black background: every pixel outside the terrain chunk stays flat #000000.`
 }

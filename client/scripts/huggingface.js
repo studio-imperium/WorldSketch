@@ -6,10 +6,10 @@ import {
 	getHuggingFaceAuth,
 	signOutHuggingFaceAuth,
 } from "/scripts/huggingface-auth.js"
-import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=flat-ground-1"
+import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=deblockify-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
 import { imageEditRequest, spaceSupportsGeometry } from "/scripts/huggingface-image.js?v=style-ref-1"
-import { falQueueImageEdit, inferenceCreditImageRequest } from "/scripts/huggingface-provider.js?v=style-ref-1"
+import { falQueueImageEdit, inferenceCreditImageRequest } from "/scripts/huggingface-provider.js?v=flux2-credits-1"
 import { resolveAuthenticatedSpaceFileURL, resolveDirectGradioFileURL } from "/scripts/huggingface-url.js?v=direct-tripo-1"
 
 const DEFAULT_CONFIG = {
@@ -19,9 +19,9 @@ const DEFAULT_CONFIG = {
 	tripoSpace: "VAST-AI/TripoSplat",
 	tripoDirectUrl: "",
 	inferenceProvider: "fal-ai",
-	inferenceModel: "Qwen/Qwen-Image-Edit-2509",
+	inferenceModel: "black-forest-labs/FLUX.2-dev", // 32B: interprets block geometry where Qwen-Edit only shaded it
 	imageCredits: true, // image detail always runs on inference credits (WS_HF_IMAGE_CREDITS=0 reverts)
-	image: { steps: 20, guidance: 4, width: 1024, height: 1024 },
+	image: { steps: 28, guidance: 4, width: 1024, height: 1024 },
 	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
 }
 
@@ -258,6 +258,7 @@ export async function detailImageOnHuggingFace({ prompt, image, geometryImage = 
 						prompt,
 						seed,
 						settings: config.image,
+						model: config.inferenceModel,
 						accessToken: getHuggingFaceAccessToken(),
 						signal,
 						onProgress: stage => onProgress?.(0.5, stage === "generating"
@@ -345,6 +346,11 @@ export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), useI
 	}
 }
 
+// Pinned generation seed for the app flow: 303 consistently gives the best
+// results (user verdict, 2026-07-16 A/B rounds). The A/B lab still passes its
+// own explicit seeds.
+const SCENE_SEED = 303
+
 export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress, onImageReady }) {
 	// Multi-image Spaces take the aligned geometry map alongside the block-out;
 	// single-image routes (Kontext, the paid inference API) can't, so the prompt
@@ -354,6 +360,7 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference }),
 		image,
 		geometryImage: useGeometryReference ? geometryImage : null,
+		seed: SCENE_SEED,
 		useInferenceCredits,
 		signal,
 		onProgress: (fraction, label) => onProgress?.(0.12 + fraction * 0.43, label),
@@ -361,6 +368,7 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 	onImageReady?.(editedImage)
 	const bytes = await buildSplatOnHuggingFace({
 		image: editedImage,
+		seed: SCENE_SEED,
 		useInferenceCredits,
 		signal,
 		onProgress: (fraction, label) => onProgress?.(0.6 + fraction * 0.37, label),
