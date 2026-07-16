@@ -8,7 +8,7 @@ import {
 	generateSceneOnHuggingFace,
 	getHuggingFaceAuth,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=realistic-style-1"
+} from "/scripts/huggingface.js?v=gpu-stall-watchdog-1"
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
@@ -59,10 +59,11 @@ const groundTopY = groundThickness // Y of the drawable sheet's top surface
 const baseGroundColor = "#587553" // default terrain; painted regions layer on top
 const WORKSPACE_SCALE = 3
 const GROUND_SHEET_SIZE = 48 * WORKSPACE_SCALE // 144 world units: 3× the previous drawable/buildable sheet
-// THE project accent — the single colour every UI affordance uses (tabs, colliders,
-// transform controls, primary button). The landing page's ink black; also set in
-// styles.css as --ink.
+// THE project accent — tabs, colliders, primary button. The landing page's ink
+// black; also set in styles.css as --ink. Splat selection instead wears the sky
+// highlight (styles.css --hl-sky) so a live selection pops against the scene.
 const accent = 0x0d0d0c
+const selectionAccent = 0x7fc8f8
 
 const defaultFitSettings = {
 	yOffset: 0,
@@ -2047,7 +2048,7 @@ let viewTool = "orbit" // "orbit" | "lasso"
 const selectedSplatMeshes = new Set()
 
 const splatProxyMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false })
-const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.9 })
+const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: selectionAccent, transparent: true, opacity: 0.9 })
 const splatDragPlane = new THREE.Plane()
 const splatRotQuat = new THREE.Quaternion()
 const splatDragPoint = new THREE.Vector3()

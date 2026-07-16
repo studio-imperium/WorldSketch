@@ -18,6 +18,7 @@ __pycache__/
 # Go build artifacts
 /server/server
 /server/gausy
+/server/worldsketch
 /server/worldsketch-server
 /server/tmp/
 /tmp/
@@ -28,5 +29,6 @@ __pycache__/
 /server/output/
 /server/outputs/
 
-# Node
+# Node / Vercel
 node_modules/
+.vercel

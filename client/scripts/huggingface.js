@@ -153,7 +153,30 @@ async function runSpace(space, endpoint, payload, stage, progress, signal) {
 	signal?.addEventListener("abort", abort, { once: true })
 	let data = null
 	try {
-		for await (const message of job) {
+		// The Space's event stream can die silently (ZeroGPU proxy drops the
+		// connection while the job queues); without a watchdog the iterator
+		// waits forever — the "waiting for a GPU" permastuck. Gradio sends
+		// queue/progress updates far more often than this, so a long silence
+		// means the stream is dead, not that the queue is slow.
+		const stallMs = 180_000
+		const iterator = job[Symbol.asyncIterator]()
+		for (;;) {
+			let stallTimer = 0
+			let next
+			try {
+				next = await Promise.race([
+					iterator.next(),
+					new Promise((_, reject) => {
+						stallTimer = window.setTimeout(() => reject(new Error(
+							`${stage} stopped responding — no update from Hugging Face for ${Math.round(stallMs / 60_000)} minutes. Cancel and try again.`,
+						)), stallMs)
+					}),
+				])
+			} finally {
+				window.clearTimeout(stallTimer)
+			}
+			if (next.done) break
+			const message = next.value
 			if (message?.type === "status") {
 				if (message.stage === "error") {
 					const detail = typeof message.message === "string" ? message.message : JSON.stringify(message.message || message.code || "Space job failed")
@@ -163,6 +186,9 @@ async function runSpace(space, endpoint, payload, stage, progress, signal) {
 			}
 			if (message?.type === "data") data = message.data
 		}
+	} catch (error) {
+		job.cancel?.() // free the queue slot on stall/error; harmless if already done
+		throw error
 	} finally {
 		signal?.removeEventListener("abort", abort)
 		if (activeJob === job) activeJob = null

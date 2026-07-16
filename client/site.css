@@ -1,10 +1,8 @@
-/* Shared styles for the worldsplat marketing pages (landing + login).
+/* Styles for the worldsplat marketing landing page.
    The editor keeps its own styles.css — nothing here leaks into the app. */
 
 :root {
 	--paper: #fbfbfa;      /* page background */
-	--card: #efeeea;       /* card shells (login) */
-	--panel: #f5f4f1;      /* soft panel tint (login) — the landing stage clears to white */
 	--ink: #0d0d0c;
 	--ink-soft: #3f3f3b;
 	--ink-faint: #6e6e68;
@@ -90,40 +88,6 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .pill-lg { height: 50px; padding: 0 26px; font-size: 16px; }
 
 :focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
-
-/* ---- form controls (login) ---- */
-
-.field { display: block; margin-bottom: 16px; }
-
-.field-label {
-	display: flex;
-	justify-content: space-between;
-	align-items: baseline;
-	font-size: 13px;
-	font-weight: 550;
-	margin-bottom: 7px;
-	color: var(--ink-soft);
-}
-
-.field-label a { font-weight: 450; color: var(--ink-faint); }
-.field-label a:hover { color: var(--ink); }
-
-.input {
-	width: 100%;
-	height: 46px;
-	padding: 0 14px;
-	border: 1px solid var(--line);
-	border-radius: 12px;
-	background: var(--paper);
-	font: inherit;
-	font-size: 15px;
-	color: var(--ink);
-	transition: border-color 0.12s ease;
-}
-
-.input::placeholder { color: #a5a49d; }
-.input:hover { border-color: #cfcec8; }
-.input:focus { outline: none; border-color: var(--ink); }
 
 /* ---- footer ---- */
 

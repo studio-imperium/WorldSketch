@@ -4,11 +4,19 @@ html {
 	--paper: #fbfbfa;      /* page background */
 	--card: #efeeea;       /* filled chips, progress track */
 	--panel: #f5f4f1;      /* hover fills — also renderer.js's clear colour */
-	--ink: #0d0d0c;        /* THE accent: black-pill actives, selection lines */
+	--ink: #0d0d0c;        /* THE accent: black-pill actives stay ink */
 	--ink-soft: #3f3f3b;
 	--ink-faint: #6e6e68;
 	--line: #e5e4df;
 	--white: #ffffff;
+	/* Highlight trio — used sparingly, one job each, everything else stays ink:
+	   sun = the active tool, coral = generation in flight, sky = splat selection
+	   (sky is also renderer.js's selectionAccent). */
+	--hl-sun: #ffe45e;
+	--hl-coral: #ff6392;
+	--hl-sky: #7fc8f8;
+	/* The landing page's serif voice (hero headline), reserved for panel headers. */
+	--font-display: "Newsreader", Georgia, "Times New Roman", serif;
 	/* daisyUI hooks (its themes are :where()-scoped, so these win). */
 	--color-primary: var(--ink);
 	--color-primary-content: var(--white);
@@ -157,9 +165,21 @@ body.is-generating #canvas canvas {
 }
 
 .view-tab.active {
-	background: var(--ink); /* THE project accent — the landing page's black pill, also in renderer.js */
+	background: var(--ink); /* fallback for any tab without a highlight below */
 	color: var(--white);
 }
+
+/* Each stage tab wears its own highlight when active — Build sun (matches the
+   active tool), View sky (matches splat selection), Play coral. */
+.view-tab[data-view-tab="build"].active,
+.view-tab[data-view-tab="view"].active,
+.view-tab[data-view-tab="play"].active {
+	color: var(--ink);
+	font-weight: 600;
+}
+.view-tab[data-view-tab="build"].active { background: var(--hl-sun); }
+.view-tab[data-view-tab="view"].active { background: var(--hl-sky); }
+.view-tab[data-view-tab="play"].active { background: var(--hl-coral); }
 
 .view-tab:disabled {
 	cursor: default;
@@ -183,8 +203,8 @@ body.is-generating #canvas canvas {
 	width: 1rem;
 	height: 1rem;
 	border-radius: 50%;
-	border: 2px solid rgba(13, 13, 12, 0.18);
-	border-top-color: var(--ink);
+	border: 2px solid color-mix(in srgb, var(--hl-coral) 28%, transparent);
+	border-top-color: var(--hl-coral);
 	animation: view-tab-spin 0.8s linear infinite;
 }
 
@@ -252,9 +272,10 @@ body.tab-view canvas.is-splat-rotate {
 	overflow: visible;
 }
 
+/* Splat selection wears the sky highlight — matches renderer.js's selectionAccent. */
 .view-lasso-path {
-	fill: rgba(13, 13, 12, 0.07);
-	stroke: var(--ink);
+	fill: color-mix(in srgb, var(--hl-sky) 14%, transparent);
+	stroke: var(--hl-sky);
 	stroke-width: 2;
 	stroke-linecap: round;
 	stroke-linejoin: round;
@@ -262,32 +283,32 @@ body.tab-view canvas.is-splat-rotate {
 }
 
 .view-selection-box {
-	fill: rgba(13, 13, 12, 0.05);
-	stroke: var(--ink);
+	fill: color-mix(in srgb, var(--hl-sky) 9%, transparent);
+	stroke: var(--hl-sky);
 	stroke-width: 1.5;
 	stroke-dasharray: 6 4;
 }
 
 .view-rotate-stem {
-	stroke: var(--ink);
+	stroke: var(--hl-sky);
 	stroke-width: 1.5;
 }
 
 .view-rotate-handle {
-	fill: var(--ink);
+	fill: var(--hl-sky);
 	stroke: #fff;
 	stroke-width: 2;
 }
 
 .view-move-handle {
 	fill: #fff;
-	stroke: var(--ink);
+	stroke: var(--hl-sky);
 	stroke-width: 2;
 }
 
 .view-scale-handle {
 	fill: #fff;
-	stroke: var(--ink);
+	stroke: var(--hl-sky);
 	stroke-width: 2;
 }
 
@@ -353,8 +374,10 @@ body.tab-view canvas.is-splat-rotate {
 }
 
 .frames-head .card-title {
-	font-size: 0.84rem;
-	font-weight: 650;
+	font-family: var(--font-display);
+	font-size: 1rem;
+	font-weight: 500;
+	letter-spacing: -0.01em;
 	line-height: 1;
 }
 
@@ -543,6 +566,9 @@ body.tab-view canvas.is-splat-rotate {
 /* World generation progress replaces the prompt while work is in flight. Queue
    updates remain prominent without making the dock look like a disabled input. */
 .gen-progress {
+	/* Generation in flight is the coral moment — the pulse, track, fill and
+	   percent chip all key off this scoped primary. */
+	--color-primary: var(--hl-coral);
 	order: 1;
 	display: flex;
 	flex-direction: column;
@@ -1581,7 +1607,8 @@ input[type="color"] {
 }
 
 .tool-btn.active {
-	background: color-mix(in srgb, var(--ink) 16%, #fff) !important;
+	/* The active tool wears the sun highlight — the one always-on colour pop. */
+	background: var(--hl-sun) !important;
 	color: var(--ink) !important;
 }
 
@@ -1685,8 +1712,9 @@ input[type="color"] {
 	display: inline-flex;
 	align-items: center;
 	gap: 0.4rem;
-	font-size: 0.95rem;
-	font-weight: 600;
+	font-family: var(--font-display);
+	font-size: 1.1rem;
+	font-weight: 500;
 	color: var(--ink-soft);
 }
 

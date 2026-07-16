@@ -24,6 +24,7 @@ const FLASH_MS = 200 // blocks ramp to white-hot…
 const FADE_MS = 160 // …vanish completely…
 const MATERIALIZE_MS = 280 // …and only then does the splat fade up
 const WHITE = new THREE.Color(0xffffff)
+const SPLAT_YAW = 15 * Math.PI / 180 // splat-only trim so it faces the same way as the block-out (tuned by eye on ?hero=overlay)
 
 const host = document.getElementById("hero-stage")
 if (host) main().catch(error => {
@@ -170,7 +171,14 @@ async function main() {
 		return
 	}
 
+	// Paths below skip the probe, so drop its twin right away.
+	const dropProbe = () => {
+		seat.probeMesh?.dispose?.()
+		seat.probe = null
+		seat.probeMesh = null
+	}
 	if (overlay) {
+		dropProbe()
 		pivot.add(seat.inner)
 		for (const mesh of blocks?.children ?? []) {
 			mesh.material.transparent = true
@@ -180,19 +188,23 @@ async function main() {
 		window.__hero = { blocks, seat } // registration probing from the console
 		return
 	}
-	if (!blocks) { pivot.add(seat.inner); return }
+	if (!blocks) { dropProbe(); pivot.add(seat.inner); return }
 	if (reduceMotion) {
+		dropProbe()
 		pivot.add(seat.inner)
 		disposeObject(blocks)
 		return
 	}
 
-	// Seat the splat invisibly a beat before the flash: Spark needs a few
-	// rendered frames to sort and settle a fresh mesh, and warming it behind
-	// the opaque blocks keeps the dissolve from revealing a half-drawn robot.
+	// Seat the splat invisibly and warm it behind the opaque blocks. A fixed
+	// 450ms here wasn't enough: on a cold first open Spark still has WASM,
+	// worker, and shader warm-up ahead, so the dissolve revealed an empty
+	// stage for seconds ("robot doesn't load"). Hold the blocks until the
+	// splat has actually painted pixels (probed offscreen), not a wall-clock
+	// guess — capped so a probe failure can't pin the blocks.
 	seat.mesh.opacity = 0
 	pivot.add(seat.inner)
-	await new Promise(resolve => window.setTimeout(resolve, 450))
+	await splatPainted()
 
 	// The payoff: every block ramps to white-hot, the splat fades up through
 	// the glow, and the blocks dissolve away — primitives became a world.
@@ -237,6 +249,49 @@ async function main() {
 		})
 		if (!group.children.length) throw new Error("hero blockout is empty")
 		return group
+	}
+
+	// Offscreen readiness probe. The hero mesh itself can't be probed: Spark
+	// bakes mesh opacity into a scene-wide accumulation that regenerates
+	// asynchronously on every opacity change, so toggling it per probe both
+	// leaked visible flicker AND thrashed the pipeline with rebuilds. Instead
+	// the probe renders the seat's down-sampled twin — its own scene, its own
+	// SparkRenderer, same WebGL context — into a tiny target and reads the
+	// pixels back. When the twin paints, the shared cold-start work (WASM,
+	// sort worker, shader programs) is done, so the real mesh is ready too,
+	// and the visible scene was never touched. Keeps the original 450ms beat
+	// as a minimum; gives up after 5s so a probe failure degrades to the old
+	// timer behavior instead of pinning the blocks.
+	async function splatPainted() {
+		if (!seat.probe) return
+		const size = 64
+		const target = new THREE.WebGLRenderTarget(size, size)
+		const pixels = new Uint8Array(size * size * 4)
+		const probeScene = new THREE.Scene()
+		const probeSpark = new SparkRenderer({ renderer })
+		probeScene.add(probeSpark)
+		probeScene.add(seat.probe)
+		const started = performance.now()
+		try {
+			for (;;) {
+				renderer.setRenderTarget(target)
+				renderer.render(probeScene, camera)
+				renderer.setRenderTarget(null)
+				renderer.readRenderTargetPixels(target, 0, 0, size, size, pixels)
+				let painted = false
+				for (let i = 3; i < pixels.length; i += 4) if (pixels[i] > 1) { painted = true; break }
+				const elapsed = performance.now() - started
+				if ((painted && elapsed >= 450) || elapsed > 5000) return
+				await new Promise(resolve => window.setTimeout(resolve, 150))
+			}
+		} finally {
+			target.dispose()
+			probeScene.remove(seat.probe)
+			seat.probeMesh?.dispose?.()
+			probeSpark.dispose?.()
+			seat.probe = null
+			seat.probeMesh = null
+		}
 	}
 
 	async function loadSplat() {
@@ -302,7 +357,31 @@ async function main() {
 		inner.add(mesh)
 		inner.scale.setScalar(s)
 		inner.position.set(-center.x * s, center.y * s, center.z * s)
-		return { inner, mesh }
+		// Splat-only yaw trim: the generated splat's facing doesn't quite match
+		// the block-out's, so the splat gets its own correction about its centre
+		// (the rig origin = the seat origin) without touching the blocks.
+		const rig = new THREE.Group()
+		rig.rotation.y = SPLAT_YAW
+		rig.add(inner)
+
+		// Down-sampled twin for the readiness probe (see splatPainted): every
+		// 16th gaussian in the same seat transform. It lives in its own probe
+		// scene, never the visible one, and is disposed once the probe passes.
+		const probeMesh = new SplatMesh({
+			constructSplats: splats => {
+				let i = 0
+				mesh.packedSplats.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
+					if (i++ % 16 === 0) splats.pushSplat(center, scales, quaternion, opacity, color)
+				})
+			},
+		})
+		probeMesh.initialized.catch(() => {})
+		probeMesh.rotation.x = Math.PI
+		const probeInner = new THREE.Group()
+		probeInner.add(probeMesh)
+		probeInner.scale.setScalar(s)
+		probeInner.position.set(-center.x * s, center.y * s, center.z * s)
+		return { inner: rig, mesh, probe: probeInner, probeMesh }
 	}
 }
 

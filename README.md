@@ -2,21 +2,32 @@
 
 WorldSketch turns a browser-built block-out into a detailed image with Qwen-Image-Edit-2509, then converts that image into a Gaussian splat with TripoSplat. The image step uses a public Hugging Face Space by default, or the user's monthly inference credits when they enable that setting. TripoSplat runs through a public Space using the user's ZeroGPU allowance. The WorldSketch server never receives or stores the user's Hugging Face token, source image, generated image, or splat.
 
+The deployment is a static site plus two tiny serverless functions: `client/` is served as-is (no build step), and `api/config.mjs` / `api/healthz.mjs` provide `/api/config` and `/healthz`. `vercel.json` wires up the rewrites, caching, and security headers. A legacy Go server (`server/` + `Dockerfile`) can serve the same client for self-hosting.
+
+Dev-only fixtures (session ZIPs and primitive JSONs for testing splat flows without spending GPU quota) live in `fixtures/` and are not deployed.
+
 ## Run locally
 
-Requirements: Go 1.23+ and a modern browser.
+Requirements: a modern browser, plus either Node (for `vercel dev`) or Go 1.23+ (for the legacy server).
 
 ```sh
 cp .env.example .env
-cd server
-go run .
+npx vercel dev        # serves client/ + /api/config on http://localhost:3000
 ```
 
-Open `http://localhost:8067/` for the landing page. `Log in` goes to the Hugging Face sign-in at `/login`, which then opens the editor at `/app/`. The included public OAuth client is already registered for the local root URL, so callbacks return to `/` and are handed to `/login` to finish.
+or with the Go server:
+
+```sh
+cd server && go run . # http://localhost:8067
+```
+
+The landing page's `Continue with Hugging Face` button starts the OAuth sign-in and then opens the editor at `/app/`. The included public OAuth client is already registered for the local root URL, so callbacks return to `/`, where the landing page finishes the token exchange.
 
 ## Deploy
 
-Build and run the stateless container:
+Primary: push to the connected Vercel project (or `npx vercel deploy --prod`). Configuration is environment variables only — see `.env.example`; `WS_HF_REDIRECT_URL` is the one that must be set per domain.
+
+Alternative, the stateless container:
 
 ```sh
 docker build -t worldsketch .
@@ -33,9 +44,9 @@ No API keys or persistent volume are required. Scaling the web service horizonta
 
 The default image Space is `WilliamQM/Qwen-Image-Edit-2509` — a duplicate of the official `Qwen/Qwen-Image-Edit-2509` with the ZeroGPU reservation lowered from 300s to 120s so jobs are admitted with less remaining quota (20-step image editing, prompt rewriting disabled). `WS_HF_IMAGE_SPACE` can point back at `black-forest-labs/FLUX.2-dev` (steps 30, guidance 4) or the fast distilled `black-forest-labs/FLUX.2-klein-4B` (steps 4, guidance 1). The Space allows up to 85 seconds for a job; actual quota usage depends on how long the GPU function runs.
 
-The checked-in defaults are an inexpensive testing preset: a 512×512 image, four image-editing steps, ten TripoSplat steps with CFG disabled, and 32,768 Gaussians. For final-quality generations, set the image to 1024×1024 and use 20 TripoSplat steps, guidance 3, and 262,144 Gaussians. ZeroGPU checks that the declared reservation fits within the remaining quota before starting, then accounts for the GPU time used.
+The checked-in defaults are a production preset: a 1024×1024 image with 20 editing steps, 30 TripoSplat steps at guidance 3, and 131,072 Gaussians (`WS_HF_TRIPO_GAUSSIANS` can raise this to TripoSplat's 262,144 maximum). ZeroGPU checks that the declared reservation fits within the remaining quota before starting, then accounts for the GPU time used.
 
-`Inference credits for FLUX` is off by default. When enabled in the editor settings, the FLUX image-detail step uses Hugging Face Inference Providers (fal) instead of ZeroGPU; a 512×512 four-step edit is typically about 1–2 cents. TripoSplat still uses ZeroGPU. WorldSketch never falls back to this paid route unless the setting is enabled.
+`Inference credits for image detail` is off by default. When enabled in the editor settings, the image-detail step uses Hugging Face Inference Providers (fal) instead of ZeroGPU; a single edit is typically a few cents. Splats use the direct TripoSplat server when `TRIPOSPLAT_URL` is set, otherwise ZeroGPU. WorldSketch never falls back to the paid route unless the setting is enabled.
 
 ## Security and quota behavior
 

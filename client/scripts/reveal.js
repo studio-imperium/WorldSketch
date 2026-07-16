@@ -29,19 +29,16 @@ const FADE_MS = 900                 // ASCII → splat crossfade; matches the CS
 const POINTS = "/assets/reveal-points.bin?v=2"
 const SPLAT = "/assets/reveal-splat.ply"
 
-// Mount the band's background (grid is CSS; this adds the drifting code field and
-// wires the canvas) immediately, then fetch the baked points — tiny, so the cloud
-// is ready long before any splat download would be.
+// Wire the band's ASCII canvas immediately (the animated background is its own
+// layer, assets/bg_2.js), then fetch the baked points — tiny, so the cloud is
+// ready long before any splat download would be.
 export function initReveal() {
 	const band = document.getElementById("reveal")
 	const canvas = document.getElementById("reveal-canvas")
-	const codeHost = document.getElementById("reveal-code")
 	if (!band || !canvas) return
 
 	const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
 	const ctx = canvas.getContext("2d")
-
-	buildCodeField(codeHost)
 
 	// Point data fills in once the baked asset arrives; until then the loop idles.
 	let n = 0
@@ -244,40 +241,7 @@ export function initReveal() {
 			const weights = new Uint8Array(b, o, meta.count)
 			setPoints({ positions, colorIdx, weights, colors: meta.palette, count: meta.count })
 		})
-		.catch(error => console.error(error)) // band stays code-field-only, never empty
+		.catch(error => console.error(error)) // band stays background-only, never empty
 }
 
-function buildCodeField(host) {
-	if (!host) return
-	const rng = lcg(0x5eed)
-	const toks = [
-		"SplatMesh.forEachSplat((i, center, scale, quat, rgba) =>",
-		"spark.SparkRenderer({ renderer }).sort(view.camera)",
-		"ground = outpaint(plots).slice(floorClipBoxes)",
-		"packedSplats.pack(centers, covariance, sh0)",
-		"radixDepthSort(order, camZ)   // 16-bit buckets",
-		"mesh.rotation.x = Math.PI      // stored splats are Y-inverted",
-		"heightAt(x, z) => raycast(ground).point.y",
-		"plot.lift(delta) => deform(unifiedSplat, falloff)",
-		"seam = blend(a.edge, b.edge, gradient)",
-		"export.shotPath(keys).render({ gui: false })",
-	]
-	const lines = []
-	for (let i = 0; i < 40; i++) {
-		let s = toks[Math.floor(rng() * toks.length)]
-		if (rng() < 0.5) s += "   " + hex(rng, 3 + Math.floor(rng() * 6))
-		lines.push(s)
-	}
-	const block = lines.join("\n")
-	const pre = document.createElement("pre")
-	pre.textContent = block + "\n" + block          // doubled for a seamless upward drift
-	host.appendChild(pre)
-}
-
-function hex(rng, n) {
-	let s = "0x"
-	for (let i = 0; i < n; i++) s += "0123456789abcdef"[Math.floor(rng() * 16)]
-	return s
-}
-function lcg(seed) { let s = seed >>> 0; return () => (s = (s * 1664525 + 1013904223) >>> 0) / 4294967296 }
 function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v }

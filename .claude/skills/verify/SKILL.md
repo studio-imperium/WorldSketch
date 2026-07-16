@@ -23,8 +23,9 @@ The app is a static client served by the Go server; the browser is the surface.
   install playwright`) and launch with the system Chrome: `chromium.launch({ channel:
   "chrome", headless: true })` — avoids the browser download.
 - Load a real generated scene WITHOUT HuggingFace auth by uploading a bundled session
-  ZIP into the hidden input: `page.locator("#upload_zip_input").setInputFiles("client/
-  test-scene.zip")` (also `test-campsite.zip`, `test-4obj.zip`). This re-runs the full
+  ZIP into the hidden input: `page.locator("#upload_zip_input").setInputFiles("fixtures/
+  test-scene.zip")` (also `test-campsite.zip`, `test-4obj.zip`; the fixtures live in
+  `fixtures/`, outside the deployed `client/`). This re-runs the full
   fit + segmentation pipeline (`segmentSceneSplat`).
 - Evidence channels: console lines prefixed `[fit]` / `[segment]` (capture via
   `page.on("console", ...)`), `window.__wsSegLast` / `window.__wsSegClaims` globals,
