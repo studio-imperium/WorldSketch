@@ -13,6 +13,7 @@ import { createGenerationImageDebugger } from "/scripts/generation-debug-images.
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
 import { closestAxisDistance } from "/scripts/axis-drag.js?v=direct-tools-1"
+import { createPlayer } from "/scripts/player.js"
 import { createPrimitive, disposeObject, setEdgeOutlineVisible, updateEdgeOutlineColor } from "/scripts/primitives.js?v=direct-tools-1"
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
@@ -201,6 +202,7 @@ const els = {
 	framesList: document.getElementById("frames_list"),
 	frameAdd: document.getElementById("frame_add_btn"),
 	flyBtn: document.getElementById("fly_btn"),
+	playHint: document.getElementById("play_hint"),
 	flyHint: document.getElementById("fly_hint"),
 	shotChips: document.getElementById("shot_chips"),
 	shotAdd: document.getElementById("shot_add_btn"),
@@ -702,7 +704,7 @@ class World {
 		const record = { mesh }
 		this.generated.push(record)
 		this.group.add(mesh)
-		mesh.visible = uiTab === "view"
+		mesh.visible = uiTab !== "build"
 	}
 
 	// Tear down a previous generation: drop the splats, restore the editable block-out.
@@ -977,7 +979,7 @@ function setActiveTool(tool) {
 }
 
 function syncPlacementPreview() {
-	if (!shapeTools.has(activeTool) || uiTab === "view") {
+	if (!shapeTools.has(activeTool) || uiTab !== "build") {
 		if (placementPreview) disposeObject(placementPreview)
 		placementPreview = null
 		return
@@ -1206,17 +1208,22 @@ const emptyViewHint = "Nothing generated yet — hit Generate and the View tab f
 
 function setUiTab(tab) {
 	if (tab === uiTab) return
+	if (tab === "play" && rawSplatPreview) return // raw inspection is orbit-only, like fly
+	const wasPlay = uiTab === "play"
 	uiTab = tab
 	if (tab !== "build") selectPrimitive(null) // View has no block-out selection / gizmo
 	if (tab !== "view") deselectSplat() // splat selection is a View-only thing
 	if (tab === "view" && !world.generated.length) setStatus(emptyViewHint)
 	else if (els.status.textContent === emptyViewHint) setStatus("")
+	if (tab === "play") enterPlay()
+	else if (wasPlay) exitPlay()
 	applyUiTab()
 }
 
 function applyUiTab() {
 	const building = uiTab === "build"
 	document.body.classList.toggle("tab-view", uiTab === "view") // CSS strips all UI but the tabs in View
+	document.body.classList.toggle("tab-play", uiTab === "play") // CSS strips everything but the tabs + hint in Play
 	for (const button of els.viewTabs) {
 		button.classList.toggle("active", button.dataset.viewTab === uiTab)
 		button.setAttribute("aria-selected", String(button.dataset.viewTab === uiTab))
@@ -1443,7 +1450,7 @@ function updateOrbit(event) {
 // eased per segment so each shot settles before leaving. Shots persist with the
 // frames state, so a composed path survives reloads.
 
-let camMode = "orbit" // "orbit" | "fly" | "anim" — anything but "orbit" owns the camera
+let camMode = "orbit" // "orbit" | "fly" | "anim" | "play" — anything but "orbit" owns the camera
 const fly = {
 	keys: new Set(),
 	yaw: 0,
@@ -1552,6 +1559,95 @@ function orbitFromCamera() {
 	orbit.theta = sph.theta
 	orbit.phi = sph.phi
 	updateCamera()
+}
+
+// --- Third-person play mode (the Play tab) -----------------------------------------
+// The player walks the generated splats using voxel columns computed from the
+// gaussians themselves (player.js owns the physics and WASD; the block-out primitives
+// never collide). The renderer routes input: a pointer drag on
+// the canvas is camera look, wheel is zoom. The drawable sheet is flat, so ground
+// height is constant; the walkable area is the rectangle of drawn ink, captured once
+// per play session. Pixel ratio drops to 1x during play to cut splat fill cost.
+
+const playBounds = new THREE.Box3()
+let playColliderHelpers = null // debug: the Colliders toggle draws the player's boxes in Play
+
+const player = createPlayer({
+	camera,
+	world,
+	groundHeightAt: () => groundTopY,
+	clampToGround: (pos, radius) => {
+		pos.x = Math.max(playBounds.min.x + radius, Math.min(playBounds.max.x - radius, pos.x))
+		pos.z = Math.max(playBounds.min.z + radius, Math.min(playBounds.max.z - radius, pos.z))
+	},
+})
+
+function enterPlay() {
+	if (camMode === "fly") exitFly()
+	stopCamPlayback()
+	camMode = "play"
+	const ink = world.groundInkBounds()
+	if (ink) playBounds.copy(ink)
+	else playBounds.set(new THREE.Vector3(-floorSize / 2, 0, -floorSize / 2), new THREE.Vector3(floorSize / 2, groundTopY, floorSize / 2))
+	player.spawn(playBounds.getCenter(new THREE.Vector3()))
+	player.attach()
+	syncPlayColliderHelpers()
+	camera.near = 0.05
+	camera.far = 400
+	camera.fov = 50
+	camera.updateProjectionMatrix()
+	renderer.setPixelRatio(1)
+	els.playHint?.classList.remove("hidden")
+}
+
+function exitPlay() {
+	if (camMode !== "play") return
+	camMode = "orbit"
+	player.hide()
+	player.detach()
+	syncPlayColliderHelpers()
+	renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2))
+	els.playHint?.classList.add("hidden")
+	orbitFromCamera()
+}
+
+// syncPlayColliderHelpers draws the player's actual collision boxes (one merged
+// LineSegments — Box3Helper-per-box would be thousands of draw calls) whenever the
+// Colliders debug toggle is on during play, and tears them down otherwise.
+function syncPlayColliderHelpers() {
+	if (playColliderHelpers) {
+		playColliderHelpers.geometry.dispose()
+		playColliderHelpers.material.dispose()
+		scene.remove(playColliderHelpers)
+		playColliderHelpers = null
+	}
+	if (camMode !== "play" || !showColliders) return
+	const boxes = player.colliderBoxes()
+	if (!boxes.length) return
+	const edge = [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
+	const positions = new Float32Array(boxes.length * edge.length * 6)
+	let o = 0
+	const corner = i => (box, out) => out.set(i & 1 ? box.max.x : box.min.x, i & 2 ? box.max.y : box.min.y, i & 4 ? box.max.z : box.min.z)
+	const corners = Array.from({ length: 8 }, (_, i) => corner(i))
+	const p = new THREE.Vector3()
+	for (const box of boxes) {
+		for (const [a, b] of edge) {
+			corners[a](box, p)
+			positions[o++] = p.x; positions[o++] = p.y; positions[o++] = p.z
+			corners[b](box, p)
+			positions[o++] = p.x; positions[o++] = p.y; positions[o++] = p.z
+		}
+	}
+	const geometry = new THREE.BufferGeometry()
+	geometry.setAttribute("position", new THREE.BufferAttribute(positions, 3))
+	playColliderHelpers = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: colliderColor, transparent: true, opacity: 0.5 }))
+	scene.add(playColliderHelpers)
+}
+
+function updatePlayLook(event) {
+	player.addLook(event.clientX - drag.x, event.clientY - drag.y)
+	drag.x = event.clientX
+	drag.y = event.clientY
 }
 
 function addCamShot() {
@@ -2370,6 +2466,13 @@ function pointerDown(event) {
 		stopCamPlayback() // any click on the world cancels the flythrough
 		return
 	}
+	if (camMode === "play") {
+		// Any button drags the third-person camera; everything else about play is keyboard.
+		event.preventDefault()
+		drag = { mode: "play-look", pointerId: event.pointerId, x: event.clientX, y: event.clientY }
+		renderer.domElement.setPointerCapture(event.pointerId)
+		return
+	}
 	// Right-drag is always camera orbit, regardless of the active Build/View tool.
 	// Route it before any tool hit-testing so it can never paint, place, select, or
 	// transform scene content.
@@ -2459,6 +2562,7 @@ renderer.domElement.addEventListener("pointermove", event => {
 	}
 	if (camMode === "anim") return
 	if (drag?.mode === "orbit") updateOrbit(event)
+	else if (drag?.mode === "play-look") updatePlayLook(event)
 	else if (drag?.mode === "paint") paintAtEvent(event)
 	else if (drag?.mode === "gizmo") updateGizmoDrag(event)
 	else if (drag?.mode === "primitive-move") updatePrimitiveMoveDrag(event)
@@ -2505,6 +2609,10 @@ renderer.domElement.addEventListener("wheel", event => {
 		return
 	}
 	if (camMode === "anim") return
+	if (camMode === "play") {
+		player.zoom(event.deltaY)
+		return
+	}
 	orbit.radius *= event.deltaY > 0 ? 1.08 : 0.92
 	updateCamera()
 }, { passive: false })
@@ -2527,11 +2635,12 @@ function syncWorldState() {
 
 function renderFramesPanel() {
 	if (!els.framesList) return
-	const building = uiTab === "build"
+	const tab = uiTab === "play" ? "view" : uiTab // Play shares View's splat frames (panel hidden there)
+	const building = tab === "build"
 	const panelTitle = building ? "Builds" : "Results"
 	const addTitle = building ? "New build" : "New result"
 	els.framesTitle.textContent = panelTitle
-	if (els.framesCount) els.framesCount.textContent = String(frames[uiTab].length)
+	if (els.framesCount) els.framesCount.textContent = String(frames[tab].length)
 	if (els.framesPanel) els.framesPanel.setAttribute("aria-label", panelTitle)
 	if (els.frameAdd) {
 		els.frameAdd.title = addTitle
@@ -2539,8 +2648,8 @@ function renderFramesPanel() {
 	}
 	els.framesList.replaceChildren()
 	let activeRow = null
-	for (const frame of frames[uiTab]) {
-		const active = frame.id === activeFrameId[uiTab]
+	for (const frame of frames[tab]) {
+		const active = frame.id === activeFrameId[tab]
 		const item = document.createElement("li")
 		item.className = "frame-item" + (active ? " is-active" : "")
 		const row = document.createElement("button")
@@ -2560,10 +2669,10 @@ function renderFramesPanel() {
 		del.setAttribute("aria-label", `Delete ${frame.name}`)
 		del.addEventListener("click", event => {
 			event.stopPropagation()
-			deleteFrame(uiTab, frame.id)
+			deleteFrame(tab, frame.id)
 		})
 		row.append(name)
-		row.addEventListener("click", () => activateFrame(uiTab, frame.id))
+		row.addEventListener("click", () => activateFrame(tab, frame.id))
 		item.append(row, del)
 		els.framesList.appendChild(item)
 	}
@@ -2787,10 +2896,10 @@ async function deleteFrame(tab, id) {
 			if (next) {
 				activeFrameId.view = next.id
 				world.generated = next.records
-				for (const rec of next.records) rec.mesh.visible = uiTab === "view"
+				for (const rec of next.records) rec.mesh.visible = uiTab !== "build"
 			} else {
 				world.generated = []
-				if (uiTab === "view") setUiTab("build")
+				if (uiTab !== "build") setUiTab("build")
 			}
 			syncWorldState()
 			applyUiTab()
@@ -2939,6 +3048,7 @@ function syncTabGates() {
 	}
 	gate("build", frames.build.length, false)
 	gate("view", frames.view.length, splatting)
+	gate("play", frames.view.length, splatting) // Play walks the generated splats, so it unlocks with View
 }
 const syncViewGate = syncTabGates // existing call sites
 
@@ -5872,6 +5982,18 @@ function segmentSceneSplat(hasGround = true) {
 		console.log(`[segment] sparse edge prune ${part.name} → ${removed} isolated outer gaussian(s) deleted`)
 	}
 
+	// Collapse guard: when the seating/matching went wrong, everything lands in ground
+	// and the pruning passes delete most of the scene (observed: 15% survival vs ~93%
+	// healthy). Keeping the seated monolith is strictly better — retune can recover it.
+	const KEEP_MIN = 0.5
+	let survivors = ground.packed.numSplats
+	for (const part of blobParts.values()) survivors += part.packed.numSplats
+	if (survivors < n * KEEP_MIN) {
+		console.warn(`[segment] collapse guard → kept scene unsegmented: survivors ${survivors}/${n} (${(survivors / n * 100).toFixed(0)}%) below ${KEEP_MIN * 100}% — ground ${ground.packed.numSplats}, ${blobParts.size} object blob(s)`)
+		window.__wsSegLast = { collapsed: true, survivors, total: n, summary: window.__wsSegClaims ?? null }
+		return
+	}
+
 	// Swap the monolith for its pieces inside the same view-frame records array.
 	const idx = world.generated.indexOf(record)
 	if (idx >= 0) world.generated.splice(idx, 1)
@@ -6809,6 +6931,7 @@ els.uploadZip?.addEventListener("change", async event => {
 els.showColliders?.addEventListener("change", () => {
 	showColliders = els.showColliders.checked
 	applyUiTab() // colliders overlay only means something in the View tab; Build already shows the block-out
+	syncPlayColliderHelpers() // in Play it draws the player's voxel collision boxes instead
 })
 
 els.showBounds?.addEventListener("change", () => {
@@ -6869,6 +6992,7 @@ document.addEventListener("keydown", event => {
 		if (els.colorPop && !els.colorPop.classList.contains("hidden")) toggleColorPop(false)
 		else if (settingsOpen) toggleSettings(false)
 		else if (camMode === "anim") stopCamPlayback()
+		else if (uiTab === "play") setUiTab("view")
 		else if (rawSplatPreview) {
 			world.resetGenerated()
 			setStatus("")
@@ -6902,7 +7026,7 @@ els.hfSignOut?.addEventListener("click", () => {
 window.addEventListener("resize", () => {
 	camera.aspect = window.innerWidth / window.innerHeight
 	camera.updateProjectionMatrix()
-	renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)) // resize also fires when the window moves to a monitor with a different DPI
+	renderer.setPixelRatio(camMode === "play" ? 1 : Math.min(window.devicePixelRatio, 2)) // resize also fires when the window moves to a monitor with a different DPI
 	renderer.setSize(window.innerWidth, window.innerHeight)
 })
 
@@ -6914,6 +7038,7 @@ function animate(now = performance.now()) {
 	syncBuildGeometryJson(false, now)
 	if (camMode === "fly") updateFlyCamera(dt)
 	else if (camMode === "anim") updateCamAnim(now)
+	else if (camMode === "play") player.update(dt)
 	sky.position.copy(camera.position)
 	updateTransformGizmo()
 	syncViewTransformOverlay()

@@ -12,7 +12,7 @@ const _corner = new THREE.Vector3()
 // AABB of a single primitive in world/plot-local space. The world group sits at the
 // origin with no transform, so the two frames coincide. Computed from the geometry's
 // bounding box (not setFromObject) so selection-outline children never inflate it.
-function primitiveBox(mesh, target = new THREE.Box3()) {
+export function primitiveBox(mesh, target = new THREE.Box3()) {
 	if (!mesh.geometry.boundingBox) mesh.geometry.computeBoundingBox()
 	const bb = mesh.geometry.boundingBox
 	mesh.updateMatrixWorld(true)

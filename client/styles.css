@@ -172,6 +172,21 @@ body.tab-view .chat-dock {
 	display: none;
 }
 
+/* Play tab: the world, the tabs (the exit), and the controls hint. Everything that
+   edits — rails, docks, panels, camera bar — disappears while walking. */
+body.tab-play .side-rail,
+body.tab-play .frames-panel,
+body.tab-play .bottom-dock,
+body.tab-play .settings-menu,
+body.tab-play .geometry-prompt-dock,
+body.tab-play .cam-bar {
+	display: none;
+}
+
+body.tab-play #canvas canvas {
+	cursor: grab;
+}
+
 /* Orbit plus one lasso/transform tool for the generated splats. */
 .view-dock {
 	display: none;

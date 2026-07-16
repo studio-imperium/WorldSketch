@@ -47,6 +47,7 @@
 		<div class="view-tabs" role="tablist" aria-label="Build or view the world">
 			<button class="view-tab active" data-view-tab="build" role="tab" aria-selected="true" title="Edit the block-out (splats hidden)">Build</button>
 			<button class="view-tab" data-view-tab="view" role="tab" aria-selected="false" disabled title="See and arrange the generated world">View</button>
+			<button class="view-tab" data-view-tab="play" role="tab" aria-selected="false" disabled title="Walk the generated world third-person">Play</button>
 		</div>
 		<aside class="frames-panel card bg-base-100 border border-base-300 shadow-xl" id="frames_panel" aria-label="Builds">
 			<div class="card-body">
@@ -233,6 +234,7 @@
 			</button>
 		</div>
 		<div class="fly-hint hidden" id="fly_hint">WASD move &middot; mouse look &middot; Space / Q&ndash;E up-down &middot; Shift boost &middot; scroll speed &middot; Esc exit</div>
+		<div class="fly-hint hidden" id="play_hint">WASD move &middot; Space jump &middot; Shift sprint &middot; drag look &middot; scroll zoom &middot; Esc exit</div>
 		<p class="status-toast hidden" id="status" role="alert" title="Dismiss"></p>
 	</div>
 	<script type="module" src="/scripts/editor-entry.js?v=login-route-1"></script>
