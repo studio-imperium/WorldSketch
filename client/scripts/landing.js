@@ -142,11 +142,14 @@ async function main() {
 	if (!calib) initReveal()
 
 	const drawFrame = () => {
+		// The tuned radius fills a wide stage; narrower stages lose horizontal FOV,
+		// so back the camera off proportionally rather than let the plate clip.
+		const fit = Math.max(1, 1.24 / (splatLayer.camera.aspect || 1))
 		for (const layer of [splatLayer, sketchLayer]) {
 			layer.camera.position.set(
-				view.target.x + view.radius * Math.sin(view.phi) * Math.sin(view.theta),
-				view.target.y + view.radius * Math.cos(view.phi),
-				view.target.z + view.radius * Math.sin(view.phi) * Math.cos(view.theta),
+				view.target.x + view.radius * fit * Math.sin(view.phi) * Math.sin(view.theta),
+				view.target.y + view.radius * fit * Math.cos(view.phi),
+				view.target.z + view.radius * fit * Math.sin(view.phi) * Math.cos(view.theta),
 			)
 			layer.camera.lookAt(view.target)
 			layer.renderer.render(layer.scene, layer.camera)
@@ -320,8 +323,12 @@ function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v }
 
 function frameFor(box) {
 	const sphere = box.getBoundingSphere(new THREE.Sphere())
+	const target = sphere.center.clone()
+	// Aim below the sphere center: tall thin props (poles) inflate the box, and
+	// targeting half-height leaves a big sky gap while the plate clips below.
+	target.y = box.min.y + (box.max.y - box.min.y) * 0.33
 	return {
-		target: sphere.center.clone(),
+		target,
 		radius: Math.max(0.5, sphere.radius * 1.58), // 1.9 / 1.2 — the world reads ~20% bigger
 		theta: 1.288, // calibrated with the slider tuner (2026-07-16)
 		phi: 1.12, // polar angle from +Y — a gentle look down onto the plot
