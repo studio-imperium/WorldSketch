@@ -10,7 +10,7 @@ import { SparkRenderer, SplatMesh } from "spark"
 import { createPrimitive } from "/scripts/primitives.js"
 // reveal.js is versioned too — the server caches .js for 1h and a stale reveal.js
 // (old feed-me API) paired with a fresh landing.js leaves the band stuck empty.
-import { initReveal } from "/scripts/reveal.js?v=worldsplat-18"
+import { initReveal } from "/scripts/reveal.js?v=worldsplat-19"
 
 const ASSET = "/assets/japanese-courtyard"
 const PANEL = 0xfbfbfa // paper colour; layers clear it at alpha 0 (kept for premultiplied edge blending)
@@ -115,9 +115,8 @@ async function main() {
 		window.addEventListener("resize", applyMorph)
 	}
 
-	// Mount the scroll-reveal band now — it fetches its own baked block-out
-	// (assets/reveal-blockout.json), so construction starts without waiting on
-	// any splat download.
+	// Mount the scroll-reveal band now — it fetches its own pre-sampled points
+	// (assets/reveal-points.json), so it resolves without waiting on any splat.
 	if (!calib) initReveal()
 
 	const drawFrame = () => {
