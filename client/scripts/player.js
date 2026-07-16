@@ -30,6 +30,12 @@ const OPACITY_MIN = 0.35
 const CELL_MIN_PTS = 3
 const GAP_BINS = 2
 
+// Walk-surface estimation (buildGroundMap) and the floor-snap step guard.
+const GROUND_K = 0.8 // rendered skin extends ~0.8σ above a gaussian's center
+const GROUND_TAU = 0.85 // top-down opacity accumulation that counts as "surface"
+const GROUND_MIN_TOTAL = 0.3 // cells thinner than this are holes → bilinear/ring/flat fallbacks
+const STEP = 0.45 // max upward floor snap per grounded frame — taller rises need a jump
+
 // buildBody makes a blocky mini-figure (boxes only, DB32 colours, accent shirt) with
 // hip/shoulder pivot groups so update() can swing the limbs while walking. Its origin
 // is at the feet, so positioning is just the feet point; forward is +Z (the face shows
@@ -190,47 +196,81 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		return splatColliders()
 	}
 
-	// buildGroundMap samples the floor splat piece into a per-cell walkable height, so
-	// the feet stand on the rendered ground rather than the block-out sheet (which can
-	// sit below the fitted scene's surface). The opacity-weighted 0.75 quantile of the
-	// centers per cell approximates the rendered surface: the pure max chases stray
-	// grass blades, the median sinks mid-slab.
+	// buildGroundMap samples the ground splat pieces into a per-cell walkable height, so
+	// the feet stand on the rendered surface rather than the block-out sheet (which can
+	// sit far below the fitted scene) or mid-slab (quantiles of centers put feet waist-
+	// deep in thick dirt). The estimator marches a top-down ray per cell: the surface is
+	// the gaussian top at which accumulated opacity reaches GROUND_TAU. Lone wisps above
+	// the floor can't reach TAU alone, so the ray falls through them into the dense skin.
 	function buildGroundMap() {
 		const cells = new Map()
 		const v = new THREE.Vector3()
 		for (const { mesh } of world.generated) {
-			if (mesh.userData.genKind !== "floor" || !mesh.packedSplats) continue
+			const kind = mesh.userData.genKind
+			// "remainder" is the ground bucket when no ground ink was drawn — walkable too.
+			// Unsegmented "scene" monoliths (collapse-guard fallback) stay unwalkable.
+			if ((kind !== "floor" && kind !== "remainder") || !mesh.packedSplats) continue
 			mesh.updateWorldMatrix(true, false)
-			mesh.packedSplats.forEachSplat((_i, center, _scales, _quaternion, opacity) => {
+			mesh.packedSplats.forEachSplat((_i, center, scales, quaternion, opacity) => {
 				// Lower bar than the colliders: smooth dirt is a few large sparse gaussians,
 				// and an empty cell here reads as "no floor" — a hole to fall through.
 				if (opacity < 0.15) return
 				v.copy(center).applyMatrix4(mesh.matrixWorld)
 				if (!Number.isFinite(v.x + v.y + v.z)) return
+				// World-vertical sigma: scales are LOCAL-axis sigmas (can be negative) —
+				// project through the splat rotation; hypot absorbs the signs.
+				const { x: qx, y: qy, z: qz, w: qw } = quaternion
+				const sv = Math.hypot(
+					2 * (qx * qy + qz * qw) * scales.x,
+					(1 - 2 * (qx * qx + qz * qz)) * scales.y,
+					2 * (qy * qz - qx * qw) * scales.z,
+				)
+				if (!Number.isFinite(sv)) return
 				const key = `${Math.floor(v.x / CELL)},${Math.floor(v.z / CELL)}`
 				let samples = cells.get(key)
 				if (!samples) cells.set(key, (samples = []))
-				samples.push({ y: v.y, w: opacity })
+				samples.push({ top: v.y + GROUND_K * sv, w: opacity })
 			})
 		}
 		if (!cells.size) return null
-		const map = new Map()
+		const raw = new Map() // key -> { y, solid: reached GROUND_TAU }
 		for (const [key, samples] of cells) {
-			samples.sort((a, b) => a.y - b.y)
 			let total = 0
 			for (const s of samples) total += s.w
+			if (total < GROUND_MIN_TOTAL) continue // lone wisps don't make a floor
+			samples.sort((a, b) => b.top - a.top) // march the ray from the sky down
 			let acc = 0
-			let y = samples[samples.length - 1].y
+			let y = samples[0].top // translucent cell → stand on its topmost skin, never under it
 			for (const s of samples) {
 				acc += s.w
-				if (acc >= total * 0.75) {
-					y = s.y
+				if (acc >= GROUND_TAU) {
+					y = s.top
 					break
 				}
 			}
-			map.set(key, y)
+			raw.set(key, { y, solid: acc >= GROUND_TAU })
 		}
-		return map
+		// Trust pass: translucent cells are kept only where no solid surface exists
+		// nearby — stray interior gaussians otherwise read as pockets of floor deep
+		// inside the terrain, and the fallbacks would rather fill from solid neighbors.
+		const map = new Map()
+		for (const [key, cell] of raw) {
+			if (!cell.solid) {
+				const [ix, iz] = key.split(",").map(Number)
+				let nearSolid = false
+				for (let dz = -5; dz <= 5 && !nearSolid; dz++) {
+					for (let dx = -5; dx <= 5; dx++) {
+						if (raw.get(`${ix + dx},${iz + dz}`)?.solid) {
+							nearSolid = true
+							break
+						}
+					}
+				}
+				if (nearSolid) continue
+			}
+			map.set(key, cell.y)
+		}
+		return map.size ? map : null
 	}
 
 	// groundAt is the walk surface: the floor splat's sampled height where it has
@@ -269,19 +309,76 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		return groundHeightAt(x, z)
 	}
 
-	// spawn drops the body at a ground point and starts play.
+	// openGroundCell spirals out from a cell looking for real standing room: a cell with
+	// a sampled floor height AND body clearance from the collider columns (not inside a
+	// deck, wall, or trunk; canopies overhead don't count). Returns feet placement.
+	function openGroundCell(cx, cz, maxR = 24) {
+		const probe = new THREE.Vector3()
+		for (let r = 0; r <= maxR; r++) {
+			for (let dz = -r; dz <= r; dz++) {
+				for (let dx = -r; dx <= r; dx++) {
+					if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+					const ix = cx + dx
+					const iz = cz + dz
+					const y = groundMap.get(`${ix},${iz}`)
+					if (y === undefined) continue
+					const x = (ix + 0.5) * CELL
+					const z = (iz + 0.5) * CELL
+					// Only cells inside the walkable ink bounds — otherwise the clamp
+					// later drags xz back with a stale, wrong y.
+					probe.set(x, y, z)
+					clampToGround(probe, RADIUS)
+					if (Math.abs(probe.x - x) > 1e-6 || Math.abs(probe.z - z) > 1e-6) continue
+					// Reject depressions: a cell most of whose neighbors sit a body-height
+					// above it is a slab-underside sample showing through a top-skin hole.
+					// Standing beside a single cliff face is fine (few higher neighbors).
+					let higher = 0
+					for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
+						const ny = groundMap.get(`${ix + nx},${iz + nz}`)
+						if (ny !== undefined && ny - y > HEIGHT) higher++
+					}
+					if (higher >= 5) continue
+					let blocked = false
+					for (const box of colliders) {
+						if (x < box.min.x || x > box.max.x || z < box.min.z || z > box.max.z) continue
+						if (box.max.y > y + 0.1 && box.min.y < y + HEIGHT) {
+							blocked = true
+							break
+						}
+					}
+					if (!blocked) return { x, z, y }
+				}
+			}
+		}
+		return null
+	}
+
+	// spawn drops the body at a ground point and starts play. The requested point is a
+	// hint: the actual spawn is the nearest open floor cell (sampled ground + body
+	// clearance), because the plot center is often inside a deck, building, or hole in
+	// the floor sampling. Fallback: the ground sample, lifted onto any collider column
+	// covering the point (decks/patios live in object pieces, not the floor piece).
 	function spawn(point) {
 		pos.set(point.x, 0, point.z)
 		clampToGround(pos, RADIUS)
 		groundMap = buildGroundMap()
-		pos.y = groundAt(pos.x, pos.z)
-		console.log(`[play] spawn feet (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}) — groundMap ${groundMap ? groundMap.size + " cells" : "none"}, cell ${Math.floor(pos.x / CELL)},${Math.floor(pos.z / CELL)} = ${groundMap?.get(`${Math.floor(pos.x / CELL)},${Math.floor(pos.z / CELL)}`)?.toFixed?.(2)}`)
+		colliders = buildColliders()
+		const open = groundMap ? openGroundCell(Math.floor(pos.x / CELL), Math.floor(pos.z / CELL)) : null
+		if (open) {
+			pos.set(open.x, open.y, open.z)
+			clampToGround(pos, RADIUS)
+		} else {
+			pos.y = groundAt(pos.x, pos.z)
+			for (const box of colliders) {
+				if (pos.x >= box.min.x && pos.x <= box.max.x && pos.z >= box.min.z && pos.z <= box.max.z && box.max.y > pos.y) pos.y = box.max.y
+			}
+		}
+		console.log(`[play] spawn feet (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}) — groundMap ${groundMap ? groundMap.size + " cells" : "none"}, ${open ? "open cell" : "fallback placement"}`)
 		vel.set(0, 0, 0)
 		camYaw = 0
 		camPolar = 1.05
 		camDist = CAM_DIST
 		onGround = true
-		colliders = buildColliders()
 		body.visible = true
 		body.position.copy(pos)
 		body.rotation.y = facing
@@ -323,6 +420,7 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		if (!body.visible) return
 		dt = Math.min(dt, 0.05) // clamp so a stutter can't tunnel through walls
 		updateBasis()
+		const wasGrounded = onGround
 
 		// Jump uses last frame's grounded state.
 		if (keys.has("Space") && onGround) {
@@ -339,7 +437,11 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		// Land on the ground surface (curved: hills fold into the sampled floor).
 		const floorY = groundAt(pos.x, pos.z)
 		if (pos.y <= floorY) {
-			pos.y = floorY
+			// Step guard: wall tops can bleed into the ground map next to walls (remainder
+			// pieces, ring/bilinear fallbacks). Ground never rises a wall-height in one
+			// grounded frame — hold, and let the wall collider keep blocking. Airborne
+			// (jump/fall) snaps are unrestricted so ledges stay jumpable.
+			pos.y = wasGrounded && floorY - prevFeet > STEP ? prevFeet : floorY
 			vel.y = 0
 			onGround = true
 		}
@@ -438,6 +540,33 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		window.removeEventListener("keydown", onKeyDown)
 		window.removeEventListener("keyup", onKeyUp)
 		keys.clear()
+	}
+
+	// Dev diagnostic (console): window.__wsPlayDebug(x, z) dumps the ground-piece
+	// gaussian column, nearby ground-map cells, and the feet position — floor-height
+	// bugs recur, and this answers "what does the sampler actually see there".
+	window.__wsPlayDebug = (x, z) => {
+		const v = new THREE.Vector3()
+		const out = []
+		for (const { mesh } of world.generated) {
+			const kind = mesh.userData.genKind
+			if ((kind !== "floor" && kind !== "remainder") || !mesh.packedSplats) continue
+			mesh.updateWorldMatrix(true, false)
+			mesh.packedSplats.forEachSplat((_i, center, _s, _q, opacity) => {
+				v.copy(center).applyMatrix4(mesh.matrixWorld)
+				if (Math.abs(v.x - x) <= CELL / 2 && Math.abs(v.z - z) <= CELL / 2) out.push({ y: Number(v.y.toFixed(2)), o: Number(opacity.toFixed(2)) })
+			})
+		}
+		out.sort((a, b) => b.y - a.y)
+		const cells = {}
+		for (let dz = -2; dz <= 2; dz++) {
+			for (let dx = -2; dx <= 2; dx++) {
+				const k = `${Math.floor(x / CELL) + dx},${Math.floor(z / CELL) + dz}`
+				const y = groundMap?.get(k)
+				if (y !== undefined) cells[k] = Number(y.toFixed(2))
+			}
+		}
+		return { column: out.slice(0, 25), total: out.length, cells, feet: pos.toArray().map(n => Number(n.toFixed(2))) }
 	}
 
 	return { body, spawn, hide, update, addLook, zoom, attach, detach, colliderBoxes: () => colliders }
