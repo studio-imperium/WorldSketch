@@ -111,9 +111,8 @@ async function main() {
 		window.addEventListener("resize", applyMorph)
 	}
 
-	// Mount the scroll-reveal band now — it fetches its own baked block-out
-	// (assets/reveal-blockout.json), so construction starts without waiting on
-	// any splat download.
+	// Mount the scroll-reveal band now — it fetches its own pre-sampled points
+	// (assets/reveal-points.json), so it resolves without waiting on any splat.
 	if (!calib) initReveal()
 
 	const drawFrame = () => {
