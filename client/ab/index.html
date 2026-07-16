@@ -68,13 +68,13 @@
 			<div class="flex items-center gap-3 flex-wrap">
 				<button class="btn btn-primary btn-sm" id="run_btn">Run A/B</button>
 				<button class="btn btn-ghost btn-sm hidden" id="cancel_btn">Cancel</button>
-				<label class="label cursor-pointer gap-2" title="Images run on the paid inference API (about 1–2¢ each) and splats on the direct TripoSplat server (TRIPOSPLAT_URL) instead of the ZeroGPU Spaces. The paid image API takes one image only, so the geometry map is skipped.">
+				<label class="label cursor-pointer gap-2" title="Splat builds only: use the direct TripoSplat server (TRIPOSPLAT_URL) instead of the ZeroGPU Space. Images always run on the same ZeroGPU Qwen Space as live generations so A/B results match production.">
 					<input type="checkbox" class="checkbox checkbox-sm" id="use_inference_credits">
-					<span class="label-text text-sm">Inference credits + direct TripoSplat (skip ZeroGPU)</span>
+					<span class="label-text text-sm">Direct TripoSplat for splat builds (skip ZeroGPU)</span>
 				</label>
 				<span class="text-sm opacity-70" id="status_line"></span>
 			</div>
-			<p class="text-xs opacity-60">Each cell is one GPU run on the image Space (uses your ZeroGPU quota) unless the checkbox routes it to inference credits. Runs go one at a time. Leave Prompt B empty to run only Prompt A (seed sweep).</p>
+			<p class="text-xs opacity-60">Each cell is one GPU run on the SAME ZeroGPU Qwen image Space the live app uses (spends your ZeroGPU quota — results transfer 1:1 to production). Runs go one at a time. Leave Prompt B empty to run only Prompt A (seed sweep).</p>
 		</div>
 	</div>
 

@@ -17,6 +17,8 @@ if (!getHuggingFaceAuth().signedIn) el("auth_warning").classList.remove("hidden"
 let controller = null
 
 // Same key as the main app, so the setting carries over between the two pages.
+// Here it routes ONLY the per-card splat builds (direct TripoSplat vs ZeroGPU);
+// the image stage is pinned to the live ZeroGPU Qwen Space below.
 try { el("use_inference_credits").checked = localStorage.getItem("worldsketch.useInferenceCredits") === "true" } catch {}
 el("use_inference_credits").addEventListener("change", () => {
 	try { localStorage.setItem("worldsketch.useInferenceCredits", String(el("use_inference_credits").checked)) } catch {}
@@ -111,12 +113,14 @@ async function run() {
 		for (const seed of seeds) {
 			for (const { variant, prompt } of variants) {
 				setStatus(`Running ${done + 1}/${total} — Prompt ${variant} · seed ${seed}…`)
+				// Always the live image path — the ZeroGPU Qwen Space — never the paid
+				// inference provider: same weights name, different serving stack, and
+				// A/B verdicts must transfer 1:1 to production generations.
 				const blob = await detailImageOnHuggingFace({
 					prompt,
 					image,
 					geometryImage,
 					seed,
-					useInferenceCredits: useInferenceCredits(),
 					signal: controller.signal,
 					onProgress: (fraction, label) => setStatus(`${done + 1}/${total} — ${variant}·${seed}: ${label}`),
 				})
