@@ -12,6 +12,10 @@ The app is a static client served by the Go server; the browser is the surface.
 - The dev server is often already running: `lsof -i :8067 -sTCP:LISTEN`. It serves
   `client/` straight from disk, so file edits are live on reload — no build step.
 - Otherwise: `cd server && go run .` (port from `PORT`, default 8067; env from `.env`).
+- The editor lives at `/app/` (`client/app/index.html`); `/` is the marketing landing
+  page and `/login` the Hugging Face sign-in. Drive `http://localhost:8067/app/`.
+  Static files are always live, but compiled Go routes are not — if server code
+  changed, start a fresh instance on another PORT rather than trusting the old binary.
 
 ## Drive (Playwright)
 
