@@ -3480,6 +3480,53 @@ function cutsceneTween(ms, step) {
 	})
 }
 
+// Ground the block-out onto the SEATED splat for the show. The splat is fitted
+// to the block-out only loosely (uniform content-box fit, its own floor level),
+// so raw block poses read as "a different place" when the swap lands. Anchoring
+// floor-to-floor — the block-out's ground top onto the splat floor's surface —
+// plus an XZ centre match and a footprint scale puts every block exactly where
+// its splat counterpart will appear. Returns a rig group inside world.group;
+// identity when the splat is too sparse to judge.
+function cutsceneGroundingRig() {
+	const rig = new THREE.Group()
+	world.group.add(rig)
+	try {
+		const box = wholeSceneBox() // the frame the splat was seated against
+		const xs = [], ys = [], zs = [], floorYs = []
+		const point = new THREE.Vector3()
+		for (const { mesh } of world.generated) {
+			if (!mesh.packedSplats?.forEachSplat) continue
+			mesh.updateMatrix()
+			const isFloor = mesh.userData.genKind === "floor"
+			let i = 0
+			mesh.packedSplats.forEachSplat((_i, center) => {
+				if (i++ % 16) return // a 1/16 sample is plenty for percentile bounds
+				if (![center.x, center.y, center.z].every(Number.isFinite)) return
+				point.copy(center).applyMatrix4(mesh.matrix)
+				xs.push(point.x); ys.push(point.y); zs.push(point.z)
+				if (isFloor) floorYs.push(point.y)
+			})
+		}
+		if (xs.length < 100) return rig // too sparse to judge — leave the blocks in place
+		const pct = (arr, p) => { arr.sort((a, b) => a - b); return arr[Math.min(arr.length - 1, Math.floor(p * arr.length))] }
+		const sx0 = pct(xs, 0.02), sx1 = pct(xs, 0.98)
+		const sz0 = pct(zs, 0.02), sz1 = pct(zs, 0.98)
+		// The splat "floor level" objects stand on: the segmented floor piece's
+		// median height, or (monolith scenes) just above the content's bottom.
+		const splatFloorY = floorYs.length >= 50 ? pct(floorYs, 0.5) : pct(ys, 0.03)
+		const bw = Math.max(0.001, box.max.x - box.min.x)
+		const bd = Math.max(0.001, box.max.z - box.min.z)
+		const s = Math.min(2, Math.max(0.5, ((sx1 - sx0) / bw + (sz1 - sz0) / bd) / 2))
+		const anchorBlock = new THREE.Vector3((box.min.x + box.max.x) / 2, groundTopY, (box.min.z + box.max.z) / 2)
+		const anchorSplat = new THREE.Vector3((sx0 + sx1) / 2, splatFloorY, (sz0 + sz1) / 2)
+		rig.scale.setScalar(s)
+		rig.position.copy(anchorSplat).sub(anchorBlock.multiplyScalar(s))
+	} catch (error) {
+		console.warn("cutscene grounding skipped:", error)
+	}
+	return rig
+}
+
 async function playGenerationCutscene() {
 	const blocks = world.allBlockoutMeshes()
 	if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !blocks.length || !world.generated.length) {
@@ -3496,9 +3543,14 @@ async function playGenerationCutscene() {
 	const meshes = [...blocks].sort(
 		(a, b) => (a.position.y - a.scale.y / 2) - (b.position.y - b.scale.y / 2),
 	)
+	// Move the blocks into the grounding rig for the show — plain add() keeps
+	// their LOCAL transforms, so handing them back to world.group afterwards
+	// restores the editor's exact poses with no bookkeeping.
+	const rig = cutsceneGroundingRig()
 	for (const mesh of meshes) {
 		setColliderStyle(mesh, false)
 		mesh.visible = false
+		rig.add(mesh)
 	}
 	const saved = meshes.map(mesh => ({
 		emissive: mesh.material.emissive.getHex(),
@@ -3541,7 +3593,9 @@ async function playGenerationCutscene() {
 			meshes[i].material.emissive.setHex(saved[i].emissive)
 			meshes[i].material.emissiveIntensity = saved[i].intensity
 			for (const { edge, base } of saved[i].edges) edge.material.color.copy(base)
+			world.group.add(meshes[i]) // hand back with the original local pose
 		}
+		rig.removeFromParent()
 		applyUiTab() // re-assert canonical View visibility whatever happened
 		document.body.classList.remove("cutscene") // CSS fades the UI back in
 	}
