@@ -23,8 +23,6 @@ const SEED_MIN = 3
 const SEED_MAX = 14
 const COLOR = "#f0f0f0"
 const FADE_FRACTION = 0.18 // entry/exit ramp, as a fraction of the sticky scroll distance
-const EDGE_FADE_PX = 140 // spatial ramp at the canvas's own top/bottom edges — the pattern
-                         // dissolves into paper before the band ends, never a hard cut
 
 const band = document.getElementById("showcase-scroll")
 const row = band?.querySelector(".showcase")
@@ -76,12 +74,7 @@ if (band && row && gl) {
 			// the edges (0.55, was 0.35) so the bands stay out of the middle.
 			float d = abs(frag.y / uRes.y - 0.5) * 2.0; // 0 mid → 1 at edges
 			float fade = smoothstep(0.55, 0.95, d);
-			// …but never hard against the band's ends: dissolve over the last
-			// EDGE px so the pattern always meets the neighbouring paper softly.
-			float edge = min(
-				smoothstep(0.0, ${EDGE_FADE_PX.toFixed(1)}, frag.y),
-				smoothstep(0.0, ${EDGE_FADE_PX.toFixed(1)}, uRes.y - frag.y));
-			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * fade * edge); // premultiplied
+			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * fade); // premultiplied
 		}`
 	const program = gl.createProgram()
 	for (const [type, source] of [[gl.VERTEX_SHADER, VERT], [gl.FRAGMENT_SHADER, FRAG]]) {
