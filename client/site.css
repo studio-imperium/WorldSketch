@@ -10,6 +10,7 @@
 	--ink-faint: #6e6e68;
 	--line: #e5e4df;
 	--white: #ffffff;
+	--accent: #5b6ee1;     /* editor accent — ties the marketing keywords to the app */
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }

@@ -42,13 +42,28 @@
 			letter-spacing: -0.04em;
 			text-wrap: balance;
 		}
-		.hero-cta { display: flex; gap: 12px; margin-top: 44px; }
+		.hero-cta { display: flex; gap: 12px; margin-top: 40px; }
 		.hero-copy {
+			margin-top: 22px;
 			font-size: 18px;
 			line-height: 1.55;
 			color: var(--ink-soft);
 			max-width: 46ch;
-			justify-self: end;
+		}
+
+		/* ---- hero cursor-follower splat (right column) ---- */
+		.hero-stage {
+			position: relative;
+			height: clamp(380px, 34vw, 540px);
+			overflow: hidden;
+		}
+		.hero-stage canvas {
+			position: absolute;
+			inset: 0;
+			width: 100%;
+			height: 100%;
+			display: block;
+			pointer-events: none; /* ambient — it watches the cursor, never captures it */
 		}
 
 		/* ---- showcase card with the live splat ---- */
@@ -122,12 +137,191 @@
 			color: var(--ink-faint);
 			pointer-events: none;
 		}
+
+		/* ---- shared eyebrow (mono, technical) ---- */
+		.eyebrow {
+			font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+			font-size: 12px;
+			font-weight: 500;
+			letter-spacing: 0.22em;
+			text-transform: uppercase;
+			color: var(--ink-faint);
+		}
+
+		/* ---- scroll-reveal: the gaussian resolves from its centre ---- */
+		.reveal {
+			position: relative;
+			min-height: min(88vh, 820px);
+			margin-top: 44px;
+			border-top: 1px solid var(--line);
+			border-bottom: 1px solid var(--line);
+			background: var(--paper);
+			overflow: hidden;
+			isolation: isolate;
+		}
+		.reveal-grid {
+			position: absolute;
+			inset: 0;
+			background-image:
+				linear-gradient(to right, rgba(13, 13, 12, 0.045) 1px, transparent 1px),
+				linear-gradient(to bottom, rgba(13, 13, 12, 0.045) 1px, transparent 1px);
+			background-size: 46px 46px;
+			-webkit-mask-image: radial-gradient(125% 92% at 50% 46%, #000 52%, transparent 100%);
+			mask-image: radial-gradient(125% 92% at 50% 46%, #000 52%, transparent 100%);
+			pointer-events: none;
+		}
+		.reveal-code {
+			position: absolute;
+			inset: 0;
+			overflow: hidden;
+			pointer-events: none;
+			-webkit-mask-image: radial-gradient(closest-side at 50% 50%, transparent 26%, #000 76%);
+			mask-image: radial-gradient(closest-side at 50% 50%, transparent 26%, #000 76%);
+		}
+		.reveal-code pre {
+			position: absolute;
+			left: 0;
+			right: 0;
+			top: 0;
+			margin: 0;
+			padding: 0 clamp(16px, 4vw, 60px);
+			font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+			font-size: 12.5px;
+			line-height: 1.9;
+			color: rgba(13, 13, 12, 0.07);
+			white-space: pre;
+			will-change: transform;
+			animation: code-drift 52s linear infinite;
+		}
+		@keyframes code-drift { to { transform: translateY(-50%); } }
+		.reveal-canvas {
+			position: absolute;
+			inset: 0;
+			width: 100%;
+			height: 100%;
+			display: block;
+			pointer-events: none;
+			z-index: 1;
+		}
+		.reveal-lead {
+			position: relative;
+			z-index: 2;
+			max-width: 1440px;
+			margin: 0 auto;
+			padding: clamp(44px, 7vw, 92px) 36px 0;
+			pointer-events: none;
+		}
+		.reveal-lead .eyebrow { margin-bottom: 18px; }
+		.reveal-lead h2 {
+			font-size: clamp(30px, 4vw, 52px);
+			font-weight: 500;
+			letter-spacing: -0.035em;
+			line-height: 1.05;
+			max-width: 17ch;
+			text-wrap: balance;
+		}
+		.reveal-sub {
+			margin-top: 16px;
+			max-width: 38ch;
+			font-size: 17px;
+			line-height: 1.55;
+			color: var(--ink-soft);
+		}
+		.reveal-count {
+			position: absolute;
+			left: 50%;
+			bottom: 26px;
+			transform: translateX(-50%);
+			z-index: 2;
+			font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+			font-size: 12px;
+			letter-spacing: 0.16em;
+			text-transform: uppercase;
+			color: var(--ink-faint);
+			pointer-events: none;
+		}
+
+		/* ---- explainer rows (what worldsplat does) ---- */
+		.features {
+			max-width: 1120px;
+			margin: 0 auto;
+			padding: clamp(76px, 10vw, 132px) 36px clamp(36px, 6vw, 72px);
+			display: flex;
+			flex-direction: column;
+			gap: clamp(64px, 9vw, 116px);
+		}
+		.feature {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: clamp(32px, 6vw, 84px);
+			align-items: center;
+		}
+		.feature:nth-child(even) .feature-copy { order: 2; }
+		.feature-icon { display: block; width: 38px; height: 38px; color: var(--ink); margin-bottom: 22px; }
+		.feature h3 {
+			font-size: clamp(25px, 3vw, 37px);
+			font-weight: 550;
+			letter-spacing: -0.03em;
+			line-height: 1.08;
+			max-width: 15ch;
+		}
+		.feature h3 em { font-style: normal; color: var(--accent); }
+		.feature-sub {
+			margin: 15px 0 22px;
+			font-size: 16.5px;
+			line-height: 1.55;
+			color: var(--ink-soft);
+			max-width: 40ch;
+		}
+		.feature-list { list-style: none; display: flex; flex-direction: column; gap: 12px; }
+		.feature-list li {
+			position: relative;
+			padding-left: 22px;
+			font-size: 15.5px;
+			line-height: 1.5;
+			color: var(--ink-soft);
+		}
+		.feature-list li::before {
+			content: "";
+			position: absolute;
+			left: 3px;
+			top: 9px;
+			width: 6px;
+			height: 6px;
+			border-radius: 50%;
+			background: var(--accent);
+		}
+		.feature-art {
+			position: relative;
+			aspect-ratio: 4 / 3;
+			border: 1px solid var(--line);
+			border-radius: 20px;
+			background:
+				linear-gradient(to right, rgba(13, 13, 12, 0.04) 1px, transparent 1px) 0 0 / 34px 34px,
+				linear-gradient(to bottom, rgba(13, 13, 12, 0.04) 1px, transparent 1px) 0 0 / 34px 34px,
+				var(--card);
+			overflow: hidden;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+		}
+		.feature-art svg { width: 68%; height: auto; }
+
+		@media (prefers-reduced-motion: reduce) {
+			.reveal-code pre { animation: none; }
+		}
 		@media (max-width: 900px) {
 			main { padding: 0 20px; }
 			.hero { grid-template-columns: 1fr; gap: 28px; padding: 56px 0 36px; }
-			.hero-copy { justify-self: start; }
+			.hero-stage { height: 46vw; min-height: 260px; }
 			.tab span.tab-word { display: none; }
 			.stage { height: 58vh; min-height: 380px; }
+			.reveal { min-height: 78vh; }
+			.reveal-lead { padding-left: 20px; padding-right: 20px; }
+			.features { padding: 72px 20px 32px; }
+			.feature { grid-template-columns: 1fr; gap: 26px; }
+			.feature:nth-child(even) .feature-copy { order: 0; }
+			.feature-art { order: -1; }
 		}
 	</style>
 </head>
@@ -152,12 +346,13 @@
 		<section class="hero">
 			<div>
 				<h1>Sketch a world.<br>Walk inside it.</h1>
+				<p class="hero-copy">Powering worldbuilders, game designers, and daydreamers. Draw a rough plot and worldsplat grows it into an explorable 3D world&nbsp;&mdash; one seamless gaussian splat at a time.</p>
 				<div class="hero-cta">
 					<a class="pill pill-black pill-lg" href="/login">Sign up</a>
 					<a class="pill pill-outline pill-lg" href="mailto:hello@worldsplat.ai?subject=worldsplat%20demo">Book a demo</a>
 				</div>
 			</div>
-			<p class="hero-copy">Powering worldbuilders, game designers, and daydreamers. Draw a rough plot and worldsplat grows it into an explorable 3D world&nbsp;&mdash; one seamless gaussian splat at a time.</p>
+			<div class="hero-stage" id="hero-stage" aria-hidden="true"></div>
 		</section>
 
 		<section class="showcase" aria-label="Live world preview">
@@ -171,10 +366,115 @@
 		</section>
 	</main>
 
+	<section class="reveal" id="reveal" aria-label="How worldsplat resolves a world">
+		<div class="reveal-grid" aria-hidden="true"></div>
+		<div class="reveal-code" id="reveal-code" aria-hidden="true"></div>
+		<canvas class="reveal-canvas" id="reveal-canvas" aria-hidden="true"></canvas>
+		<div class="reveal-lead">
+			<p class="eyebrow">Gaussian field</p>
+			<h2>A world is a cloud of splats.</h2>
+			<p class="reveal-sub">Scroll, and the plot you drew resolves the way worldsplat builds it&nbsp;&mdash; from the centre out, one gaussian at a time.</p>
+		</div>
+		<p class="reveal-count" id="reveal-count" aria-hidden="true">resolving&hellip;</p>
+	</section>
+
+	<section class="features" aria-label="What worldsplat does">
+		<article class="feature">
+			<div class="feature-copy">
+				<svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<rect x="3" y="3" width="8" height="8" rx="1.5"/>
+					<path d="M15 5h6M18 2v6"/>
+					<circle cx="7.5" cy="17" r="1.2"/><circle cx="12" cy="19.5" r="1.2"/><circle cx="16.5" cy="16.5" r="1.2"/><circle cx="20" cy="19" r="1.2"/><circle cx="14" cy="15" r="1.2"/>
+				</svg>
+				<p class="eyebrow">Generate</p>
+				<h3>Rough plots in, <em>seamless worlds</em> out.</h3>
+				<p class="feature-sub">Block out a plot in the editor and worldsplat grows it into one continuous gaussian ground.</p>
+				<ul class="feature-list">
+					<li>Add plots as you go — seams blend automatically across tiles.</li>
+					<li>Reshape after generation: raise, lower, or move any plot live.</li>
+					<li>Objects stay editable; the ground stays one unified splat.</li>
+				</ul>
+			</div>
+			<div class="feature-art" aria-hidden="true">
+				<svg viewBox="0 0 240 180" fill="none" stroke="#0d0d0c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+					<g opacity="0.6">
+						<rect x="20" y="58" width="72" height="72" rx="4"/>
+						<path d="M20 82h72M20 106h72M44 58v72M68 58v72"/>
+					</g>
+					<path d="M104 94h30" stroke="#5b6ee1" stroke-width="1.6"/>
+					<path d="M128 88l8 6-8 6" stroke="#5b6ee1" stroke-width="1.6"/>
+					<g opacity="0.75" fill="#0d0d0c" stroke="none">
+						<circle cx="158" cy="70" r="3.4"/><circle cx="176" cy="84" r="4.6"/><circle cx="196" cy="72" r="2.6"/>
+						<circle cx="168" cy="102" r="3"/><circle cx="190" cy="98" r="5"/><circle cx="208" cy="88" r="3.4"/>
+						<circle cx="156" cy="92" r="2.4"/><circle cx="202" cy="110" r="2.8"/><circle cx="180" cy="116" r="3.2"/>
+					</g>
+				</svg>
+			</div>
+		</article>
+
+		<article class="feature">
+			<div class="feature-copy">
+				<svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="12" cy="5" r="2.2"/>
+					<path d="M12 8v6M8 20l4-6 4 6M8 11h8"/>
+				</svg>
+				<p class="eyebrow">Explore</p>
+				<h3>Not a fly-over. <em>Walk inside it.</em></h3>
+				<p class="feature-sub">Drop into first person and move through the world you drew, with real ground under your feet.</p>
+				<ul class="feature-list">
+					<li>WASD and mouse-look, with true collision on ground and objects.</li>
+					<li>Frame a shot path and export a clean, GUI-free flythrough.</li>
+					<li>Everything you place is something you can stand on.</li>
+				</ul>
+			</div>
+			<div class="feature-art" aria-hidden="true">
+				<svg viewBox="0 0 240 180" fill="none" stroke="#0d0d0c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+					<path d="M30 132l90 24 90-24" opacity="0.6"/>
+					<path d="M30 132l70-40 70 40" opacity="0.35"/>
+					<g stroke="#5b6ee1" stroke-width="1.5">
+						<path d="M96 96l-30 44M96 96l40 40"/>
+					</g>
+					<circle cx="96" cy="88" r="6" fill="#5b6ee1" stroke="none"/>
+					<path d="M150 70c22 4 40 18 40 30" stroke-dasharray="4 6" opacity="0.7"/>
+					<circle cx="190" cy="100" r="2.6" fill="#0d0d0c" stroke="none"/>
+				</svg>
+			</div>
+		</article>
+
+		<article class="feature">
+			<div class="feature-copy">
+				<svg class="feature-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+					<circle cx="8" cy="9" r="3.5"/>
+					<path d="M10.5 11.5l7 7M15 16l2 2M13 18l2 2"/>
+				</svg>
+				<p class="eyebrow">Own</p>
+				<h3>Your account, <em>your compute.</em></h3>
+				<p class="feature-sub">Sign in with Hugging Face and generate on your own allowance — nothing is rendered on our servers.</p>
+				<ul class="feature-list">
+					<li>OAuth sign-in — worldsplat never sees your password.</li>
+					<li>Generation runs on your ZeroGPU credits, not ours.</li>
+					<li>Builds persist locally; export and take them anywhere.</li>
+				</ul>
+			</div>
+			<div class="feature-art" aria-hidden="true">
+				<svg viewBox="0 0 240 180" fill="none" stroke="#0d0d0c" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+					<rect x="78" y="58" width="84" height="64" rx="6" opacity="0.6"/>
+					<path d="M96 58v-12M120 58v-12M144 58v-12M96 122v12M120 122v12M144 122v12M78 76H66M78 100H66M162 76h12M162 100h12" opacity="0.6"/>
+					<rect x="104" y="80" width="32" height="20" rx="3" opacity="0.5"/>
+					<g stroke="#5b6ee1" stroke-width="1.6">
+						<circle cx="120" cy="90" r="7"/>
+						<path d="M120 97v22M116 112h8M114 118h6"/>
+					</g>
+				</svg>
+			</div>
+		</article>
+	</section>
+
 	<footer class="footer">
 		<span>&copy; 2026 worldsplat</span>
 	</footer>
 
-	<script type="module" src="/scripts/landing.js?v=worldsplat-1"></script>
+	<script type="module" src="/scripts/landing.js?v=worldsplat-2"></script>
+	<script type="module" src="/scripts/hero-splat.js?v=1"></script>
 </body>
 </html>
