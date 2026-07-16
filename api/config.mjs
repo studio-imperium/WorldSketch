@@ -31,7 +31,9 @@ export function runtimeConfig() {
 			imageSpace: env("WS_HF_IMAGE_SPACE", "WilliamQM/Qwen-Image-Edit-2509"),
 			tripoSpace: env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
 			tripoDirectUrl: env("TRIPOSPLAT_URL", ""),
-			inferenceProvider: env("WS_HF_INFERENCE_PROVIDER", "wavespeed"),
+			// fal-ai runs the real Qwen pipeline with our steps/guidance; wavespeed's Qwen
+			// endpoint is a fixed consistency-preserving preset that ignores both.
+			inferenceProvider: env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
 			inferenceModel: env("WS_HF_INFERENCE_MODEL", "Qwen/Qwen-Image-Edit-2509"),
 			image: {
 				steps: envInt("WS_HF_IMAGE_STEPS", 20, 1, 100),
@@ -42,6 +44,8 @@ export function runtimeConfig() {
 			tripo: {
 				steps: envInt("WS_HF_TRIPO_STEPS", 30, 1, 64),
 				guidance: envFloat("WS_HF_TRIPO_GUIDANCE", 3),
+				// 262144 is TripoSplat's hard maximum — its pipeline asserts
+				// num_gaussians ∈ [32768, 262144] (triposplat.py _validate_num_gaussians).
 				gaussians: envInt("WS_HF_TRIPO_GAUSSIANS", 131072, 32768, 262144),
 				format: "splat",
 			},

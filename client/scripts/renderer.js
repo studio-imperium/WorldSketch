@@ -18,6 +18,7 @@ import { createPrimitive, disposeObject, setEdgeOutlineVisible, updateEdgeOutlin
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { clearFramesState, loadFramesState, saveFramesState } from "/scripts/frames-store.js"
 import { loadDefaultBuildSeeds } from "/scripts/default-builds.js"
+import { estimateYawFromData } from "/scripts/yaw-core.js?v=yaw-1" // main-thread fallback when the yaw worker can't start
 import { createSky } from "/scripts/sky.js"
 import { cloneGroundStrokes, closeGroundStroke, paintGroundStroke } from "/scripts/ground-strokes.js"
 
@@ -3617,6 +3618,7 @@ function applyRuntimeConfig(cfg) {
 const ISO_PROJ_RIGHT = [1 / Math.sqrt(2), 0, -1 / Math.sqrt(2)] // capture camera basis
 const ISO_PROJ_UP = [-1 / Math.sqrt(6), 2 / Math.sqrt(6), -1 / Math.sqrt(6)]
 const YAW_GRID = 32
+const YAW_FTP_GRID = 64 // footprint raster resolution — must match FTP_G in yaw-core.js
 
 function captureProjectionBasis(theta = FRONT_THETA, phi = FRONT_PHI) {
 	const eye = new THREE.Vector3().setFromSpherical(new THREE.Spherical(1, phi, theta))
@@ -3728,6 +3730,8 @@ function paintedGroundSampler() {
 		waterCenter,
 		dominantColor,
 		prominentColors,
+		data, // raw S×S RGBA pixels — lets the yaw worker replicate sample/isWater as pure data
+		size: S,
 		sample(wx, wz) {
 			const o = cellAt(wx, wz)
 			if (o < 0) return null
@@ -3823,94 +3827,40 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 		parseInt(key.slice(0, 2), 16), parseInt(key.slice(2, 4), 16), parseInt(key.slice(4, 6), 16),
 	)]))
 
-	// Sample the raw splat (pos f32×3 at +0, rgba u8×4 at +24, 32-byte stride; stored Y
-	// is world-inverted — the same flip fit.js bakes with its negative Y scale).
-	const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength)
-	const count = bytes.length >> 5
-	const stride = Math.max(1, Math.floor(count / 40000))
-	const pts = []
-	for (let i = 0; i < count; i += stride) {
-		const o = i << 5
-		if (view.getUint8(o + 27) < 40) continue // skip near-transparent reconstruction haze
-		pts.push([view.getFloat32(o, true), -view.getFloat32(o + 4, true), view.getFloat32(o + 8, true),
-			view.getUint8(o + 24), view.getUint8(o + 25), view.getUint8(o + 26)])
-	}
-	if (pts.length < 100) return null
-
-	// Height gate for the block-coverage term: yaw rotates about Y, so heights are
-	// yaw-invariant. Points above the low quartile band count as "object material" —
-	// flat terrain inside a block's projected rect must not make the block look found.
-	const heights = pts.map(p => p[1]).sort((a, b) => a - b)
-	const hq = f => heights[Math.min(heights.length - 1, (f * (heights.length - 1)) | 0)]
-	const floorY = hq(0.25)
-	const aboveY = floorY + 0.08 * Math.max(1e-6, hq(0.99) - floorY)
-
-	// Painted-ground WATER correlation setup: reproduce the fit's mapping (uniform scale
-	// from unrotated spans, mirror before rotation, rotation about the target centre) so
-	// each candidate predicts where every near-floor gaussian LANDS in the world. Water is
-	// the one painted feature whose hue order (blue over red) survives the image model and
-	// Tripo, so it discriminates both yaw AND handedness razor-sharply, where mud paths
-	// and grass share warm chroma and mislead. (Run 0158: Tripo returned a MIRRORED
-	// reconstruction — no yaw matched until the water term exposed the flip.)
+	// Ground evidence (painted-sheet pixels, footprint raster, colour-anchor classes) is
+	// prepared here as plain data. The heavy work — splat sampling and the candidate
+	// sweep — runs in yaw-core.js inside a Web Worker so this step no longer freezes the
+	// tab; the scoring terms and their reasoning live there now.
 	const groundSampler = world.groundInkBounds() ? paintedGroundSampler() : null
-	let mapGeom = null // the fit's raw→world mapping (uniform scale, mirror-then-yaw about the target centre)
-	let groundGeom = null // water term inputs
-	let anchorClumps = null // world-space colour-anchor term inputs
-	const FTP_G = 64 // footprint-registration grid resolution
-	let inkGrid = null, inkCells = 0, floorPts = [], footprintUsable = false
+	let ground = null
 	if (groundSampler) {
-		const xs = pts.map(p => p[0]).sort((a, b) => a - b)
-		const zs = pts.map(p => p[2]).sort((a, b) => a - b)
-		const gq = (arr, f) => arr[Math.min(arr.length - 1, (f * (arr.length - 1)) | 0)]
-		const x0 = gq(xs, 0.003), x1 = gq(xs, 0.997), z0 = gq(zs, 0.003), z1 = gq(zs, 0.997)
 		const target = wholeSceneBox()
-		mapGeom = {
-			cx: (x0 + x1) / 2, cz: (z0 + z1) / 2,
-			spanX: Math.max(1e-6, x1 - x0), spanZ: Math.max(1e-6, z1 - z0),
+		const tGeom = {
 			tcx: (target.min.x + target.max.x) / 2, tcz: (target.min.z + target.max.z) / 2,
 			tSpanX: target.max.x - target.min.x, tSpanZ: target.max.z - target.min.z,
 		}
-		// Footprint registration: the drawn ground outline is the strongest orientation
-		// signal in the scene (the new prompt makes the artwork reproduce it faithfully,
-		// and an irregular island is rotation- AND mirror-sensitive everywhere, unlike a
-		// central pond, which carries no rotation signal at all — run 0170 seated ~25° off
-		// on exactly that failure). Rasterize the painted ink over the target box and
-		// score each candidate by floor-silhouette IoU against it.
-		inkGrid = new Uint8Array(FTP_G * FTP_G)
-		{
-			const padX = mapGeom.tSpanX * 0.05, padZ = mapGeom.tSpanZ * 0.05
-			mapGeom.fx0 = mapGeom.tcx - mapGeom.tSpanX / 2 - padX
-			mapGeom.fz0 = mapGeom.tcz - mapGeom.tSpanZ / 2 - padZ
-			mapGeom.fw = mapGeom.tSpanX + 2 * padX
-			mapGeom.fh = mapGeom.tSpanZ + 2 * padZ
-			for (let gz = 0; gz < FTP_G; gz++) {
-				for (let gx = 0; gx < FTP_G; gx++) {
-					const wx = mapGeom.fx0 + (gx + 0.5) / FTP_G * mapGeom.fw
-					const wz = mapGeom.fz0 + (gz + 0.5) / FTP_G * mapGeom.fh
-					if (groundSampler.sample(wx, wz)) { inkGrid[gz * FTP_G + gx] = 1; inkCells++ }
-				}
+		const padX = tGeom.tSpanX * 0.05, padZ = tGeom.tSpanZ * 0.05
+		tGeom.fx0 = tGeom.tcx - tGeom.tSpanX / 2 - padX
+		tGeom.fz0 = tGeom.tcz - tGeom.tSpanZ / 2 - padZ
+		tGeom.fw = tGeom.tSpanX + 2 * padX
+		tGeom.fh = tGeom.tSpanZ + 2 * padZ
+		// Footprint registration target: the drawn ground outline rasterized over the
+		// target box (rotation- and mirror-sensitive everywhere — see run 0170).
+		const inkGrid = new Uint8Array(YAW_FTP_GRID * YAW_FTP_GRID)
+		let inkCells = 0
+		for (let gz = 0; gz < YAW_FTP_GRID; gz++) {
+			for (let gx = 0; gx < YAW_FTP_GRID; gx++) {
+				const wx = tGeom.fx0 + (gx + 0.5) / YAW_FTP_GRID * tGeom.fw
+				const wz = tGeom.fz0 + (gz + 0.5) / YAW_FTP_GRID * tGeom.fh
+				if (groundSampler.sample(wx, wz)) { inkGrid[gz * YAW_FTP_GRID + gx] = 1; inkCells++ }
 			}
 		}
-		{
-			const all = pts.filter(([, y]) => y <= aboveY)
-			const step = Math.max(1, Math.floor(all.length / 4000))
-			for (let i = 0; i < all.length; i += step) floorPts.push(all[i])
-		}
-		footprintUsable = inkCells >= 80 && floorPts.length >= 500
-		const coolPts = pts.filter(([, y, , r, g, b]) => y <= aboveY && r + g + b > 90 && b > r + 8 && g >= r)
-		if (coolPts.length >= 150 && groundSampler.waterCells >= 100) {
-			let mx = 0, mz2 = 0
-			for (const [x, , z] of coolPts) { mx += x; mz2 += z }
-			groundGeom = { coolPts, coolMean: [mx / coolPts.length, mz2 / coolPts.length] }
-		}
-		// Colour-anchor clumps: the splat's DISTINCTIVE colour masses (a red mushroom cap,
-		// a yellow flower) must land near the same-coloured guide blocks. This survives
-		// scenes whose pond is too small for placement drift (run 0163: water term 0.00 at
-		// every yaw, blocks/iou saturated, seating flipped). Colours near the painted
-		// terrain's dominant chroma (bush green ≈ grass) carry no signal and are skipped.
+		// Colour-anchor classes: the splat's DISTINCTIVE colour masses must land near the
+		// same-coloured guide blocks (run 0163). Colours near the painted terrain's
+		// dominant chroma (bush green ≈ grass) carry no signal and are skipped.
 		const paintedChromas = (groundSampler.prominentColors ?? []).map(c => unitChroma(...c))
 		const matchesPainted = cc => paintedChromas.some(pcc => (cc[3] < 12) === (pcc[3] < 12) && (cc[3] < 12 || cc[0] * pcc[0] + cc[1] * pcc[1] + cc[2] * pcc[2] > 0.85))
-		const classes = [] // { dir:[3]|null(neutral), targets:[[x,z]], pts:[[x,z]] }
+		const anchorClasses = [] // { dir:[3]|null(neutral), targets:[[x,z]] }
 		for (const mesh of meshes) {
 			const hex = mesh.userData.baseColor ?? mesh.material.color.getHexString()
 			const cc = unitChroma(parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16))
@@ -3919,208 +3869,90 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 			if (matchesPainted(cc)) continue // ≈ a painted terrain colour — ground would pollute it
 			mesh.updateWorldMatrix(true, false)
 			const wp = new THREE.Vector3().setFromMatrixPosition(mesh.matrixWorld)
-			const existing = classes.find(k => (k.dir == null) === neutral && (neutral || k.dir[0] * cc[0] + k.dir[1] * cc[1] + k.dir[2] * cc[2] > 0.9))
+			const existing = anchorClasses.find(k => (k.dir == null) === neutral && (neutral || k.dir[0] * cc[0] + k.dir[1] * cc[1] + k.dir[2] * cc[2] > 0.9))
 			if (existing) existing.targets.push([wp.x, wp.z])
-			else classes.push({ dir: neutral ? null : [cc[0], cc[1], cc[2]], targets: [[wp.x, wp.z]], pts: [] })
+			else anchorClasses.push({ dir: neutral ? null : [cc[0], cc[1], cc[2]], targets: [[wp.x, wp.z]] })
 		}
-		for (const [x, y, z, r, g, b] of pts) {
-			if (y <= aboveY || r + g + b < 105) continue // floor material and shadows carry no anchor evidence
-			const pc = unitChroma(r, g, b)
-			for (const k of classes) {
-				if (k.dir == null
-					? pc[3] < 18 && (r + g + b) / 3 > 80 && (r + g + b) / 3 < 215 // neutral: mid-bright grey
-					: pc[3] >= 12 && pc[0] * k.dir[0] + pc[1] * k.dir[1] + pc[2] * k.dir[2] > 0.8) { k.pts.push([x, z]); break }
-			}
+		ground = {
+			grid: groundSampler.data,
+			gridSize: groundSampler.size,
+			sheetSize: GROUND_SHEET_SIZE,
+			waterCells: groundSampler.waterCells,
+			waterCenter: groundSampler.waterCenter,
+			target: tGeom,
+			inkGrid,
+			inkCells,
+			anchorClasses,
 		}
-		const usable = classes.filter(k => k.pts.length >= 100)
-		for (const k of usable) {
-			// Component-wise median: robust against a minority of stray same-hue points.
-			const xs2 = k.pts.map(p => p[0]).sort((a, b) => a - b)
-			const zs2 = k.pts.map(p => p[1]).sort((a, b) => a - b)
-			k.median = [xs2[xs2.length >> 1], zs2[zs2.length >> 1]]
-			k.weight = Math.min(1, k.pts.length / 600)
-		}
-		if (usable.length) anchorClumps = usable
 	}
 
-	const baseCandidates = [0, 90, 180, 270]
-	const offset = basis.yawOffsetDeg
-	// With ground evidence, sweep finely: Tripo's content normalization is NOT guaranteed
-	// to be quarter-aligned to the capture (0158's true yaw was ~343°, no candidate near
-	// it). Without it, only the classic quarter(±capture offset) candidates are decidable.
-	const yawCandidates = [...new Set([
-		...baseCandidates,
-		...baseCandidates.map(yaw => yaw + offset),
-		...baseCandidates.map(yaw => yaw - offset),
-		...(groundGeom || anchorClumps ? Array.from({ length: 72 }, (_, i) => i * 5) : []),
-	].map(yaw => Math.round((((yaw % 360) + 360) % 360) * 1000) / 1000))]
-	// Handedness is only decidable with ground evidence; a mirrored candidate must beat
-	// the best regular one by a real margin before we accept the flip.
-	const mirrorCandidates = groundGeom || anchorClumps ? [false, true] : [false]
-	let bestYaw = null, bestMirror = false, bestScore = -Infinity
-	const candidatesOut = []
-	for (const mirror of mirrorCandidates) {
-	for (const yaw of yawCandidates) {
-		const th = (yaw * Math.PI) / 180, co = Math.cos(th), si = Math.sin(th)
-		const mz = mirror ? -1 : 1
-		const uv = []
-		for (const [x, y, z, r, g, b] of pts) {
-			const wx = x * co + mz * z * si, wz = -x * si + mz * z * co
-			uv.push([
-				wx * projRight[0] + y * projRight[1] + wz * projRight[2],
-				wx * projUp[0] + y * projUp[1] + wz * projUp[2],
-				r, g, b, y,
-			])
-		}
-		const us = uv.map(p => p[0]).sort((a, b) => a - b)
-		const vs = uv.map(p => p[1]).sort((a, b) => a - b)
-		const q = (arr, f) => arr[Math.min(arr.length - 1, (f * (arr.length - 1)) | 0)]
-		const u0 = q(us, 0.003), u1 = q(us, 0.997), v0 = q(vs, 0.003), v1 = q(vs, 0.997)
-		const splatOcc = new Set()
-		const colorSums = new Map([...anchors.keys()].map(key => [key, [0, 0, 0]]))
-		const rectCounts = new Array(normRects.length).fill(0)
-		const RECT_PAD = 0.03
-		let n = 0
-		for (const [u, v, r, g, b, wy] of uv) {
-			const x = (u - u0) / Math.max(1e-9, u1 - u0)
-			const y = (v - v0) / Math.max(1e-9, v1 - v0)
-			if (x < 0 || x > 1 || y < 0 || y > 1) continue
-			n++
-			splatOcc.add(Math.min(YAW_GRID - 1, x * YAW_GRID | 0) * YAW_GRID + Math.min(YAW_GRID - 1, y * YAW_GRID | 0))
-			if (wy > aboveY) {
-				for (let ri = 0; ri < normRects.length; ri++) {
-					const [ru0, ru1, rv0, rv1] = normRects[ri]
-					if (x >= ru0 - RECT_PAD && x <= ru1 + RECT_PAD && y >= rv0 - RECT_PAD && y <= rv1 + RECT_PAD) rectCounts[ri]++
-				}
-			}
-			const cu = unitChroma(r, g, b)
-			let bestKey = null, bestDot = 0.6 // require a decent chroma match to claim a point
-			for (const [key, bc] of anchorChroma) {
-				if (bc[3] < 10) {
-					// A neutral anchor (grey rock, white stone) is often the scene's most
-					// distinctive landmark — colourful terrain can't impersonate it. Claim
-					// splat points that are also neutral and of similar brightness instead
-					// of discarding the anchor entirely.
-					if (cu[3] < 28 && bestKey == null) { // low-chroma, not strictly neutral: painted grey is blue-grey
-						const anchorMean = (parseInt(key.slice(0, 2), 16) + parseInt(key.slice(2, 4), 16) + parseInt(key.slice(4, 6), 16)) / 3
-						if (Math.abs((r + g + b) / 3 - anchorMean) < 60) bestKey = key
-					}
-					continue
-				}
-				if (cu[3] < 10) continue // grey/shadow points carry no direction for chromatic anchors
-				const dot = cu[0] * bc[0] + cu[1] * bc[1] + cu[2] * bc[2]
-				if (dot > bestDot) { bestDot = dot; bestKey = key }
-			}
-			if (bestKey) {
-				const s = colorSums.get(bestKey)
-				s[0] += x; s[1] += y; s[2]++
-			}
-		}
-		// Water correlation: fraction of the splat's cool near-floor points that this
-		// seating lands on painted water. Sharp peak at the true (yaw, mirror); collapses
-		// at every wrong one.
-		let groundHit = 0, groundTot = 0
-		let anchorWorldTerm = null
-		let waterProx = null
-		let footprintIoU = null
-		if (mapGeom) {
-			const swap = Math.abs(Math.round(yaw / 90)) % 2
-			const gs = 0.5 * ((swap ? mapGeom.tSpanZ : mapGeom.tSpanX) / mapGeom.spanX
-				+ (swap ? mapGeom.tSpanX : mapGeom.tSpanZ) / mapGeom.spanZ)
-			const toWorld = (x, z) => {
-				const dx = gs * (x - mapGeom.cx), dz = mz * gs * (z - mapGeom.cz)
-				return [mapGeom.tcx + dx * co + dz * si, mapGeom.tcz - dx * si + dz * co]
-			}
-			if (groundGeom) {
-				for (const [x, , z] of groundGeom.coolPts) {
-					const [wx, wz] = toWorld(x, z)
-					const water = groundSampler.isWater(wx, wz)
-					if (water == null) continue
-					groundTot++
-					if (water) groundHit++
-				}
-			}
-			// Small ponds drift past their own radius (run 0163: overlap 0.00 at EVERY
-			// yaw), so back the overlap up with centroid proximity — it degrades smoothly
-			// instead of cliffing to zero.
-			if (groundGeom && groundSampler.waterCenter) {
-				const [wx, wz] = toWorld(groundGeom.coolMean[0], groundGeom.coolMean[1])
-				const d = Math.hypot(wx - groundSampler.waterCenter[0], wz - groundSampler.waterCenter[1])
-				waterProx = Math.max(0, 1 - d / (0.3 * Math.max(mapGeom.tSpanX, mapGeom.tSpanZ)))
-			}
-			if (footprintUsable) {
-				const occ = new Uint8Array(FTP_G * FTP_G)
-				for (const [x, , z] of floorPts) {
-					const [wx, wz] = toWorld(x, z)
-					const gx = Math.floor((wx - mapGeom.fx0) / mapGeom.fw * FTP_G)
-					const gz = Math.floor((wz - mapGeom.fz0) / mapGeom.fh * FTP_G)
-					if (gx >= 0 && gx < FTP_G && gz >= 0 && gz < FTP_G) occ[gz * FTP_G + gx] = 1
-				}
-				let inter = 0, occCells = 0
-				for (let c = 0; c < FTP_G * FTP_G; c++) {
-					if (occ[c]) { occCells++; if (inkGrid[c]) inter++ }
-				}
-				footprintIoU = inter / Math.max(1, inkCells + occCells - inter)
-			}
-			if (anchorClumps) {
-				const reach = 0.4 * Math.max(mapGeom.tSpanX, mapGeom.tSpanZ)
-				let sum = 0, wsum = 0
-				for (const k of anchorClumps) {
-					const [wx, wz] = toWorld(k.median[0], k.median[1])
-					let best = Infinity
-					for (const [tx, tz] of k.targets) best = Math.min(best, Math.hypot(wx - tx, wz - tz))
-					sum += k.weight * Math.max(0, 1 - best / reach)
-					wsum += k.weight
-				}
-				if (wsum > 0) anchorWorldTerm = sum / wsum
-			}
-		}
-		let inter = 0
-		for (const cell of splatOcc) if (occupancyTarget.has(cell)) inter++
-		const iou = inter / Math.max(1, occupancyTarget.size + splatOcc.size - inter)
-		let anchorTerm = 0, anchorWeight = 0
-		for (const [key, a] of anchors) {
-			const s = colorSums.get(key)
-			const share = a[2] / blockMass
-			if (!s[2] || share > 0.6) continue // the dominant colour is everywhere — no signal
-			const w = Math.min(share, s[2] / Math.max(1, n))
-			const d = Math.hypot(s[0] / s[2] - a[0] / a[2], s[1] / s[2] - a[1] / a[2])
-			anchorTerm += w * (1 - Math.min(1, d * 1.5))
-			anchorWeight += w
-		}
-		// Block coverage dominates: a quarter-turn that leaves any expected block's
-		// projected rect without above-floor material cannot be the true orientation
-		// (run 0112: the rock rect was empty at 0°/180°, yet colour centroids — skewed
-		// by terrain that shares the blocks' palette — preferred exactly those yaws).
-		const rectMin = Math.max(12, n * 0.0008)
-		const covered = rectCounts.filter(count => count >= rectMin).length
-		// The water term outweighs block coverage when there is enough painted-water
-		// evidence: coverage saturates on scenes with one large object (a canopy covers
-		// most rects at EVERY yaw), while landed-on-water cannot be impersonated.
-		const overlapFrac = groundTot >= 100 ? groundHit / groundTot : null
-		const groundFrac = overlapFrac == null && waterProx == null ? null : Math.max(overlapFrac ?? 0, 0.8 * (waterProx ?? 0))
-		const groundTermScore = groundFrac == null ? 0 : 2.5 * normRects.length * groundFrac
-		const anchorTermScore = anchorWorldTerm == null ? 0 : 1.5 * normRects.length * anchorWorldTerm
-		// A mirrored seating is exotic; demand a decisive margin before accepting it.
-		const baseScore = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0) + groundTermScore + anchorTermScore - (mirror ? 0.06 * normRects.length : 0)
-		candidatesOut.push({ yaw, mirror, baseScore, ftp: footprintIoU, dbg: `${mirror ? "M" : ""}${yaw}°(blk ${covered}/${normRects.length} iou ${iou.toFixed(2)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(2) : "—"} wat ${groundFrac == null ? "—" : groundFrac.toFixed(2)} anc ${anchorWorldTerm == null ? "—" : anchorWorldTerm.toFixed(2)} ftp ${footprintIoU == null ? "—" : footprintIoU.toFixed(2)})` })
+	// The bytes copy is rebuilt per attempt: a transferred buffer is unusable afterwards,
+	// and the fallback must never receive a detached one.
+	const buildInput = () => ({
+		bytes: bytes.slice(),
+		projRight,
+		projUp,
+		yawOffsetDeg: basis.yawOffsetDeg,
+		blocks: {
+			normRects,
+			blockOcc: [...blockOcc],
+			occupancyTarget: occupancyTarget === blockOcc ? null : [...occupancyTarget],
+			anchors: [...anchors],
+			anchorChroma: [...anchorChroma],
+			blockMass,
+		},
+		ground,
+	})
+	let result = null
+	try {
+		result = await runYawEstimateJob(buildInput())
+	} catch (error) {
+		console.warn("[fit] yaw worker unavailable — estimating on the main thread:", error)
+		result = estimateYawFromData(buildInput())
 	}
+	if (!result) return null
+	if (result.error) {
+		console.warn("[fit] yaw estimate failed:", result.error)
+		return null
 	}
-	// Footprint IoU carries the drawn ground's outline — the densest orientation signal —
-	// but its ABSOLUTE spread is small (fit overhang + haze flatten it), so min-max
-	// normalize it across the sweep before weighting: the candidate the outline prefers
-	// must win against saturated block/iou terms (run 0171: outline said 315°, blocks 40°).
-	const ftpVals = candidatesOut.filter(c => c.ftp != null).map(c => c.ftp)
-	const ftpMin = Math.min(...ftpVals), ftpMax = Math.max(...ftpVals)
-	for (const c of candidatesOut) {
-		const ftpNorm = c.ftp != null && ftpMax > ftpMin ? (c.ftp - ftpMin) / (ftpMax - ftpMin) : 0
-		c.score = c.baseScore + 1.5 * normRects.length * ftpNorm
-		if (c.score > bestScore) { bestScore = c.score; bestYaw = c.yaw; bestMirror = c.mirror }
-	}
-	const top = [...candidatesOut].sort((a, b) => b.score - a.score).slice(0, 8).map(c => `${c.score.toFixed(1)}:${c.dbg}`)
-	console.log(`[fit] scene yaw estimate → ${bestMirror ? "MIRROR+" : ""}${bestYaw}° over ${candidatesOut.length} candidates (top: ${top.join(" ")})`)
-	window.__wsLastYaw = { yawDeg: bestYaw, mirrorZ: bestMirror, top: top.slice(0, 4) }
-	return { yawDeg: bestYaw, mirrorZ: bestMirror }
+	console.log(result.log)
+	window.__wsLastYaw = { yawDeg: result.yawDeg, mirrorZ: result.mirrorZ, top: result.top.slice(0, 4) }
+	return { yawDeg: result.yawDeg, mirrorZ: result.mirrorZ }
+}
+
+// One shared yaw worker, one job at a time. Both call sites run under the generating
+// lock, but the chain guards against overlap anyway; only the splat-bytes buffer is
+// transferred (it is by far the largest input — the pixel grids are just cloned).
+let yawWorker = null
+let yawWorkerChain = Promise.resolve()
+
+function runYawEstimateJob(input) {
+	const run = () => new Promise((resolve, reject) => {
+		try {
+			yawWorker ??= new Worker("/scripts/yaw-worker.js?v=yaw-1", { type: "module" })
+		} catch (error) {
+			reject(error)
+			return
+		}
+		const worker = yawWorker
+		const cleanup = () => {
+			worker.removeEventListener("message", onMessage)
+			worker.removeEventListener("error", onError)
+		}
+		const onMessage = event => { cleanup(); resolve(event.data) }
+		const onError = event => {
+			cleanup()
+			yawWorker = null
+			worker.terminate()
+			reject(event.error ?? new Error(event.message || "yaw worker failed"))
+		}
+		worker.addEventListener("message", onMessage)
+		worker.addEventListener("error", onError)
+		worker.postMessage(input, [input.bytes.buffer])
+	})
+	const job = yawWorkerChain.then(run, run)
+	yawWorkerChain = job.catch(() => {})
+	return job
 }
 
 // Bounds used by both generation and saved-session re-fitting. The ground contributes

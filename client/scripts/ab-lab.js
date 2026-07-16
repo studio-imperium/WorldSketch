@@ -57,14 +57,16 @@ function download(blob, name) {
 	setTimeout(() => URL.revokeObjectURL(link.href), 10_000)
 }
 
-function addResultCard({ variant, seed, blob }) {
+function addResultCard({ variant, seed, blob, viaCredits = false }) {
 	const card = document.createElement("div")
 	card.className = "card bg-base-100 border border-base-300 shadow"
 	const url = URL.createObjectURL(blob)
+	// Tag each cell with its route — Space and credits cells must not be compared.
+	const route = viaCredits ? " · credits" : ""
 	card.innerHTML = `
 		<figure><img class="result-img" src="${url}" alt="Prompt ${variant} seed ${seed}"></figure>
 		<div class="card-body p-3 flex-row items-center justify-between">
-			<span class="font-semibold text-sm">Prompt ${variant} · seed ${seed}</span>
+			<span class="font-semibold text-sm">Prompt ${variant} · seed ${seed}${route}</span>
 			<div class="flex gap-2">
 				<button class="btn btn-ghost btn-xs" data-save>Save PNG</button>
 				<button class="btn btn-outline btn-xs" data-splat>Build splat</button>
@@ -113,18 +115,22 @@ async function run() {
 		for (const seed of seeds) {
 			for (const { variant, prompt } of variants) {
 				setStatus(`Running ${done + 1}/${total} — Prompt ${variant} · seed ${seed}…`)
-				// Always the live image path — the ZeroGPU Qwen Space — never the paid
-				// inference provider: same weights name, different serving stack, and
-				// A/B verdicts must transfer 1:1 to production generations.
+				// Checkbox off: the live image path — the ZeroGPU Qwen Space — for verdicts
+				// that transfer 1:1 to production. Checkbox on: the paid provider (same Qwen
+				// weights + steps/guidance, different backend) — representative rather than
+				// exact, but it works when the ZeroGPU quota is exhausted. Compare cells only
+				// within one route: seeds do not reproduce across backends.
+				const viaCredits = useInferenceCredits()
 				const blob = await detailImageOnHuggingFace({
 					prompt,
 					image,
 					geometryImage,
 					seed,
+					useInferenceCredits: viaCredits,
 					signal: controller.signal,
 					onProgress: (fraction, label) => setStatus(`${done + 1}/${total} — ${variant}·${seed}: ${label}`),
 				})
-				addResultCard({ variant, seed, blob })
+				addResultCard({ variant, seed, blob, viaCredits })
 				done += 1
 			}
 		}
