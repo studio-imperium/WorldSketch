@@ -13,7 +13,16 @@
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
-html { scroll-behavior: smooth; }
+html {
+	scroll-behavior: smooth;
+	/* No scrollbars on the marketing page: the full-bleed 100vw stage would
+	   otherwise force a horizontal bar (100vw includes the scrollbar gutter),
+	   and the vertical bar is hidden chrome — the page still scrolls. */
+	overflow-x: hidden;
+	overflow-x: clip;
+	scrollbar-width: none;
+}
+html::-webkit-scrollbar { display: none; }
 
 body {
 	font-family: "Inter", -apple-system, "Helvetica Neue", Arial, sans-serif;

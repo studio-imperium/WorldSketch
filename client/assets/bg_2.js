@@ -9,7 +9,12 @@
 const PIXEL = 5 // CSS px per pattern cell (the sketch's finer grain — do not DPR-scale)
 const ZOOM = 8
 const SPEED = 2 // offset units per frame, /128 — the sketch's slower tempo
-const SEED = 7 // 7 wave directions spread evenly over 2π
+// The wave-direction count breathes between SEED_MIN and SEED_MAX (a slow sine
+// over the drift clock) — the pattern morphs from sparse stripes to dense
+// rosettes and back. Fractional counts blend the newest direction in smoothly.
+const SEED_MIN = 3
+const SEED_MAX = 8
+const SEED_RATE = 0.0875 // sine frequency vs the drift offset (~75s per cycle)
 const COLOR = "#f0f0f0" // same ink as bg.js so both bands read as one system
 
 const band = document.getElementById("reveal")
@@ -37,6 +42,7 @@ if (band && gl) {
 		precision mediump float;
 		uniform vec2 uRes;
 		uniform float uOffset;
+		uniform float uSeed; // live direction count, ${SEED_MIN}..${SEED_MAX} (fractional)
 		const float TAU = 6.28318530718;
 
 		void main() {
@@ -47,12 +53,21 @@ if (band && gl) {
 
 			float sum = 0.0;
 			float angle = TAU;
-			for (int i = 0; i < ${SEED}; i++) {
-				sum += cos(cos(angle) * p.x + sin(angle) * p.y + uOffset) * 100.0;
-				angle -= TAU / ${SEED.toFixed(1)};
+			for (int i = 0; i < ${SEED_MAX}; i++) {
+				// Directions past uSeed weigh 0; the frontier direction fades in
+				// with its fraction, so the count morphs instead of popping.
+				float w = clamp(uSeed - float(i), 0.0, 1.0);
+				sum += w * cos(cos(angle) * p.x + sin(angle) * p.y + uOffset) * 100.0;
+				angle -= TAU / uSeed;
 			}
-			float on = step(0.5, sum / ${SEED.toFixed(1)});
-			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * on; // premultiplied
+			float on = step(0.5, sum / uSeed);
+			// Clear the top-left and bottom-right corners with the same curved
+			// falloff idea as bg.js's hero fade — the band's two headlines sit in
+			// those corners and must read on clean paper, not on the pattern.
+			vec2 uv = frag / uRes;
+			float corner = smoothstep(0.42, 0.8, length(uv))
+				* smoothstep(0.42, 0.8, length(vec2(1.0) - uv));
+			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * corner); // premultiplied
 		}`
 
 	const VERT = "attribute vec2 aPos; void main() { gl_Position = vec4(aPos, 0.0, 1.0); }"
@@ -75,6 +90,7 @@ if (band && gl) {
 
 	const uRes = gl.getUniformLocation(program, "uRes")
 	const uOffset = gl.getUniformLocation(program, "uOffset")
+	const uSeed = gl.getUniformLocation(program, "uSeed")
 
 	let offset = 0
 	let raf = 0
@@ -93,7 +109,10 @@ if (band && gl) {
 	}
 
 	function draw() {
+		const mid = (SEED_MIN + SEED_MAX) / 2
+		const amp = (SEED_MAX - SEED_MIN) / 2
 		gl.uniform1f(uOffset, offset)
+		gl.uniform1f(uSeed, mid + amp * Math.sin(offset * SEED_RATE))
 		gl.drawArrays(gl.TRIANGLES, 0, 3)
 	}
 
