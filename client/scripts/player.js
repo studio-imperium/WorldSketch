@@ -149,6 +149,7 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 			mesh.packedSplats.forEachSplat((_i, center, _scales, _quaternion, opacity) => {
 				if (opacity < OPACITY_MIN) return
 				v.copy(center).applyMatrix4(mesh.matrixWorld)
+				if (!Number.isFinite(v.x + v.y + v.z)) return // a NaN center poisons its voxel key into a degenerate sky-spanning box
 				const key = `${Math.floor(v.x / CELL)},${Math.floor(v.y / CELL)},${Math.floor(v.z / CELL)}`
 				counts.set(key, (counts.get(key) ?? 0) + 1)
 			})
@@ -191,8 +192,9 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 
 	// buildGroundMap samples the floor splat piece into a per-cell walkable height, so
 	// the feet stand on the rendered ground rather than the block-out sheet (which can
-	// sit below the fitted scene's surface). The 0.9 quantile per cell keeps stray tall
-	// gaussians (grass blades, wisps) from lifting the floor.
+	// sit below the fitted scene's surface). The opacity-weighted 0.75 quantile of the
+	// centers per cell approximates the rendered surface: the pure max chases stray
+	// grass blades, the median sinks mid-slab.
 	function buildGroundMap() {
 		const cells = new Map()
 		const v = new THREE.Vector3()
@@ -200,29 +202,71 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 			if (mesh.userData.genKind !== "floor" || !mesh.packedSplats) continue
 			mesh.updateWorldMatrix(true, false)
 			mesh.packedSplats.forEachSplat((_i, center, _scales, _quaternion, opacity) => {
-				if (opacity < OPACITY_MIN) return
+				// Lower bar than the colliders: smooth dirt is a few large sparse gaussians,
+				// and an empty cell here reads as "no floor" — a hole to fall through.
+				if (opacity < 0.15) return
 				v.copy(center).applyMatrix4(mesh.matrixWorld)
+				if (!Number.isFinite(v.x + v.y + v.z)) return
 				const key = `${Math.floor(v.x / CELL)},${Math.floor(v.z / CELL)}`
-				let ys = cells.get(key)
-				if (!ys) cells.set(key, (ys = []))
-				ys.push(v.y)
+				let samples = cells.get(key)
+				if (!samples) cells.set(key, (samples = []))
+				samples.push({ y: v.y, w: opacity })
 			})
 		}
 		if (!cells.size) return null
 		const map = new Map()
-		for (const [key, ys] of cells) {
-			ys.sort((a, b) => a - b)
-			map.set(key, ys[Math.floor((ys.length - 1) * 0.9)])
+		for (const [key, samples] of cells) {
+			samples.sort((a, b) => a.y - b.y)
+			let total = 0
+			for (const s of samples) total += s.w
+			let acc = 0
+			let y = samples[samples.length - 1].y
+			for (const s of samples) {
+				acc += s.w
+				if (acc >= total * 0.75) {
+					y = s.y
+					break
+				}
+			}
+			map.set(key, y)
 		}
 		return map
 	}
 
 	// groundAt is the walk surface: the floor splat's sampled height where it has
 	// content, the host's flat ground elsewhere (and everywhere when nothing was
-	// generated with a floor).
+	// generated with a floor). The four surrounding cells blend bilinearly — raw
+	// per-cell heights step, which popped the feet above/into the floor while walking.
 	function groundAt(x, z) {
-		const y = groundMap?.get(`${Math.floor(x / CELL)},${Math.floor(z / CELL)}`)
-		return y ?? groundHeightAt(x, z)
+		if (!groundMap) return groundHeightAt(x, z)
+		const gx = x / CELL - 0.5
+		const gz = z / CELL - 0.5
+		const x0 = Math.floor(gx)
+		const z0 = Math.floor(gz)
+		const fx = gx - x0
+		const fz = gz - z0
+		let sum = 0
+		let wsum = 0
+		for (const [ix, iz, w] of [[x0, z0, (1 - fx) * (1 - fz)], [x0 + 1, z0, fx * (1 - fz)], [x0, z0 + 1, (1 - fx) * fz], [x0 + 1, z0 + 1, fx * fz]]) {
+			if (!w) continue
+			const y = groundMap.get(`${ix},${iz}`)
+			if (y === undefined) continue
+			sum += y * w
+			wsum += w
+		}
+		if (wsum > 0) return sum / wsum
+		// Hole in the floor sampling (big sparse gaussians leave empty cells): take the
+		// nearest mapped cell within a few rings before conceding to the flat sheet.
+		for (let r = 1; r <= 6; r++) {
+			for (let dz = -r; dz <= r; dz++) {
+				for (let dx = -r; dx <= r; dx++) {
+					if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
+					const y = groundMap.get(`${x0 + dx},${z0 + dz}`)
+					if (y !== undefined) return y
+				}
+			}
+		}
+		return groundHeightAt(x, z)
 	}
 
 	// spawn drops the body at a ground point and starts play.
@@ -231,6 +275,7 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		clampToGround(pos, RADIUS)
 		groundMap = buildGroundMap()
 		pos.y = groundAt(pos.x, pos.z)
+		console.log(`[play] spawn feet (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}) — groundMap ${groundMap ? groundMap.size + " cells" : "none"}, cell ${Math.floor(pos.x / CELL)},${Math.floor(pos.z / CELL)} = ${groundMap?.get(`${Math.floor(pos.x / CELL)},${Math.floor(pos.z / CELL)}`)?.toFixed?.(2)}`)
 		vel.set(0, 0, 0)
 		camYaw = 0
 		camPolar = 1.05
