@@ -36,7 +36,6 @@ if (calib) await booted
 async function main() {
 	// Kick the heavy splat download off first so it streams while the sketch builds.
 	const splatFetch = fetch(`${ASSET}.ply`)
-	let refit = null // set below once the seat exists; drawFrame runs it every frame
 	const splatLayer = makeLayer()
 	// Spark draws every SplatMesh through ANY SparkRenderer sharing its globals, so
 	// only the splat layer gets one — a second would ghost the splat into the sketch.
@@ -65,55 +64,6 @@ async function main() {
 		view.theta = qn("theta", view.theta)
 		view.phi = qn("phi", view.phi)
 		view.radius *= qn("r", 1)
-	}
-
-	// The auto-rotate swings the plate's diagonal through the stage's narrow axis,
-	// so a fixed distance either clips at some angles or wastes size at all of
-	// them. Instead the camera dollies back each frame by exactly what the
-	// CURRENT angle needs: project the seated world's corners through the real
-	// camera and push back until the worst one fits. The need varies smoothly
-	// with the rotation, so the tiny dolly reads as part of the orbit — and at
-	// angles that fit, the world stays at the full tuned size.
-	const FIT_MARGIN = 0.96 // a corner may reach 96% of the way to the stage edge
-	const baseRadius = view.radius
-	// Per-mesh corners, not one seat-wide box: a single AABB puts the pole-top
-	// height above every plate corner and overstates the needed distance. The
-	// sketch seat covers the splat seat (1.04 vs 0.845 of the same footprint).
-	seat.updateMatrixWorld(true)
-	const fitCorners = []
-	seat.traverse(node => {
-		if (!node.geometry) return
-		if (!node.geometry.boundingBox) node.geometry.computeBoundingBox()
-		const b = node.geometry.boundingBox
-		for (let i = 0; i < 8; i++) {
-			fitCorners.push(new THREE.Vector3(
-				i & 1 ? b.max.x : b.min.x,
-				i & 2 ? b.max.y : b.min.y,
-				i & 4 ? b.max.z : b.min.z,
-			).applyMatrix4(node.matrixWorld))
-		}
-	})
-	const fitVec = new THREE.Vector3()
-	refit = calib ? null : () => { // calib pins the exact radius via the ?r= multiplier
-		const camera = splatLayer.camera
-		let radius = baseRadius
-		for (let pass = 0; pass < 3; pass++) {
-			camera.position.set(
-				view.target.x + radius * Math.sin(view.phi) * Math.sin(view.theta),
-				view.target.y + radius * Math.cos(view.phi),
-				view.target.z + radius * Math.sin(view.phi) * Math.cos(view.theta),
-			)
-			camera.lookAt(view.target)
-			camera.updateMatrixWorld(true)
-			let worst = 0
-			for (const corner of fitCorners) {
-				fitVec.copy(corner).project(camera)
-				worst = Math.max(worst, Math.abs(fitVec.x), Math.abs(fitVec.y))
-			}
-			if (worst <= FIT_MARGIN) break
-			radius *= worst / FIT_MARGIN
-		}
-		view.radius = radius
 	}
 	hint.remove()
 	sketchLayer.canvas.style.opacity = "1" // visible immediately; the scroll morph takes over below
@@ -192,7 +142,6 @@ async function main() {
 	if (!calib) initReveal()
 
 	const drawFrame = () => {
-		refit?.() // per-frame: dolly back exactly as far as this angle requires
 		for (const layer of [splatLayer, sketchLayer]) {
 			layer.camera.position.set(
 				view.target.x + view.radius * Math.sin(view.phi) * Math.sin(view.theta),
@@ -275,6 +224,10 @@ async function main() {
 			if (!w || !h) return
 			renderer.setSize(w, h, false)
 			camera.aspect = w / h
+			// Full-bleed canvas: seat the world around the left third — the copy owns
+			// the right. Proportional to the extra width, so squarish viewports (and
+			// the mobile layout) keep the world centered.
+			camera.setViewOffset(w, h, Math.round(Math.max(0, w - h) * 0.35), 0, w, h)
 			camera.updateProjectionMatrix()
 		}
 		new ResizeObserver(resize).observe(stage)
