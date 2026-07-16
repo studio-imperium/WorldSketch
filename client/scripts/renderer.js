@@ -11,7 +11,7 @@ import {
 	signOutHuggingFace,
 } from "/scripts/huggingface.js?v=style-guide-1"
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
-import { fitSplatToBox } from "/scripts/fit.js?v=wisp-cull-1"
+import { fitSplatToBox } from "/scripts/fit.js?v=wisp-cull-2"
 import { computeObjects } from "/scripts/geometry.js"
 import { closestAxisDistance } from "/scripts/axis-drag.js?v=direct-tools-1"
 import { createPlayer } from "/scripts/player.js"
@@ -134,6 +134,8 @@ const segmentationTuneDefaults = {
 	skirtGuardMinRise: 5.92,
 	cullAmount: 100,
 	cleanupReach: 0.44,
+	wispCull: 0.5, // 0.5 = fit.js's original fixed thresholds; 0 disables the wisp cull
+
 	preCullIntensity: 1.0,
 	postCullIntensity: 1.0,
 	floorBand: 0.9,
@@ -158,7 +160,7 @@ const percent = value => `${Math.round(clamp01(value) * 100)}%`
 const adjustableSegmentationKeys = new Set([
 	"minBlob", "bridgeCut", "colorSplit", "terrainBias", "baseDetachStrength",
 	"skirtGuardMinRise", "wispAggression", "detachedCullPct", "cullAmount",
-	"cleanupReach", "edgeOutliers", "groundSmooth", "groundFill", "groundFillMaxHeight",
+	"cleanupReach", "wispCull", "edgeOutliers", "groundSmooth", "groundFill", "groundFillMaxHeight",
 ])
 try {
 	const saved = JSON.parse(localStorage.getItem("worldsketch.segmentationTuning") || "{}")
@@ -3180,6 +3182,10 @@ const segmentationTuneControls = [
 	{
 		id: "cleanup-amount", group: "Overall cleanup", key: "cullAmount", label: "Cleanup amount", min: 0, max: 100, step: 1, format: value => `${Math.round(value)}%`,
 		description: "Controls how much unwanted material is removed.", low: "Keep everything", high: "Remove all found",
+	},
+	{
+		id: "wisp-cull", group: "Overall cleanup", key: "wispCull", label: "Remove floating wisps", min: 0, max: 1, step: 0.01, format: percent,
+		description: "Culls the long translucent streak gaussians the reconstruction leaves floating around the scene.", low: "Off", high: "Aggressive",
 	},
 	{
 		id: "cleanup-reach", group: "Overall cleanup", key: "cleanupReach", label: "Cleanup height", min: 0, max: 1, step: 0.01, format: percent,
@@ -6278,6 +6284,7 @@ async function seatScene(bytes, box, { yawDeg = 0, yOffset = 0, mirrorZ = false,
 		spanHi: 1 - sceneFit.fitBboxPercentile,
 		cullAmount: SEGMENTATION_CLEANUP_ENABLED ? clamp01((segmentationTuning.cullAmount ?? 100) / 100) : 0,
 		cullHeightFraction: SEGMENTATION_CLEANUP_ENABLED ? clamp01(segmentationTuning.cleanupReach ?? 0.25) : 0,
+		wispCullStrength: clamp01(segmentationTuning.wispCull ?? 0.5), // independent of the cleanup switch
 	})
 	if (!fitted) {
 		disposeObject(raw)

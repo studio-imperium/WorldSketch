@@ -186,16 +186,23 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const centerX = (minX + maxX) / 2
 	const centerZ = (minZ + maxZ) / 2
 
-	// Light wisp cull, applied unconditionally after generation: the one-shot
-	// reconstruction leaves a few long, translucent streak gaussians ("wisps")
-	// hanging around the scene. Real surface gaussians are tiny next to the
-	// scene extent, so anything stretching past 4% of the largest span while
+	// Wisp cull, applied after generation: the one-shot reconstruction leaves
+	// long, translucent streak gaussians ("wisps") hanging around the scene.
+	// Real surface gaussians are tiny next to the scene extent, so anything
+	// stretching past the strength-mapped fraction of the largest span while
 	// still translucent is a wisp. Opaque large gaussians survive — those are
-	// legitimate ground/wall sheets.
-	const wispScale = 0.04 * Math.max(spanX, spanY, spanZ)
+	// legitimate ground/wall sheets. Strength 0 disables; 0.5 is the original
+	// fixed 4%-of-span threshold; 1 trims streaks down to 1.5% of the span.
+	const wispStrength = Math.min(1, Math.max(0, opts.wispCullStrength ?? 0.5))
+	const wispFraction = wispStrength <= 0.5
+		? 0.08 + (0.04 - 0.08) * (wispStrength * 2)
+		: 0.04 + (0.015 - 0.04) * ((wispStrength - 0.5) * 2)
+	const wispScale = wispFraction * Math.max(spanX, spanY, spanZ)
 	const wispDrop = new Uint8Array(total)
-	for (let i = 0; i < total; i++) {
-		if (maxScales[i] > wispScale && opacities[i] < 0.6) wispDrop[i] = 1
+	if (wispStrength > 0) {
+		for (let i = 0; i < total; i++) {
+			if (maxScales[i] > wispScale && opacities[i] < 0.6) wispDrop[i] = 1
+		}
 	}
 
 	// Fit X/Z with one uniform scale so the one-shot scene keeps its reconstructed
