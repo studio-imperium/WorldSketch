@@ -192,8 +192,8 @@ async function main() {
 	// so the courtyard registers on the block-out plate.
 	const splatSeat = new THREE.Group()
 	splatSeat.add(splat)
-	splatSeat.scale.setScalar(0.845)
-	splatSeat.position.set(0.005, 0.05, 0)
+	splatSeat.scale.setScalar(0.9)
+	splatSeat.position.set(-0.07, 0.05, 0.035)
 	splatLayer.scene.add(splatSeat)
 	splatLayer.canvas.classList.add("base")
 
@@ -406,7 +406,7 @@ function frameFor(box) {
 	return {
 		target,
 		radius: Math.max(0.5, sphere.radius * 1.58), // 1.9 / 1.2 — the world reads ~20% bigger
-		theta: 1.288, // calibrated with the slider tuner (2026-07-16)
+		theta: 1.296, // calibrated with the slider tuner (2026-07-16)
 		phi: 1.12, // polar angle from +Y — a gentle look down onto the plot
 	}
 }
