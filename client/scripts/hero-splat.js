@@ -10,7 +10,7 @@ import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 
 const ASSET = "/assets/hero-splat.ply"
-const BASE_YAW = Math.PI / 2 // raw front points along +X; a 90° right turn faces the camera
+const BASE_YAW = Math.PI * 1.5 // raw front points along -X; a 90° left turn faces the camera
 const MAX_YAW = 0.85 // rad each way toward the cursor
 const MAX_PITCH = 0.32
 const FOLLOW = 5.5 // 1/s — exponential chase toward the cursor

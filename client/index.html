@@ -10,6 +10,14 @@
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
 	<link rel="stylesheet" href="/site.css">
+	<!-- Start the heavy downloads during HTML parse — without these, nothing is
+	     fetched until the module graph (including the spark CDN import) resolves. -->
+	<link rel="modulepreload" href="/lib/three.module.js">
+	<link rel="modulepreload" href="https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js">
+	<link rel="preload" href="/assets/reveal-points.json" as="fetch" crossorigin>
+	<link rel="preload" href="/assets/japanese-courtyard-blockout.json" as="fetch" crossorigin>
+	<link rel="preload" href="/assets/hero-splat.ply" as="fetch" crossorigin>
+	<link rel="preload" href="/assets/japanese-courtyard.ply" as="fetch" crossorigin>
 	<script>
 		// "/" is the registered Hugging Face OAuth redirect URL; hand callback
 		// hits to the sign-in page, which finishes the token exchange.
@@ -474,7 +482,7 @@
 		<span>&copy; 2026 worldsplat</span>
 	</footer>
 
-	<script type="module" src="/scripts/landing.js?v=worldsplat-2"></script>
-	<script type="module" src="/scripts/hero-splat.js?v=3"></script>
+	<script type="module" src="/scripts/landing.js?v=worldsplat-3"></script>
+	<script type="module" src="/scripts/hero-splat.js?v=4"></script>
 </body>
 </html>
