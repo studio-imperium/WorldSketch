@@ -39,7 +39,18 @@ export function initReveal() {
 	const band = document.getElementById("reveal")
 	const canvas = document.getElementById("reveal-canvas")
 	if (!band || !canvas) return
-	main(band, canvas).catch(error => console.error(error)) // band stays background-only, never empty
+	main(band, canvas).catch(error => {
+		console.error(error)
+		// The show is off — the copy must never stay invisible with it.
+		showCopy(band, "lead")
+		showCopy(band, "tail")
+	})
+}
+
+// Staged copy: "A world is a" arrives with the first blocks, "a cloud of
+// splats." only once the gaussian has fully materialized.
+function showCopy(band, part) {
+	band.querySelector(`.reveal-${part}`)?.classList.add("show")
 }
 
 async function main(band, canvas) {
@@ -111,6 +122,7 @@ async function main(band, canvas) {
 	}
 
 	await arm
+	showCopy(band, "lead")
 	// Don't play the show into a hidden tab — the setTimeout-driven build would
 	// advance while rAF is frozen and the flash would play unseen.
 	if (document.hidden) {
@@ -150,12 +162,14 @@ async function main(band, canvas) {
 	} catch (error) {
 		if (!blocks) throw error // nothing on screen — let the outer catch log it
 		console.error("reveal splat unavailable; the block-out stays up", error)
+		showCopy(band, "tail") // the sentence still completes over the blocks
 		return
 	}
 
 	if (!blocks || reduceMotion) {
 		if (blocks) disposeObject(blocks)
 		tilt.add(mesh)
+		showCopy(band, "tail")
 		return
 	}
 
@@ -194,6 +208,7 @@ async function main(band, canvas) {
 	disposeObject(blocks)
 	await animate(MATERIALIZE_MS, t => { mesh.opacity = t })
 	mesh.opacity = 1
+	showCopy(band, "tail") // the gaussian is fully there — close the sentence
 
 	// The block-out is baked in the splat's display frame (see the generator),
 	// so the boxes drop straight into the tilt group with the editor's look.

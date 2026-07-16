@@ -122,10 +122,9 @@
 
 		/* ---- showcase: world on the left, copy on the right ---- */
 		/* Scroll-driven morph: the tall band supplies the scroll distance while the
-		   row stays sticky inside it; scroll progress scrubs the sketch layer's
-		   opacity so the block-out dissolves into the real splat. The stage sits
-		   directly on the page — the canvas clears to the same paper colour so
-		   there is no inner window. */
+		   row stays sticky inside it; scroll progress crossfades the sketch layer
+		   out and the splat layer in. Both canvases clear fully transparent so the
+		   bg3.js pattern (mounted behind the stage) shows through around the world. */
 		.showcase-scroll { height: 300vh; margin-bottom: 28px; }
 		.showcase {
 			position: sticky;
@@ -167,10 +166,12 @@
 			transform: translateX(-50%);
 			width: 100vw;
 			height: 100%;
-			background: var(--paper);
 			overflow: hidden;
 			touch-action: none;
 		}
+		/* Both layers are fully transparent (GL clears at alpha 0) so the bg3.js
+		   pattern behind the stage shows through; the scroll morph crossfades the
+		   two canvases' inline opacities instead of hiding one behind the other. */
 		.stage canvas {
 			position: absolute;
 			inset: 0;
@@ -179,14 +180,11 @@
 			display: block;
 			cursor: grab;
 			opacity: 0;
-			background: var(--paper); /* hard-opaque backing so layers can't bleed through */
+			will-change: opacity;
 		}
-		/* Bottom (splat) layer: revealed instantly — it only ever shows through the
-		   top layer's fade, so transitioning it just invites compositor glitches. */
+		/* Bottom (splat) layer: calib overlay mode shows it at full strength; in the
+		   normal flow landing.js drives its inline opacity with scroll. */
 		.stage canvas.base { opacity: 1; }
-		/* Top (sketch) layer: scroll progress drives its inline opacity — no CSS
-		   transition, the scrub itself is the animation. */
-		.stage canvas.fade { will-change: opacity; }
 		.stage canvas:active { cursor: grabbing; }
 		.stage-hint {
 			position: absolute;
@@ -249,6 +247,13 @@
 			max-width: 17ch;
 			text-wrap: balance;
 		}
+		/* Staged copy: reveal.js fades the lead in as the block-out starts building
+		   and the tail only after the splat has fully materialized. */
+		.reveal-lead, .reveal-tail {
+			opacity: 0;
+			transition: opacity 0.9s ease;
+		}
+		.reveal-lead.show, .reveal-tail.show { opacity: 1; }
 		/* sentence closes on the right of the gaussian — same serif voice as the hero */
 		.reveal-tail {
 			position: absolute;
@@ -320,12 +325,12 @@
 		</div>
 	</main>
 
-	<section class="reveal" id="reveal" aria-label="A world is a cloud of gaussians">
+	<section class="reveal" id="reveal" aria-label="A world is a cloud of splats">
 		<canvas class="reveal-canvas" id="reveal-canvas" aria-hidden="true"></canvas>
 		<div class="reveal-lead">
 			<h2>A world is a</h2>
 		</div>
-		<p class="reveal-tail" aria-hidden="true">a cloud of gaussians.</p>
+		<p class="reveal-tail" aria-hidden="true">a cloud of splats.</p>
 	</section>
 
 	
@@ -384,7 +389,8 @@
 	</script>
 	<script type="module" src="/assets/bg.js?v=webgl-6"></script>
 	<script type="module" src="/assets/bg_2.js?v=webgl-4"></script>
-	<script type="module" src="/scripts/landing.js?v=worldsplat-17"></script>
+	<script type="module" src="/assets/bg3.js?v=6"></script>
+	<script type="module" src="/scripts/landing.js?v=worldsplat-19"></script>
 	<script type="module" src="/scripts/hero-splat.js?v=11"></script>
 </body>
 </html>
