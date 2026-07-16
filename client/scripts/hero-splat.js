@@ -72,10 +72,14 @@ async function main() {
 	const size = hi.clone().sub(lo)
 
 	// Rebuild with only the subject's gaussians: keep a 20%-margin box around
-	// the percentile bounds, drop the far haze/floaters entirely.
+	// the percentile bounds, drop the far haze/floaters entirely. Also drop
+	// giant fog blobs: this file carries ~10 gaussians up to 5 units across at
+	// ~1% opacity — a soft gray veil over the whole canvas (the "top shadow").
+	// Real surface splats top out near 2% of the subject size, so 5% is safe.
 	const margin = size.clone().multiplyScalar(0.2)
 	const keepLo = lo.clone().sub(margin)
 	const keepHi = hi.clone().add(margin)
+	const scaleCull = 0.05 * Math.max(size.x, size.y, size.z)
 	const mesh = new SplatMesh({
 		constructSplats: splats => {
 			source.packedSplats.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
@@ -83,6 +87,7 @@ async function main() {
 				if (center.x < keepLo.x || center.x > keepHi.x) return
 				if (center.y < keepLo.y || center.y > keepHi.y) return
 				if (center.z < keepLo.z || center.z > keepHi.z) return
+				if (Math.max(scales.x, scales.y, scales.z) > scaleCull) return
 				splats.pushSplat(center, scales, quaternion, opacity, color)
 			})
 		},
@@ -138,7 +143,7 @@ async function main() {
 			pitch += (wantPitch - pitch) * k
 			pivot.rotation.y = BASE_YAW + yaw
 			pivot.rotation.x = pitch
-			pivot.position.y = Math.sin(now / 1700) * 0.035 // the float in "floating there"
+			pivot.position.y = Math.sin(now / 600) * 0.06 // hover: a visible ~3.8s bob
 		}
 		renderer.render(scene, camera)
 	}
