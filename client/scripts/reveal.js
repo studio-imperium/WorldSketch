@@ -22,12 +22,12 @@ import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { createPrimitive, disposeObject } from "/scripts/primitives.js"
 
-const TILT = 0.6                    // tipped down — a clear look onto the plot's ground
+const TILT = 0.3                    // tipped down — a clear look onto the plot's ground
 const DIST = 3.5                    // camera distance on +Z
 const YAW = Math.PI * 0.5 - 0.5     // fixed orientation (180° flip, then 90° left), no spin
 const FOCAL = 2.1                   // × min(W,H) — how much of the band the plot fills
 const OX = 0.5                      // projection centre as a fraction of band width
-const OY = 0.44                     // projection centre as a fraction of band height
+const OY = 0.40                     // projection centre as a fraction of band height (< 0.5 lifts the plot)
 const BUILD_S = 0.5                 // seconds of staggered block construction
 const FLASH_MS = 220                // blocks ramp to white-hot…
 const FADE_MS = 180                 // …vanish completely…
@@ -60,7 +60,7 @@ export function initReveal() {
 	})
 }
 
-// Staged copy: "A world is a" arrives with the first blocks, "a cloud of
+// Staged copy: "A world is" arrives with the first blocks, "a cloud of
 // splats." only once the gaussian has fully materialized.
 function showCopy(band, part) {
 	band.querySelector(`.reveal-${part}`)?.classList.add("show")
@@ -201,9 +201,9 @@ async function main(band, canvas) {
 	if (!blocks) {
 		// No block-out to dissolve — still enter with the radial materialize.
 		for (const mesh of chunks) tilt.add(mesh)
+		showCopy(band, "tail") // rides the materialize (its CSS fade spans GROW_S)
 		await animate(GROW_S * 1000, growStep)
 		for (const mesh of chunks) mesh.opacity = 1
-		showCopy(band, "tail")
 		return
 	}
 
@@ -239,9 +239,9 @@ async function main(band, canvas) {
 		for (const { material } of lines) material.opacity = 1 - t
 	})
 	disposeObject(blocks)
+	showCopy(band, "tail") // the sentence closes WITH the materialize — its CSS fade spans GROW_S
 	await animate(GROW_S * 1000, growStep)
 	for (const mesh of chunks) mesh.opacity = 1
-	showCopy(band, "tail") // the gaussian is fully there — close the sentence
 
 	// The block-out is baked in the splat's display frame (see the generator),
 	// so the boxes drop straight into the tilt group with the editor's look.

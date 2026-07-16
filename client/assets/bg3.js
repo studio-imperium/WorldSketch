@@ -14,7 +14,13 @@
 const PIXEL = 5 // CSS px per pattern cell — same grain as bg.js
 const ZOOM = 8
 const SPEED = 2 // offset units per frame, /128
-const SEED = 14 // wave directions, quasicrystals.js-style per-direction phase
+// The wave-direction count is SCRUBBED BY SCROLL: this layer is the only one
+// that stays stationary through the sticky band, so progress through the
+// 300vh scroll sweeps the seed — the pattern morphs from sparse stripes to
+// dense rosettes as the block-out dissolves into the splat. Fractional counts
+// blend the frontier direction in smoothly (bg_2.js's uniform method).
+const SEED_MIN = 3
+const SEED_MAX = 14
 const COLOR = "#f0f0f0"
 const FADE_FRACTION = 0.18 // entry/exit ramp, as a fraction of the sticky scroll distance
 
@@ -34,64 +40,60 @@ if (band && row && gl) {
 	gl.bindBuffer(gl.ARRAY_BUFFER, gl.createBuffer())
 	gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW)
 
-	// The seed sets the shader's loop bound and literals, so tuning it means
-	// recompiling the program — cheap, and it previews exactly what a baked
-	// constant will look like.
-	let program = null
-	let uRes = null
-	let uOffset = null
-	function useSeed(seed) {
-		const FRAG = `
-			precision mediump float;
-			uniform vec2 uRes;
-			uniform float uOffset;
-			const float TAU = 6.28318530718;
+	// One static program; the live direction count arrives as a uniform so
+	// scroll can scrub it every frame without recompiling shaders.
+	const FRAG = `
+		precision mediump float;
+		uniform vec2 uRes;
+		uniform float uOffset;
+		uniform float uSeed; // live direction count, ${SEED_MIN}..${SEED_MAX} (fractional)
+		const float TAU = 6.28318530718;
+		const float PI = 3.14159265359;
 
-			void main() {
-				// Canvas-2D orientation (y down) and centered coordinates, as bg.js.
-				vec2 frag = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
-				vec2 cell = floor((frag - uRes * 0.5) / ${PIXEL.toFixed(1)}) * ${PIXEL.toFixed(1)};
-				vec2 p = cell / ${ZOOM.toFixed(1)};
+		void main() {
+			// Canvas-2D orientation (y down) and centered coordinates, as bg.js.
+			vec2 frag = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+			vec2 cell = floor((frag - uRes * 0.5) / ${PIXEL.toFixed(1)}) * ${PIXEL.toFixed(1)};
+			vec2 p = cell / ${ZOOM.toFixed(1)};
 
-				float sum = 0.0;
-				float angle = TAU;
-				for (int i = 0; i < ${Math.ceil(seed)}; i++) {
-					// quasicrystals.js seed method: every direction carries its own
-					// phase offset ((PI/seed)*i*100) so the waves decorrelate instead
-					// of all peaking together at the origin.
-					sum += cos(cos(angle) * p.x + sin(angle) * p.y + uOffset + ${(100 * Math.PI / seed).toFixed(6)} * float(i)) * 100.0;
-					angle -= TAU / ${seed.toFixed(4)};
-				}
-				float on = step(0.5, sum / ${seed.toFixed(4)});
+			float sum = 0.0;
+			float angle = TAU;
+			for (int i = 0; i < ${SEED_MAX}; i++) {
+				// Directions past uSeed weigh 0; the frontier direction fades in
+				// with its fraction, so scrubbing morphs instead of popping. Each
+				// direction keeps quasicrystals.js's per-direction phase offset
+				// ((PI/seed)*i*100) so the waves decorrelate.
+				float w = clamp(uSeed - float(i), 0.0, 1.0);
+				sum += w * cos(cos(angle) * p.x + sin(angle) * p.y + uOffset + (100.0 * PI / uSeed) * float(i)) * 100.0;
+				angle -= TAU / uSeed;
+			}
+			float on = step(0.5, sum / uSeed);
 
-				// Solid along the top and bottom edges, fading to nothing across the
-				// middle where the courtyard and the copy live. Fade starts closer to
-				// the edges (0.55, was 0.35) so the bands stay out of the middle.
-				float d = abs(frag.y / uRes.y - 0.5) * 2.0; // 0 mid → 1 at edges
-				float fade = smoothstep(0.55, 0.95, d);
-				gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * fade); // premultiplied
-			}`
-		const next = gl.createProgram()
-		for (const [type, source] of [[gl.VERTEX_SHADER, VERT], [gl.FRAGMENT_SHADER, FRAG]]) {
-			const shader = gl.createShader(type)
-			gl.shaderSource(shader, source)
-			gl.compileShader(shader)
-			gl.attachShader(next, shader)
-		}
-		gl.linkProgram(next)
-		if (program) gl.deleteProgram(program)
-		program = next
-		gl.useProgram(program)
-		const aPos = gl.getAttribLocation(program, "aPos")
-		gl.enableVertexAttribArray(aPos)
-		gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0)
-		uRes = gl.getUniformLocation(program, "uRes")
-		uOffset = gl.getUniformLocation(program, "uOffset")
-		gl.uniform2f(uRes, canvas.width, canvas.height)
-		draw()
+			// Solid along the top and bottom edges, fading to nothing across the
+			// middle where the courtyard and the copy live. Fade starts closer to
+			// the edges (0.55, was 0.35) so the bands stay out of the middle.
+			float d = abs(frag.y / uRes.y - 0.5) * 2.0; // 0 mid → 1 at edges
+			float fade = smoothstep(0.55, 0.95, d);
+			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * fade); // premultiplied
+		}`
+	const program = gl.createProgram()
+	for (const [type, source] of [[gl.VERTEX_SHADER, VERT], [gl.FRAGMENT_SHADER, FRAG]]) {
+		const shader = gl.createShader(type)
+		gl.shaderSource(shader, source)
+		gl.compileShader(shader)
+		gl.attachShader(program, shader)
 	}
+	gl.linkProgram(program)
+	gl.useProgram(program)
+	const aPos = gl.getAttribLocation(program, "aPos")
+	gl.enableVertexAttribArray(aPos)
+	gl.vertexAttribPointer(aPos, 2, gl.FLOAT, false, 0, 0)
+	const uRes = gl.getUniformLocation(program, "uRes")
+	const uOffset = gl.getUniformLocation(program, "uOffset")
+	const uSeed = gl.getUniformLocation(program, "uSeed")
 
 	let offset = 0
+	let seed = SEED_MIN
 	let raf = 0
 	const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
 
@@ -108,6 +110,7 @@ if (band && row && gl) {
 
 	function draw() {
 		gl.uniform1f(uOffset, offset)
+		gl.uniform1f(uSeed, seed)
 		gl.drawArrays(gl.TRIANGLES, 0, 3)
 	}
 

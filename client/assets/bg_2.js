@@ -22,7 +22,10 @@ const canvas = document.createElement("canvas")
 canvas.setAttribute("aria-hidden", "true")
 // Back of the band, under the ASCII/splat canvases (z1) and the copy (z2). The
 // centre-clear radial mask is inherited from the drifting-code layer this
-// replaces — it keeps the middle of the band clean for the splat.
+// replaces — it keeps the middle of the band clean for the splat. A second,
+// vertical mask fades the pattern out over the band's top and bottom edges so
+// the section needs no dividing rule — the background just breathes away.
+const MASKS = "radial-gradient(closest-side at 50% 50%, transparent 26%, #000 76%), linear-gradient(to bottom, transparent, #000 12%, #000 88%, transparent)"
 canvas.style.cssText = [
 	"position: absolute",
 	"inset: 0",
@@ -30,8 +33,10 @@ canvas.style.cssText = [
 	"height: 100%",
 	"z-index: 0",
 	"pointer-events: none",
-	"-webkit-mask-image: radial-gradient(closest-side at 50% 50%, transparent 26%, #000 76%)",
-	"mask-image: radial-gradient(closest-side at 50% 50%, transparent 26%, #000 76%)",
+	`-webkit-mask-image: ${MASKS}`,
+	"-webkit-mask-composite: source-in",
+	`mask-image: ${MASKS}`,
+	"mask-composite: intersect",
 ].join("; ")
 const gl = canvas.getContext("webgl", { alpha: true, antialias: false, depth: false, stencil: false })
 
