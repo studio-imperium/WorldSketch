@@ -1577,6 +1577,7 @@ function orbitFromCamera() {
 
 const playBounds = new THREE.Box3()
 let playColliderHelpers = null // debug: the Colliders toggle draws the player's boxes in Play
+let playGroundHelper = null // debug: the baked ground heightfield lattice, same toggle
 
 const player = createPlayer({
 	camera,
@@ -1586,6 +1587,7 @@ const player = createPlayer({
 		pos.x = Math.max(playBounds.min.x + radius, Math.min(playBounds.max.x - radius, pos.x))
 		pos.z = Math.max(playBounds.min.z + radius, Math.min(playBounds.max.z - radius, pos.z))
 	},
+	getBounds: () => playBounds,
 })
 
 function enterPlay() {
@@ -1617,9 +1619,10 @@ function exitPlay() {
 	orbitFromCamera()
 }
 
-// syncPlayColliderHelpers draws the player's actual collision boxes (one merged
-// LineSegments — Box3Helper-per-box would be thousands of draw calls) whenever the
-// Colliders debug toggle is on during play, and tears them down otherwise.
+// syncPlayColliderHelpers draws what physics actually stands on whenever the
+// Colliders debug toggle is on during play: the baked ground heightfield as a
+// lattice, plus the collision boxes (one merged LineSegments each — helper-per-box
+// would be thousands of draw calls). Torn down otherwise.
 function syncPlayColliderHelpers() {
 	if (playColliderHelpers) {
 		playColliderHelpers.geometry.dispose()
@@ -1627,7 +1630,18 @@ function syncPlayColliderHelpers() {
 		scene.remove(playColliderHelpers)
 		playColliderHelpers = null
 	}
+	if (playGroundHelper) {
+		playGroundHelper.geometry.dispose()
+		playGroundHelper.material.dispose()
+		scene.remove(playGroundHelper)
+		playGroundHelper = null
+	}
 	if (camMode !== "play" || !showColliders) return
+	const field = player.groundField()
+	if (field) {
+		playGroundHelper = new THREE.LineSegments(field.toDebugGeometry(), new THREE.LineBasicMaterial({ color: 0x2f9e44, transparent: true, opacity: 0.6 }))
+		scene.add(playGroundHelper)
+	}
 	const boxes = player.colliderBoxes()
 	if (!boxes.length) return
 	const edge = [[0, 1], [1, 3], [3, 2], [2, 0], [4, 5], [5, 7], [7, 6], [6, 4], [0, 4], [1, 5], [2, 6], [3, 7]]
