@@ -364,7 +364,7 @@ body.tab-view canvas.is-splat-rotate {
 	display: flex !important;
 	align-items: center;
 	min-height: 2.25rem;
-	padding: 0.45rem 2.2rem 0.45rem 0.65rem !important;
+	padding: 0.45rem 2.5rem 0.45rem 0.65rem !important;
 	border-radius: 0.7rem;
 	text-align: left;
 }
@@ -391,8 +391,11 @@ body.tab-view canvas.is-splat-rotate {
 	min-height: 1.65rem;
 	height: 1.65rem;
 	width: 1.65rem;
+	padding: 0; /* daisyUI's btn padding left the flex-shrunk icon a ~4px speck */
+	border: 0 !important; /* ...and its hover border reads as a clunky ring on the ink row */
+	box-shadow: none !important;
 	opacity: 0;
-	color: color-mix(in srgb, var(--color-base-content) 56%, transparent);
+	color: color-mix(in srgb, var(--color-base-content) 70%, transparent);
 	transition: opacity 120ms ease;
 }
 
@@ -401,8 +404,20 @@ body.tab-view canvas.is-splat-rotate {
 	opacity: 1;
 }
 
+/* Own both hover layers — daisyUI's ghost hover paints a LIGHT pill, which turned the
+   white × on the active (ink) row invisible right as the cursor reached it. */
+.frame-del:hover {
+	background: color-mix(in srgb, var(--ink) 10%, transparent) !important;
+	color: var(--ink) !important;
+}
+
 .frame-item.is-active .frame-del {
-	color: var(--color-primary-content);
+	color: rgba(255, 255, 255, 0.85);
+}
+
+.frame-item.is-active .frame-del:hover {
+	background: rgba(255, 255, 255, 0.22) !important;
+	color: var(--white) !important;
 }
 
 @media (hover: none) {
@@ -412,11 +427,12 @@ body.tab-view canvas.is-splat-rotate {
 }
 
 .frame-del svg {
-	width: 0.9rem;
-	height: 0.9rem;
+	flex: none;
+	width: 1rem;
+	height: 1rem;
 	fill: none;
 	stroke: currentColor;
-	stroke-width: 2;
+	stroke-width: 2.2;
 	stroke-linecap: round;
 }
 
