@@ -1,7 +1,12 @@
-export function sceneGenerationPrompt(scene = "", { hasGeometryReference = false } = {}) {
+export function sceneGenerationPrompt(scene = "", { hasGeometryReference = false, hasStyleReference = false } = {}) {
 	const geometryReference = hasGeometryReference
 		? `Image 1 is the render. Image 2 is an exactly aligned structural map. Use its artificial colors only for mass placement and scale; never copy those colors or appearance.`
 		: `Image 1 is the render to transform and the authoritative spatial reference.`
+	// The style guide is always the LAST image the route sends (after the
+	// block-out and any geometry map), so "final input image" stays correct.
+	const styleReference = hasStyleReference
+		? `\n\nThe final input image is a STYLE guide: copy its art style, palette, and rendering character. Take no objects, layout, or camera from it.`
+		: ""
 	const objectSource = hasGeometryReference ? "Image 2" : "Image 1"
 	const description = String(scene || "A coherent richly detailed environment").trim()
 	return `${geometryReference}
@@ -20,7 +25,7 @@ FLAT GROUND
 無顛簸
 平坦
 
-The blocks are rough massing stand-ins, not final shapes: give every structure its natural silhouette — pitched roofs, eaves, overhangs, irregular canopies — so nothing still reads as a plain box; keep each footprint and size.
+The blocks are rough massing stand-ins, not final shapes: give every structure its natural silhouette — pitched roofs, eaves, overhangs, irregular canopies — so nothing still reads as a plain box; keep each footprint and size.${styleReference}
 
 Same camera, same composition, same proportions — every block becomes a full-sized real structure exactly in place, and painted ground colors become the terrain features they mark. Crisp realistic materials with visible construction detail. Never a miniature, toy, or diorama. Pure black background: every pixel outside the terrain chunk stays flat #000000.`
 }

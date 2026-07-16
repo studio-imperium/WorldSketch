@@ -1,4 +1,4 @@
-import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=deblockify-1"
+import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=style-guide-1"
 
 function geometryLine(hasGeometryReference) {
 	return hasGeometryReference

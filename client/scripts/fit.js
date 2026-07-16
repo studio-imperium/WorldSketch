@@ -133,12 +133,16 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const xs = new Float32Array(total)
 	const ys = new Float32Array(total)
 	const zs = new Float32Array(total)
+	const maxScales = new Float32Array(total)
+	const opacities = new Float32Array(total)
 	const keep = new Uint8Array(total).fill(1)
 
 	packed.forEachSplat((i, center, scales, quaternion, opacity) => {
 		xs[i] = center.x
 		ys[i] = center.y
 		zs[i] = center.z
+		maxScales[i] = Math.max(scales.x, scales.y, scales.z)
+		opacities[i] = opacity
 		if (opacity < opacityFloor) keep[i] = 0
 	})
 	const opacityKeep = Uint8Array.from(keep)
@@ -181,6 +185,18 @@ export async function fitSplatToBox(source, box, opts = {}) {
 	const spanY = Math.max(1e-4, bottomStoredY - topStoredY)
 	const centerX = (minX + maxX) / 2
 	const centerZ = (minZ + maxZ) / 2
+
+	// Light wisp cull, applied unconditionally after generation: the one-shot
+	// reconstruction leaves a few long, translucent streak gaussians ("wisps")
+	// hanging around the scene. Real surface gaussians are tiny next to the
+	// scene extent, so anything stretching past 4% of the largest span while
+	// still translucent is a wisp. Opaque large gaussians survive — those are
+	// legitimate ground/wall sheets.
+	const wispScale = 0.04 * Math.max(spanX, spanY, spanZ)
+	const wispDrop = new Uint8Array(total)
+	for (let i = 0; i < total; i++) {
+		if (maxScales[i] > wispScale && opacities[i] < 0.6) wispDrop[i] = 1
+	}
 
 	// Fit X/Z with one uniform scale so the one-shot scene keeps its reconstructed
 	// proportions. Y deliberately shares that scale instead of being forced to the box.
@@ -269,6 +285,7 @@ export async function fitSplatToBox(source, box, opts = {}) {
 		const nextX = targetCenterX + transformedOffset.x
 		const nextY = posY + yOffset + transformedOffset.y
 		const nextZ = targetCenterZ + transformedOffset.z
+		if (wispDrop[i]) return
 		const mayCull = mayCullAt(nextX, nextY, nextZ)
 		if (!renderKeep[i] && mayCull) return
 		center.set(nextX, nextY, nextZ)

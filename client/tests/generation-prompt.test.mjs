@@ -23,6 +23,15 @@ test("keeps the minimal prompt's invariants", () => {
 	assert.ok(prompt.trim().split(/\s+/).length < 200, "the minimal prompt must stay minimal (170 + the deblockify clause)")
 })
 
+test("mentions the style guide only when one actually rides along", () => {
+	const without = sceneGenerationPrompt("A fishing dock")
+	assert.ok(!without.includes("STYLE guide"))
+	const withStyle = sceneGenerationPrompt("A fishing dock", { hasStyleReference: true })
+	assert.ok(withStyle.includes("The final input image is a STYLE guide"))
+	assert.ok(withStyle.includes("Take no objects, layout, or camera from it"))
+	assert.ok(withStyle.trim().split(/\s+/).length < 210, "style-guide prompt should remain concise")
+})
+
 test("points the no-new-objects rule at the structural map when one is sent", () => {
 	const prompt = sceneGenerationPrompt("A stone quarry", { hasGeometryReference: true })
 	assert.ok(prompt.includes("Only objects should be ones outlined in Image 2"))

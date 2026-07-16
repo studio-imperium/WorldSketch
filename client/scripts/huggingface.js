@@ -6,7 +6,7 @@ import {
 	getHuggingFaceAuth,
 	signOutHuggingFaceAuth,
 } from "/scripts/huggingface-auth.js"
-import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=deblockify-1"
+import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=style-guide-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
 import { imageEditRequest, spaceSupportsGeometry } from "/scripts/huggingface-image.js?v=style-ref-1"
 import { falQueueImageEdit, inferenceCreditImageRequest } from "/scripts/huggingface-provider.js?v=flux2-credits-1"
@@ -351,15 +351,35 @@ export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), useI
 // own explicit seeds.
 const SCENE_SEED = 303
 
+// The bundled style guide rides along with every app generation as the
+// art-style reference (the prompt points the model at it). Fetched once and
+// cached; a missing or failed asset must never block generation.
+const STYLE_GUIDE = "/assets/styleguide.png"
+let styleGuidePromise = null
+function loadStyleGuide() {
+	styleGuidePromise ??= fetch(STYLE_GUIDE)
+		.then(response => (response.ok ? response.blob() : null))
+		.catch(() => null)
+	return styleGuidePromise
+}
+
 export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress, onImageReady }) {
 	// Multi-image Spaces take the aligned geometry map alongside the block-out;
-	// single-image routes (Kontext, the paid inference API) can't, so the prompt
-	// only mentions the geometry map on paths that actually send it.
-	const useGeometryReference = !imageStepUsesCredits(useInferenceCredits) && Boolean(geometryImage) && spaceSupportsGeometry(config.imageSpace)
+	// single-image routes (Kontext, the plain inference API) can't, so the
+	// prompt only mentions the geometry map on paths that actually send it.
+	const viaCredits = imageStepUsesCredits(useInferenceCredits)
+	const useGeometryReference = !viaCredits && Boolean(geometryImage) && spaceSupportsGeometry(config.imageSpace)
+	// The style guide can ride any multi-image path: the fal queue on credits,
+	// or an extra gallery image on multi-image Spaces. Same rule as geometry —
+	// never mention a reference the route can't deliver.
+	const styleImage = await loadStyleGuide()
+	const useStyleReference = Boolean(styleImage)
+		&& (viaCredits ? config.inferenceProvider === "fal-ai" : spaceSupportsGeometry(config.imageSpace))
 	const editedImage = await detailImageOnHuggingFace({
-		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference }),
+		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference, hasStyleReference: useStyleReference }),
 		image,
 		geometryImage: useGeometryReference ? geometryImage : null,
+		styleImage: useStyleReference ? styleImage : null,
 		seed: SCENE_SEED,
 		useInferenceCredits,
 		signal,

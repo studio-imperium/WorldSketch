@@ -9,9 +9,9 @@ import {
 	getHuggingFaceAuth,
 	imageStepUsesCredits,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=seed303-1"
+} from "/scripts/huggingface.js?v=style-guide-1"
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
-import { fitSplatToBox } from "/scripts/fit.js"
+import { fitSplatToBox } from "/scripts/fit.js?v=wisp-cull-1"
 import { computeObjects } from "/scripts/geometry.js"
 import { closestAxisDistance } from "/scripts/axis-drag.js?v=direct-tools-1"
 import { createPlayer } from "/scripts/player.js"
