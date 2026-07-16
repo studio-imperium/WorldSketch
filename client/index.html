@@ -10,6 +10,18 @@
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=Newsreader:opsz,wght@6..72,400..600&display=swap" rel="stylesheet">
 	<link rel="stylesheet" href="/site.css">
+	<!-- The import map must precede any modulepreload — a module load started
+	     before the map registers makes the browser discard the map entirely,
+	     and every bare "three"/"spark" import on the page fails. -->
+	<script type="importmap">
+	{
+		"imports": {
+			"three": "/lib/three.module.js",
+			"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+			"spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js"
+		}
+	}
+	</script>
 	<!-- Start the heavy downloads during HTML parse — without these, nothing is
 	     fetched until the module graph (including the spark CDN import) resolves. -->
 	<link rel="modulepreload" href="/lib/three.module.js">
@@ -24,15 +36,6 @@
 		// "/" is the registered Hugging Face OAuth redirect URL; hand callback
 		// hits to the sign-in page, which finishes the token exchange.
 		if (/[?&](code|error)=/.test(location.search)) location.replace("/login" + location.search + location.hash)
-	</script>
-	<script type="importmap">
-	{
-		"imports": {
-			"three": "/lib/three.module.js",
-			"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
-			"spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js"
-		}
-	}
 	</script>
 	<style>
 		main { max-width: 1440px; margin: 0 auto; padding: 0 36px; }
