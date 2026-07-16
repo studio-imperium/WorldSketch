@@ -102,10 +102,9 @@ async function main() {
 		const t = clamp((raw - 0.12) / 0.76, 0, 1) // hold pure sketch / pure splat at the ends
 		return t * t * (3 - 2 * t)
 	}
-	let overlayOverride = null // TEMP tuner pins the sketch overlay while calibrating
 	const applyMorph = () => {
 		const p = morphProgress()
-		sketchLayer.canvas.style.opacity = String(overlayOverride ?? (splatReady ? 1 - p : 1))
+		sketchLayer.canvas.style.opacity = String(splatReady ? 1 - p : 1)
 		morphRail.style.setProperty("--p", p.toFixed(4))
 	}
 	if (!calib) {
@@ -153,13 +152,12 @@ async function main() {
 			layer.renderer.render(layer.scene, layer.camera)
 		}
 	}
-	let autoRotate = true // TEMP tuner can switch the idle spin off while calibrating
 	let lastTime = performance.now()
 	const tick = () => {
 		const now = performance.now()
 		const dt = Math.min(0.05, (now - lastTime) / 1000)
 		lastTime = now
-		if (autoRotate && !reduceMotion && !lastPointer && now - lastInteraction > 2500) view.theta += dt * 0.12
+		if (!reduceMotion && !lastPointer && now - lastInteraction > 2500) view.theta += dt * 0.12
 		drawFrame()
 	}
 	splatLayer.renderer.setAnimationLoop(tick)
@@ -187,11 +185,13 @@ async function main() {
 		rawBox.expandByPoint(point.copy(center).applyMatrix4(mesh.matrixWorld))
 	})
 	const { group: splat } = normalize({ group: new THREE.Group().add(mesh), box: rawBox })
-	// Same 0.8 world shrink as the sketch seat — scaled about the origin, so it
-	// stays centered and resting on y=0.
+	// Seat calibrated against the sketch with the slider tuner (2026-07-16):
+	// slightly larger than the sketch's 0.8 baseline shrink, nudged and lifted
+	// so the courtyard registers on the block-out plate.
 	const splatSeat = new THREE.Group()
 	splatSeat.add(splat)
-	splatSeat.scale.setScalar(0.8)
+	splatSeat.scale.setScalar(0.845)
+	splatSeat.position.set(0.005, 0.05, 0)
 	splatLayer.scene.add(splatSeat)
 	splatLayer.canvas.classList.add("base")
 
@@ -209,79 +209,6 @@ async function main() {
 	// position, wherever the user has already scrolled to.
 	splatReady = true
 	applyMorph()
-	mountSplatTuner()
-
-	// --- TEMP: splat calibration sliders — delete this whole block when the
-	// japanese-courtyard splat is seated to taste. Sliders drive the splat seat
-	// (yaw/scale/offsets) and the camera; "overlay" pins the sketch on top to
-	// check registration; Copy puts the numbers on the clipboard.
-	function mountSplatTuner() {
-		const panel = document.createElement("div")
-		panel.style.cssText = `position: fixed; right: 16px; top: 72px; z-index: 99; width: 240px;
-			padding: 12px 14px; background: var(--white); border: 1px solid var(--line); border-radius: 14px;
-			box-shadow: 0 8px 30px rgba(20, 20, 15, 0.12); font-size: 12px; color: var(--ink-soft);`
-		panel.innerHTML = `<strong style="display:block; margin-bottom:6px; color:var(--ink)">splat tuner (temp)</strong>`
-		const values = {
-			yawDeg: THREE.MathUtils.radToDeg(splatSeat.rotation.y),
-			scale: splatSeat.scale.x,
-			x: splatSeat.position.x, y: splatSeat.position.y, z: splatSeat.position.z,
-			theta: view.theta, phi: view.phi, zoom: 1, overlay: 0,
-		}
-		const baseRadius = view.radius
-		const apply = () => {
-			splatSeat.rotation.y = THREE.MathUtils.degToRad(values.yawDeg)
-			splatSeat.scale.setScalar(values.scale)
-			splatSeat.position.set(values.x, values.y, values.z)
-			view.theta = values.theta
-			view.phi = values.phi
-			view.radius = baseRadius * values.zoom
-			overlayOverride = values.overlay > 0.01 ? values.overlay : null
-			applyMorph()
-		}
-		const rows = [
-			["yawDeg", "yaw °", -180, 180, 0.5],
-			["scale", "scale", 0.4, 1.6, 0.005],
-			["x", "x", -1, 1, 0.005],
-			["y", "y", -0.5, 0.5, 0.005],
-			["z", "z", -1, 1, 0.005],
-			["theta", "cam θ", -Math.PI, Math.PI, 0.01],
-			["phi", "cam φ", 0.45, 1.5, 0.01],
-			["zoom", "zoom ×", 0.5, 2, 0.01],
-			["overlay", "overlay", 0, 1, 0.01],
-		]
-		for (const [key, label, min, max, step] of rows) {
-			const row = document.createElement("label")
-			row.style.cssText = "display:grid; grid-template-columns: 52px 1fr 44px; gap:6px; align-items:center; margin:3px 0;"
-			const slider = document.createElement("input")
-			Object.assign(slider, { type: "range", min, max, step, value: values[key] })
-			slider.style.cssText = "width:100%; accent-color: var(--ink);"
-			const out = document.createElement("span")
-			out.style.cssText = "text-align:right; font-variant-numeric:tabular-nums; color:var(--ink);"
-			const show = () => { out.textContent = Number(values[key]).toFixed(key === "yawDeg" ? 1 : 3) }
-			slider.addEventListener("input", () => {
-				values[key] = Number(slider.value)
-				autoRotate = false // hold still while calibrating
-				lastInteraction = performance.now()
-				show()
-				apply()
-			})
-			row.append(Object.assign(document.createElement("span"), { textContent: label }), slider, out)
-			show()
-			panel.append(row)
-		}
-		const copy = document.createElement("button")
-		copy.textContent = "Copy values"
-		copy.style.cssText = `margin-top:8px; width:100%; padding:6px 0; border:0; border-radius:9999px;
-			background: var(--ink); color: var(--white); font: inherit; font-weight:600; cursor:pointer;`
-		copy.addEventListener("click", async () => {
-			const text = `splatSeat: yaw=${THREE.MathUtils.degToRad(values.yawDeg).toFixed(4)} rad (${values.yawDeg.toFixed(1)}°), scale=${values.scale.toFixed(3)}, pos=(${values.x.toFixed(3)}, ${values.y.toFixed(3)}, ${values.z.toFixed(3)}) · camera: theta=${values.theta.toFixed(3)}, phi=${values.phi.toFixed(3)}, radius×=${values.zoom.toFixed(2)}`
-			try { await navigator.clipboard.writeText(text); copy.textContent = "Copied ✓" } catch { console.log(text); copy.textContent = "In console" }
-			setTimeout(() => { copy.textContent = "Copy values" }, 1200)
-		})
-		panel.append(copy)
-		document.body.append(panel)
-	}
-	// --- end TEMP splat tuner -------------------------------------------------
 
 	function makeLayer() {
 		const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" })
@@ -395,8 +322,8 @@ function frameFor(box) {
 	const sphere = box.getBoundingSphere(new THREE.Sphere())
 	return {
 		target: sphere.center.clone(),
-		radius: Math.max(0.5, sphere.radius * 1.9),
-		theta: Math.PI * -0.25, // was 0.25; -90° turns the plot to the left
+		radius: Math.max(0.5, sphere.radius * 1.58), // 1.9 / 1.2 — the world reads ~20% bigger
+		theta: 1.288, // calibrated with the slider tuner (2026-07-16)
 		phi: 1.12, // polar angle from +Y — a gentle look down onto the plot
 	}
 }
