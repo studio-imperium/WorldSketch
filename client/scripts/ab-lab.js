@@ -16,6 +16,14 @@ if (!getHuggingFaceAuth().signedIn) el("auth_warning").classList.remove("hidden"
 
 let controller = null
 
+// Same key as the main app, so the setting carries over between the two pages.
+try { el("use_inference_credits").checked = localStorage.getItem("worldsketch.useInferenceCredits") === "true" } catch {}
+el("use_inference_credits").addEventListener("change", () => {
+	try { localStorage.setItem("worldsketch.useInferenceCredits", String(el("use_inference_credits").checked)) } catch {}
+})
+
+const useInferenceCredits = () => el("use_inference_credits").checked
+
 for (const [container, textarea] of [["presets_a", "prompt_a"], ["presets_b", "prompt_b"]]) {
 	for (const preset of promptPresets) {
 		const button = document.createElement("button")
@@ -68,6 +76,7 @@ function addResultCard({ variant, seed, blob }) {
 			const bytes = await buildSplatOnHuggingFace({
 				image: blob,
 				seed,
+				useInferenceCredits: useInferenceCredits(),
 				onProgress: (fraction, label) => setStatus(`Splat ${variant}·${seed}: ${label}`),
 			})
 			download(new Blob([bytes]), `ab-${variant}-${seed}.splat`)
@@ -107,6 +116,7 @@ async function run() {
 					image,
 					geometryImage,
 					seed,
+					useInferenceCredits: useInferenceCredits(),
 					signal: controller.signal,
 					onProgress: (fraction, label) => setStatus(`${done + 1}/${total} — ${variant}·${seed}: ${label}`),
 				})

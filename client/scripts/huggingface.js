@@ -18,8 +18,8 @@ const DEFAULT_CONFIG = {
 	imageSpace: "WilliamQM/Qwen-Image-Edit-2509",
 	tripoSpace: "VAST-AI/TripoSplat",
 	tripoDirectUrl: "",
-	inferenceProvider: "fal-ai",
-	inferenceModel: "black-forest-labs/FLUX.2-dev",
+	inferenceProvider: "wavespeed",
+	inferenceModel: "Qwen/Qwen-Image-Edit-2509",
 	image: { steps: 20, guidance: 4, width: 1024, height: 1024 },
 	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
 }

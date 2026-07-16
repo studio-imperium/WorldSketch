@@ -35,7 +35,7 @@ func TestConfigExposesPublicHuggingFaceSettings(t *testing.T) {
 	if body.Generation.ImageSpace != "WilliamQM/Qwen-Image-Edit-2509" {
 		t.Fatalf("image space = %q, want the user-owned Qwen-Image-Edit-2509 Space", body.Generation.ImageSpace)
 	}
-	if body.Generation.InferenceProvider != "fal-ai" || body.Generation.InferenceModel != "black-forest-labs/FLUX.2-dev" {
+	if body.Generation.InferenceProvider != "wavespeed" || body.Generation.InferenceModel != "Qwen/Qwen-Image-Edit-2509" {
 		t.Fatalf("unexpected inference provider config: %+v", body.Generation)
 	}
 }

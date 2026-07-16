@@ -5955,10 +5955,10 @@ async function generateWorld(prompt) {
 			phi: FRONT_PHI,
 		}
 		const capture = await captureWorld(renderer, scene, world, box, objectGroups, viewAngles)
-		logGenerationDebugImage("capture", "Block-out capture sent to FLUX", capture.guide)
+		logGenerationDebugImage("capture", "Block-out capture sent to the image model", capture.guide)
 		logGenerationDebugImage("structure", useInferenceCredits
 			? "Aligned structural map (not sent on the inference-credit route)"
-			: "Aligned structural map sent to FLUX", capture.semanticMap)
+			: "Aligned structural map sent to the image model", capture.semanticMap)
 		const captureMs = performance.now() - tCap
 		// The image editor is asked to preserve the camera and composition, so the original object
 		// bounds remain the most reliable boxes for later splat segmentation.
@@ -5974,7 +5974,7 @@ async function generateWorld(prompt) {
 			useInferenceCredits,
 			signal: generationAbort.signal,
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),
-			onImageReady: image => logGenerationDebugImage("output", "Final FLUX image sent to TripoSplat", image),
+			onImageReady: image => logGenerationDebugImage("output", "Final detailed image sent to TripoSplat", image),
 		})
 		showProgress(97, 100, "Analyzing the 3D scene…")
 		await yieldForProgressPaint()

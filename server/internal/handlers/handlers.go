@@ -34,8 +34,8 @@ func Config(w http.ResponseWriter, r *http.Request) {
 			"imageSpace":        config.Env("WS_HF_IMAGE_SPACE", "WilliamQM/Qwen-Image-Edit-2509"),
 			"tripoSpace":        config.Env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
 			"tripoDirectUrl":    config.Env("TRIPOSPLAT_URL", ""),
-			"inferenceProvider": config.Env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
-			"inferenceModel":    config.Env("WS_HF_INFERENCE_MODEL", "black-forest-labs/FLUX.2-dev"),
+			"inferenceProvider": config.Env("WS_HF_INFERENCE_PROVIDER", "wavespeed"),
+			"inferenceModel":    config.Env("WS_HF_INFERENCE_MODEL", "Qwen/Qwen-Image-Edit-2509"),
 			"image": map[string]any{
 				"steps":    config.EnvInt("WS_HF_IMAGE_STEPS", 20, 1, 100),
 				"guidance": config.EnvFloat("WS_HF_IMAGE_GUIDANCE", 4),
