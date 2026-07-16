@@ -54,6 +54,10 @@ export function runtimeConfig() {
 				// num_gaussians ∈ [32768, 262144] (triposplat.py _validate_num_gaussians).
 				gaussians: envInt("WS_HF_TRIPO_GAUSSIANS", 131072, 32768, 262144),
 				format: "splat",
+				// BiRefNet background cutout before reconstruction. Set to 0 to
+				// suppress it via the transparent-border trick (the old behavior,
+				// for when the cutout starts carving away real terrain again).
+				preprocess: env("WS_HF_TRIPO_PREPROCESS", "1") !== "0",
 			},
 		},
 	}

@@ -22,7 +22,7 @@ const DEFAULT_CONFIG = {
 	inferenceModel: "black-forest-labs/FLUX.2-dev", // 32B: interprets block geometry where Qwen-Edit only shaded it
 	imageCredits: true, // image detail always runs on inference credits (WS_HF_IMAGE_CREDITS=0 reverts)
 	image: { steps: 28, guidance: 4, width: 1024, height: 1024 },
-	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
+	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat", preprocess: true },
 }
 
 let config = structuredClone(DEFAULT_CONFIG)
@@ -318,8 +318,14 @@ export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), useI
 	const tripoSpace = useInferenceCredits && directReachable ? config.tripoDirectUrl : config.tripoSpace
 	try {
 		onProgress?.(0, "Sending the image to TripoSplat")
+		// Preprocess = TripoSplat's BiRefNet background cutout. Enabled (default):
+		// the image goes in untouched so the cutout runs. Disabled
+		// (WS_HF_TRIPO_PREPROCESS=0): the 1px transparent border suppresses the
+		// ZeroGPU Space's cutout (it skips any upload that already has alpha) —
+		// the old behavior, kept because the cutout can carve away real terrain.
+		const preprocess = config.tripo.preprocess !== false && String(config.tripo.preprocess) !== "0"
 		const payload = {
-			image: handle_file(await withTransparentBorder(image)),
+			image: handle_file(preprocess ? image : await withTransparentBorder(image)),
 			seed,
 			steps: Number(config.tripo.steps),
 			guidance_scale: Number(config.tripo.guidance),
@@ -327,8 +333,8 @@ export async function buildSplatOnHuggingFace({ image, seed = randomSeed(), useI
 			output_format: config.tripo.format || "splat",
 		}
 		// The self-hosted server exposes an explicit preprocess switch; the ZeroGPU
-		// Space does not (there the transparent border alone suppresses its cutout).
-		if (isDirectGradioUrl(tripoSpace)) payload.preprocess = false
+		// Space decides by the upload's alpha channel alone.
+		if (isDirectGradioUrl(tripoSpace)) payload.preprocess = preprocess
 		const tripoData = await runSpace(tripoSpace, "/generate", payload, "TripoSplat is building the 3D scene", label => onProgress?.(0.43, label), signal)
 		const splatFile = fileReference(tripoData?.[2]) ?? fileReference(tripoData)
 		if (!splatFile) throw new Error("TripoSplat returned no 3D file")
