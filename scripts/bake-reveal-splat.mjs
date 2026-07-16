@@ -4,9 +4,9 @@
 // Keeps the top `count` (default 100k) gaussians by opacity×area so the page
 // fetches ~5.6MB instead of a 17.8MB PLY with no visible quality loss, culls
 // floaters and giant fog blobs (same rules as hero-splat.js), and rewrites
-// positions/scales pre-normalized into the EXACT unit frame reveal-points.bin
-// uses (same percentile trim → same ctr/maxR), so the ASCII→splat crossfade
-// lines up with zero runtime measuring. Output stays in the stored (raw) frame
+// positions/scales pre-normalized into a unit frame, so the block-out baked
+// from this output (generate-reveal-blockout.mjs) and the splat share one
+// frame with zero runtime measuring. Output stays in the stored (raw) frame
 // — the page applies the usual rotation.x = π — and drops the unused normals
 // (56 bytes/gaussian instead of 68).
 import { readFileSync, writeFileSync } from "node:fs"
@@ -23,8 +23,7 @@ const props = [...header.matchAll(/property float (\w+)/g)].map(m => m[1])
 const stride = props.length * 4
 const at = Object.fromEntries(props.map((p, i) => [p, i * 4]))
 
-// Same trim pass as sample-reveal-points.mjs so ctr/maxR match its bin byte-for
-// byte in spirit: finite + opacity ≥ 0.05 → 0.5/99.5 percentile bounds → centre
+// Trim pass: finite + opacity ≥ 0.05 → 0.5/99.5 percentile bounds → centre
 // and unit radius over the in-bounds set. Raw frame throughout — the y/z flip
 // is a sign change, so symmetric percentiles land on the same gaussians.
 const idx = [], pos = [], w = [], maxS = []

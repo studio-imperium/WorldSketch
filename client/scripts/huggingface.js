@@ -8,14 +8,14 @@ import {
 } from "/scripts/huggingface-auth.js"
 import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=flat-ground-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
-import { imageEditPayload } from "/scripts/huggingface-image.js?v=qwen-edit-1"
+import { imageEditRequest } from "/scripts/huggingface-image.js?v=akhaliq-edit-1"
 import { inferenceCreditImageRequest } from "/scripts/huggingface-provider.js"
 import { resolveAuthenticatedSpaceFileURL, resolveDirectGradioFileURL } from "/scripts/huggingface-url.js?v=direct-tripo-1"
 
 const DEFAULT_CONFIG = {
 	oauthClientId: "91581ad0-d16c-4f49-9746-cff21b50ac9e",
 	redirectUrl: "",
-	imageSpace: "WilliamQM/Qwen-Image-Edit-2509",
+	imageSpace: "akhaliq/Qwen-Image-Edit-2509",
 	tripoSpace: "VAST-AI/TripoSplat",
 	tripoDirectUrl: "",
 	inferenceProvider: "fal-ai",
@@ -252,14 +252,15 @@ export async function detailImageOnHuggingFace({ prompt, image, geometryImage = 
 			return editedImage
 		}
 		onProgress?.(0, "Uploading the block-out")
-		const imageData = await runSpace(config.imageSpace, "/infer", imageEditPayload({
+		const { endpoint, payload } = imageEditRequest({
 			file: handle_file(image),
 			geometryFile: geometryImage ? handle_file(geometryImage) : null,
 			prompt,
 			seed,
 			settings: config.image,
 			space: config.imageSpace,
-		}), "Adding detail to the block-out", label => onProgress?.(0.5, label), signal)
+		})
+		const imageData = await runSpace(config.imageSpace, endpoint, payload, "Adding detail to the block-out", label => onProgress?.(0.5, label), signal)
 		const editedFile = fileReference(imageData?.[0] ?? imageData)
 		if (!editedFile) throw new Error("The image editor returned no image")
 		onProgress?.(0.9, "Downloading the detailed image")

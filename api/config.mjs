@@ -28,7 +28,7 @@ export function runtimeConfig() {
 			provider: "huggingface",
 			oauthClientId: env("WS_HF_OAUTH_CLIENT_ID", DEFAULT_OAUTH_CLIENT_ID),
 			redirectUrl: env("WS_HF_REDIRECT_URL", ""),
-			imageSpace: env("WS_HF_IMAGE_SPACE", "WilliamQM/Qwen-Image-Edit-2509"),
+			imageSpace: env("WS_HF_IMAGE_SPACE", "akhaliq/Qwen-Image-Edit-2509"),
 			tripoSpace: env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
 			tripoDirectUrl: env("TRIPOSPLAT_URL", ""),
 			// fal-ai runs the real Qwen pipeline with our steps/guidance; wavespeed's Qwen

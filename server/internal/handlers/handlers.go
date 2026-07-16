@@ -31,7 +31,7 @@ func Config(w http.ResponseWriter, r *http.Request) {
 			"provider":          "huggingface",
 			"oauthClientId":     config.Env("WS_HF_OAUTH_CLIENT_ID", defaultOAuthClientID),
 			"redirectUrl":       config.Env("WS_HF_REDIRECT_URL", ""),
-			"imageSpace":        config.Env("WS_HF_IMAGE_SPACE", "WilliamQM/Qwen-Image-Edit-2509"),
+			"imageSpace":        config.Env("WS_HF_IMAGE_SPACE", "akhaliq/Qwen-Image-Edit-2509"),
 			"tripoSpace":        config.Env("WS_HF_TRIPO_SPACE", "VAST-AI/TripoSplat"),
 			"tripoDirectUrl":    config.Env("TRIPOSPLAT_URL", ""),
 			"inferenceProvider": config.Env("WS_HF_INFERENCE_PROVIDER", "wavespeed"),

@@ -1,23 +1,29 @@
 // Animated pixel-wave background — WebGL port of the old canvas-2D version.
-// Same pattern: the screen is quantized into 8px cells and each cell switches on
-// when six directions of cos(dir·p + offset) sum past a threshold. The 2D port
-// walked every cell on the CPU each frame; here one fragment shader evaluates
-// all cells on the GPU, so the page's main thread does nothing but tick a clock.
+// Same pattern: the screen is quantized into cells and each cell switches on
+// when a few directions of cos(dir·p + offset) sum past a threshold. Cell size,
+// zoom, and tempo match bg_2.js so the hero and reveal bands read as one
+// system. The 2D port walked every cell on the CPU each frame; here one
+// fragment shader evaluates all cells on the GPU.
 //
 // The shader also bakes in the landing-page fade: fully opaque at the bottom of
-// the viewport, fully transparent at the top. Scrolling fades the whole layer
-// out — gone entirely after about half a viewport — and pauses the render loop.
+// the canvas, fully transparent at the top. The canvas itself is anchored to the
+// document and sized to end exactly at the hero section's bottom edge — a fixed
+// viewport-sized layer left the pattern hanging mid-section whenever the hero
+// ran taller than the window. Scrolling fades the whole layer out — gone
+// entirely after about half a viewport — and pauses the render loop.
 
-const PIXEL = 8 // CSS px per pattern cell (the retro chunkiness — do not DPR-scale)
-const ZOOM = 16
-const SPEED = 13 // offset units per frame, /128 — matches the 2D version's tempo
-const SEED = 5.6 // 6 wave directions spread over 2π/5.6 steps (the .6 skews them)
+const PIXEL = 5 // CSS px per pattern cell — same grain as bg_2.js so both bands read as one system
+const ZOOM = 8 // matches bg_2.js
+const SPEED = 2 // offset units per frame, /128 — bg_2.js's slower tempo
+const SEED = 3 // wave directions spread evenly over 2π
 const COLOR = "#f0f0f0"
 const SCROLL_FADE_PX = () => window.innerHeight * 0.5 // fully gone after this much scroll
 
 const canvas = document.createElement("canvas")
 canvas.setAttribute("aria-hidden", "true")
-canvas.style.cssText = "position: fixed; inset: 0; z-index: -1; pointer-events: none;"
+// Absolute, not fixed: it scrolls with the page and resize() pins its bottom
+// edge to the hero section's bottom (bottom: 0 of the top section, effectively).
+canvas.style.cssText = "position: absolute; top: 0; left: 0; width: 100%; z-index: -1; pointer-events: none;"
 const gl = canvas.getContext("webgl", { alpha: true, antialias: false, depth: false, stencil: false })
 
 if (gl) {
@@ -39,9 +45,9 @@ if (gl) {
 			float angle = TAU;
 			for (int i = 0; i < ${Math.ceil(SEED)}; i++) {
 				sum += cos(cos(angle) * p.x + sin(angle) * p.y + uOffset) * 100.0;
-				angle -= TAU / ${SEED};
+				angle -= TAU / ${SEED.toFixed(4)};
 			}
-			float on = step(0.5, sum / ${SEED});
+			float on = step(0.5, sum / ${SEED.toFixed(4)});
 
 			// 100% opacity at the viewport bottom, 0% above a cutoff line that stays
 			// LOW on the left (clear of the hero copy and CTA), runs flat to
@@ -79,8 +85,18 @@ if (gl) {
 	const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)")
 
 	function resize() {
-		canvas.width = window.innerWidth
-		canvas.height = window.innerHeight
+		// Cover from the document top to the hero section's bottom edge, so the
+		// pattern's opaque edge always lands on the section bottom no matter the
+		// window height (buffer stays in CSS px — cells keep their chunk size).
+		const hero = document.querySelector(".hero")
+		const bottom = hero
+			? Math.ceil(hero.getBoundingClientRect().bottom + window.scrollY)
+			: window.innerHeight
+		const width = document.documentElement.clientWidth
+		if (!width || !bottom) return
+		canvas.width = width
+		canvas.height = bottom
+		canvas.style.height = `${bottom}px`
 		gl.viewport(0, 0, canvas.width, canvas.height)
 		gl.uniform2f(uRes, canvas.width, canvas.height)
 		draw()
@@ -110,6 +126,10 @@ if (gl) {
 	window.addEventListener("resize", () => { resize(); applyScroll() })
 	window.addEventListener("scroll", applyScroll, { passive: true })
 	reducedMotion.addEventListener?.("change", applyScroll)
+	// The hero grows after load (web fonts, the splat stage) — track its box so
+	// the canvas bottom stays pinned to the section bottom.
+	const hero = document.querySelector(".hero")
+	if (hero) new ResizeObserver(() => { resize(); applyScroll() }).observe(hero)
 
 	resize()
 	applyScroll()
