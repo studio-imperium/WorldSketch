@@ -17,13 +17,6 @@ import { createPrimitive, disposeObject, setEdgeOutlineVisible, updateEdgeOutlin
 import { addBuild, listBuilds, getBuildSceneSplat, deleteBuild, clearBuilds } from "/scripts/history.js"
 import { loadFramesState, saveFramesState } from "/scripts/frames-store.js"
 import { loadDefaultBuildSeeds } from "/scripts/default-builds.js"
-import { generateGeometryOnHuggingFace } from "/scripts/geometry-generation.js?v=geometry-dev-6"
-import {
-	fittedGeometryGroundStroke,
-	geometryPromptRejectsGround,
-	geometryPromptRequestsDesignedGround,
-	MAX_GENERATED_PRIMITIVES,
-} from "/scripts/geometry-generation-request.js?v=geometry-dev-6"
 import { createSky } from "/scripts/sky.js"
 import { cloneGroundStrokes, closeGroundStroke, paintGroundStroke } from "/scripts/ground-strokes.js"
 
@@ -95,7 +88,6 @@ let nextPrimitiveId = 1
 let generating = false
 let splatting = false // a SPLAT generation is in flight (drives the View tab's disabled+spinner gate)
 let generationAbort = null
-let geometryGenerating = false
 const generationImageDebugger = createGenerationImageDebugger()
 
 // Temporary inspection aid: keep the exact images sent through the one-shot pipeline
@@ -214,9 +206,6 @@ const els = {
 	shotAdd: document.getElementById("shot_add_btn"),
 	shotPlay: document.getElementById("shot_play_btn"),
 	shotExport: document.getElementById("shot_export_btn"),
-	geometryPromptForm: document.getElementById("geometry_prompt_form"),
-	geometryPromptInput: document.getElementById("geometry_prompt_input"),
-	geometryPromptSubmit: document.getElementById("geometry_prompt_submit"),
 	chatForm: document.getElementById("chat_form"),
 	chatPrompt: document.getElementById("chat_prompt"),
 	sceneShot: document.getElementById("scene_shot_btn"),
@@ -2924,20 +2913,6 @@ function yieldForProgressPaint() {
 	return new Promise(resolve => requestAnimationFrame(() => window.setTimeout(resolve, 0)))
 }
 
-function syncGeometryPrompt() {
-	if (!els.geometryPromptSubmit) return
-	const signedIn = getHuggingFaceAuth().signedIn
-	els.geometryPromptSubmit.disabled = generating || !signedIn
-	if (els.geometryPromptInput) els.geometryPromptInput.disabled = generating
-	els.geometryPromptSubmit.classList.toggle("is-loading", geometryGenerating)
-	els.geometryPromptSubmit.querySelector(".loading")?.classList.toggle("hidden", !geometryGenerating)
-	els.geometryPromptSubmit.title = geometryGenerating
-		? "Generating a replacement build…"
-		: signedIn
-			? "Replace this build with generated geometry (uses inference credits)"
-			: "Sign in with Hugging Face to generate geometry"
-}
-
 function syncGenerateButton() {
 	els.generate.disabled = generating
 	els.generate.classList.toggle("is-disabled", generating)
@@ -2950,44 +2925,7 @@ function syncGenerateButton() {
 	if (generating) {
 		if (placementPreview) placementPreview.visible = false // no frozen ghost block mid-air
 	}
-	syncGeometryPrompt()
 	syncViewGate()
-}
-
-async function generateBuildGeometry(prompt) {
-	const description = String(prompt ?? "").trim()
-	if (!description || generating) return
-	geometryGenerating = true
-	generating = true
-	syncGenerateButton()
-	setStatus("Generating a compact replacement build…")
-	try {
-		const json = await generateGeometryOnHuggingFace(description)
-		const geometry = validatedBuildGeometryJson(json)
-		if (geometry.primitives.length > MAX_GENERATED_PRIMITIVES) {
-			throw new Error(`The geometry model returned more than ${MAX_GENERATED_PRIMITIVES} blocks`)
-		}
-		if (!geometry.ground) {
-			geometry.ground = { size: GROUND_SHEET_SIZE, complete: true, strokes: [] }
-		}
-		if (geometryPromptRejectsGround(description)) {
-			geometry.ground.strokes = []
-		} else if (!geometryPromptRequestsDesignedGround(description) || !geometry.ground.strokes.length) {
-			const fittedGround = fittedGeometryGroundStroke(geometry.primitives, description)
-			geometry.ground.strokes = fittedGround ? [fittedGround] : []
-		}
-		await replaceBuildGeometry(geometry)
-		world.prompt = description
-		if (els.chatPrompt) els.chatPrompt.value = description
-		persistFramesSoon()
-		setStatus(`Replaced the build with ${world.primitives.length} generated block${world.primitives.length === 1 ? "" : "s"}`)
-	} catch (error) {
-		setStatus(error.message || "Could not generate block geometry")
-	} finally {
-		geometryGenerating = false
-		generating = false
-		syncGenerateButton()
-	}
 }
 
 // Build is always available; View unlocks once the single scene splat has landed.
@@ -3295,8 +3233,9 @@ async function replaceBuildGeometry(geometry) {
 	beginBuildAction()
 	try {
 		const file = new File([JSON.stringify(geometry)], "build-geometry.json", { type: "application/json" })
-		const applied = await applyPrimitives(file)
+		const applied = await applyPrimitives(file, { staged: true })
 		if (!applied) throw new Error("Could not apply geometry")
+		revealPrimitivesBottomUp()
 		syncBuildGeometryJson(true)
 	} catch (error) {
 		const rollback = activeBuildHistory()?.undo.pop()
@@ -3305,6 +3244,49 @@ async function replaceBuildGeometry(geometry) {
 	} finally {
 		buildGeometryJsonApplying = false
 	}
+}
+
+// Staggered bottom-up reveal after a whole-build replacement (Apply JSON / generated
+// geometry). The build state is already final — meshes, support links, and persistence
+// all see the finished build; only visibility is staggered, so an interrupted reveal
+// can simply snap everything visible.
+let buildRevealToken = 0
+
+// Total reveal duration in seconds, set by the "Build-up time" slider in the dev panel.
+// 0 = instant (no stagger).
+let buildRevealSeconds = 2.5
+try {
+	const storedRevealSeconds = localStorage.getItem("worldsketch.buildRevealSeconds")
+	if (storedRevealSeconds !== null) {
+		const seconds = Number(storedRevealSeconds)
+		if (Number.isFinite(seconds) && seconds >= 0) buildRevealSeconds = Math.min(10, seconds)
+	}
+} catch {}
+
+async function revealPrimitivesBottomUp() {
+	if (uiTab !== "build") return // View owns block-out visibility (blocks stay hidden there)
+	if (buildRevealSeconds <= 0) return // instant: applyUiTab already showed everything
+	const token = ++buildRevealToken
+	const meshes = [...world.primitives].sort(
+		(a, b) => (a.position.y - a.scale.y / 2) - (b.position.y - b.scale.y / 2),
+	)
+	// applyUiTab just force-showed the whole block-out; re-hide it in the same microtask
+	// (before the next render frame) so the reveal starts from an empty ground.
+	for (const mesh of meshes) mesh.visible = false
+	// Time-based (not one-block-per-tick) so browser timer throttling can't stretch the
+	// reveal: late ticks show every block whose moment has passed and the whole build
+	// always lands in the slider's duration.
+	const delay = Math.max(16, (buildRevealSeconds * 1000) / Math.max(1, meshes.length))
+	const start = performance.now()
+	let shown = 0
+	while (shown < meshes.length) {
+		if (token !== buildRevealToken || uiTab !== "build") break
+		const due = Math.min(meshes.length, Math.max(shown + 1, Math.ceil((performance.now() - start) / delay)))
+		while (shown < due) meshes[shown++].visible = true
+		await new Promise(resolve => window.setTimeout(resolve, delay))
+	}
+	// Whatever interrupted the loop, never leave Build-tab blocks hidden.
+	if (uiTab === "build") for (const mesh of meshes) mesh.visible = true
 }
 
 function scheduleSegmentationRetune() {
@@ -3339,6 +3321,10 @@ function createSegmentationTunePanel() {
 				<button type="button" data-build-json-apply>Apply JSON</button>
 				<button type="button" data-build-json-refresh>Refresh from Build</button>
 			</div>
+			<label class="build-json-speed">
+				<span>Build-up time <output data-build-speed-out></output></span>
+				<input type="range" min="0" max="8" step="0.5" data-build-speed aria-label="Build-up time in seconds">
+			</label>
 		</section>
 		<footer class="tuning-actions">
 			<button type="button" data-tune-retune>Apply to current scene</button>
@@ -3400,6 +3386,22 @@ function createSegmentationTunePanel() {
 	})
 	panel.querySelector("[data-build-json-apply]")?.addEventListener("click", () => applyBuildGeometryJson())
 	panel.querySelector("[data-build-json-refresh]")?.addEventListener("click", () => syncBuildGeometryJson(true))
+	const buildSpeedInput = panel.querySelector("[data-build-speed]")
+	const buildSpeedOut = panel.querySelector("[data-build-speed-out]")
+	const syncBuildSpeed = () => {
+		if (buildSpeedOut) buildSpeedOut.textContent = buildRevealSeconds > 0 ? `${buildRevealSeconds}s` : "instant"
+	}
+	if (buildSpeedInput) {
+		buildSpeedInput.value = String(buildRevealSeconds)
+		syncBuildSpeed()
+		buildSpeedInput.addEventListener("input", () => {
+			const value = Number(buildSpeedInput.value)
+			if (!Number.isFinite(value) || value < 0) return
+			buildRevealSeconds = value
+			try { localStorage.setItem("worldsketch.buildRevealSeconds", String(value)) } catch {}
+			syncBuildSpeed()
+		})
+	}
 	panel.querySelector("[data-tune-retune]")?.addEventListener("click", () => retuneCurrentSceneSegmentation())
 	panel.querySelector("[data-tune-copy]")?.addEventListener("click", async event => {
 		const button = event.currentTarget
@@ -6458,7 +6460,9 @@ async function uploadPrimitives(file) {
 	await applyPrimitives(file)
 }
 
-async function applyPrimitives(file) {
+// `staged: true` creates the meshes hidden so revealPrimitivesBottomUp can show them
+// one at a time without a single fully-visible flash frame in between.
+async function applyPrimitives(file, { staged = false } = {}) {
 	if (!file) return
 	let parsed
 	try {
@@ -6483,6 +6487,7 @@ async function applyPrimitives(file) {
 		}
 	}
 
+	buildRevealToken++ // stop any in-flight reveal before its meshes are swapped out
 	world.resetGenerated() // back to an editable draft before swapping the block-out
 	selectPrimitive(null)
 	for (const mesh of [...world.primitives]) world.removePrimitive(mesh)
@@ -6498,6 +6503,7 @@ async function applyPrimitives(file) {
 			locked: p.locked,
 		})
 		mesh.userData.world = world
+		if (staged) mesh.visible = false
 		world.primitives.push(mesh)
 		world.group.add(mesh)
 		return mesh
@@ -6850,6 +6856,14 @@ document.addEventListener("keydown", event => {
 		toggleDevControls()
 		return
 	}
+	// "o" hides/shows every piece of UI at once (panels, rails, devtools — everything
+	// except the canvas), for clean screenshots and recordings.
+	if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && key === "o") {
+		if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target?.isContentEditable) return
+		event.preventDefault()
+		document.body.classList.toggle("hide-ui")
+		return
+	}
 	if (event.key === "Escape") {
 		const settingsOpen = !els.settingsPopover.classList.contains("hidden")
 		if (els.colorPop && !els.colorPop.classList.contains("hidden")) toggleColorPop(false)
@@ -6878,18 +6892,6 @@ els.chatForm.addEventListener("submit", event => {
 	if (els.generate.disabled) return
 	const prompt = els.chatPrompt.value.trim()
 	generateWorld(prompt).catch(error => setStatus(error.message || "Could not start generation"))
-})
-
-els.geometryPromptForm?.addEventListener("submit", event => {
-	event.preventDefault()
-	if (els.geometryPromptSubmit?.disabled) return
-	const prompt = els.geometryPromptInput?.value.trim()
-	if (!prompt) {
-		setStatus("Describe the block geometry you want")
-		els.geometryPromptInput?.focus()
-		return
-	}
-	generateBuildGeometry(prompt)
 })
 
 els.hfSignOut?.addEventListener("click", () => {
