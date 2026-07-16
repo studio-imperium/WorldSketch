@@ -7,6 +7,9 @@
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { createPrimitive } from "/scripts/primitives.js"
+import { initReveal } from "/scripts/reveal.js"
+
+const REVEAL_SAMPLE = 3500 // points handed to the scroll-reveal ASCII cloud
 
 const ASSET = "/assets/japanese-courtyard"
 const PANEL = 0xf5f4f1 // must match --panel in site.css so the world floats on the card
@@ -16,10 +19,20 @@ const stage = document.getElementById("stage")
 const hint = document.getElementById("stage-hint")
 const tabs = [...document.querySelectorAll(".tab[data-phase]")]
 
-main().catch(error => {
+// TEMP calibration harness — ?calib=1&yaw=0&k=1&dx=0&dz=0&theta=0.785&phi=1.12
+// freezes the orbit and overlays the sketch at half opacity over the splat.
+const Q = new URLSearchParams(location.search)
+const calib = Q.has("calib")
+const qn = (name, dflt) => (Q.has(name) ? Number(Q.get(name)) : dflt)
+
+const booted = main()
+booted.catch(error => {
 	console.error(error)
 	hint.textContent = "The world couldn't load. Check client/assets/japanese-courtyard.*"
 })
+// Calib screenshots wait on the window load event, so hold module evaluation
+// (and with it the load event) until the splat is seated and drawn.
+if (calib) await booted
 
 async function main() {
 	const splatLayer = makeLayer()
@@ -36,9 +49,21 @@ async function main() {
 	// The sketch is a 35KB JSON — build and show it immediately while the splat streams.
 	const blockoutJson = await (await fetch(`${ASSET}-blockout.json`)).json()
 	const { group: blockout, box: blockoutBox } = normalize(buildBlockout(blockoutJson))
-	sketchLayer.scene.add(blockout)
+	// Seat wrapper: rotates/scales the normalized sketch about the world origin so it
+	// can be registered onto the splat's frame (content is already centered on origin).
+	const seat = new THREE.Group()
+	seat.add(blockout)
+	seat.rotation.y = qn("yaw", 0)
+	seat.scale.setScalar(qn("k", 1))
+	seat.position.set(qn("dx", 0), 0, qn("dz", 0))
+	sketchLayer.scene.add(seat)
 
 	const view = frameFor(blockoutBox)
+	if (calib) {
+		view.theta = qn("theta", view.theta)
+		view.phi = qn("phi", view.phi)
+		view.radius *= qn("r", 1)
+	}
 	let phase = "sketch"
 	const setPhase = name => {
 		phase = name
@@ -49,7 +74,7 @@ async function main() {
 	setPhase("sketch")
 
 	// Drag to orbit; auto-rotate resumes after a beat of stillness.
-	const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+	const reduceMotion = calib || window.matchMedia("(prefers-reduced-motion: reduce)").matches
 	let lastPointer = null
 	let lastInteraction = -Infinity
 	stage.addEventListener("pointerdown", event => {
@@ -68,12 +93,11 @@ async function main() {
 	stage.addEventListener("pointerup", release)
 	stage.addEventListener("pointercancel", release)
 
-	let lastTime = performance.now()
-	splatLayer.renderer.setAnimationLoop(() => {
-		const now = performance.now()
-		const dt = Math.min(0.05, (now - lastTime) / 1000)
-		lastTime = now
-		if (!reduceMotion && !lastPointer && now - lastInteraction > 2500) view.theta += dt * 0.12
+	// Mount the scroll-reveal band now (code field + grid) so it's alive before the
+	// 17MB splat arrives; feed it points once we've sampled them below.
+	const feedReveal = calib ? null : initReveal()
+
+	const drawFrame = () => {
 		for (const layer of [splatLayer, sketchLayer]) {
 			layer.camera.position.set(
 				view.target.x + view.radius * Math.sin(view.phi) * Math.sin(view.theta),
@@ -83,7 +107,22 @@ async function main() {
 			layer.camera.lookAt(view.target)
 			layer.renderer.render(layer.scene, layer.camera)
 		}
-	})
+	}
+	let lastTime = performance.now()
+	const tick = () => {
+		const now = performance.now()
+		const dt = Math.min(0.05, (now - lastTime) / 1000)
+		lastTime = now
+		if (!reduceMotion && !lastPointer && now - lastInteraction > 2500) view.theta += dt * 0.12
+		drawFrame()
+	}
+	splatLayer.renderer.setAnimationLoop(tick)
+	// The hero and the scroll-reveal cloud are never on screen together — pause the
+	// hero's GL loop once it scrolls away so only one heavy render runs at a time.
+	if (!calib) new IntersectionObserver(([e]) => {
+		splatLayer.renderer.setAnimationLoop(e.isIntersecting ? tick : null)
+		if (e.isIntersecting) lastTime = performance.now()
+	}, { threshold: 0 }).observe(stage)
 
 	// Stream in the splat, seat it in the same normalized frame, then start the loop.
 	const response = await fetch(`${ASSET}.ply`)
@@ -96,13 +135,34 @@ async function main() {
 
 	const rawBox = new THREE.Box3()
 	const point = new THREE.Vector3()
+	// Reservoir-sample a fixed slice of the splat's points for the scroll-reveal cloud
+	// (unbiased, O(1) memory) while we already visit every splat for the bounds.
+	const sample = new Float32Array(REVEAL_SAMPLE * 3)
+	let seen = 0
 	mesh.packedSplats?.forEachSplat((_i, center) => {
 		if (![center.x, center.y, center.z].every(Number.isFinite)) return
-		rawBox.expandByPoint(point.copy(center).applyMatrix4(mesh.matrixWorld))
+		point.copy(center).applyMatrix4(mesh.matrixWorld)
+		rawBox.expandByPoint(point)
+		const slot = seen < REVEAL_SAMPLE ? seen : Math.floor(Math.random() * (seen + 1))
+		if (slot < REVEAL_SAMPLE) { sample[slot * 3] = point.x; sample[slot * 3 + 1] = point.y; sample[slot * 3 + 2] = point.z }
+		seen++
 	})
 	const { group: splat } = normalize({ group: new THREE.Group().add(mesh), box: rawBox })
 	splatLayer.scene.add(splat)
 	splatLayer.canvas.classList.add("base")
+
+	feedReveal?.(sample.subarray(0, Math.min(REVEAL_SAMPLE, seen) * 3), seen)
+
+	if (calib) {
+		// Overlay mode: both layers visible at once, camera frozen, no cycling.
+		sketchLayer.canvas.style.transition = "none"
+		sketchLayer.canvas.style.opacity = String(qn("op", 0.55))
+		stage.scrollIntoView({ block: "center" })
+		await new Promise(resolve => setTimeout(resolve, 800)) // let the sort worker settle
+		drawFrame()
+		document.title = "calib-ready"
+		return
+	}
 
 	let timer = setInterval(() => setPhase(phase === "sketch" ? "splat" : "sketch"), CYCLE_MS)
 	for (const tab of tabs) {
