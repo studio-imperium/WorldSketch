@@ -178,7 +178,7 @@ body.tab-play .side-rail,
 body.tab-play .frames-panel,
 body.tab-play .bottom-dock,
 body.tab-play .settings-menu,
-body.tab-play .geometry-prompt-dock,
+body.tab-play .chat-dock,
 body.tab-play .cam-bar {
 	display: none;
 }
