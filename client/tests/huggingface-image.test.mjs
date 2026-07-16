@@ -1,7 +1,7 @@
 import assert from "node:assert/strict"
 import test from "node:test"
 
-import { fluxEditPayload, imageEditPayload, qwenEditPayload } from "../scripts/huggingface-image.js"
+import { fluxEditPayload, imageEditRequest, qwenEditPayload } from "../scripts/huggingface-image.js"
 
 test("builds the live FLUX.2-dev image-edit request (no mode_choice)", () => {
 	const file = { blob: "guide" }
@@ -61,11 +61,20 @@ test("builds the live Qwen-Image-Edit-2509 request with prompt rewriting off", (
 	})
 })
 
-test("dispatches the payload builder by Space name", () => {
+test("dispatches endpoint and payload builder by Space name", () => {
 	const file = { blob: "guide" }
 	const base = { file, prompt: "p", seed: 1, settings: { width: 512, height: 512, steps: 8, guidance: 2 } }
-	assert.ok("true_guidance_scale" in imageEditPayload({ ...base, space: "Qwen/Qwen-Image-Edit-2509" }))
-	assert.ok("guidance_scale" in imageEditPayload({ ...base, space: "black-forest-labs/FLUX.2-dev" }))
+	const qwen = imageEditRequest({ ...base, space: "Qwen/Qwen-Image-Edit-2509" })
+	assert.equal(qwen.endpoint, "/infer")
+	assert.ok("true_guidance_scale" in qwen.payload)
+	const flux = imageEditRequest({ ...base, space: "black-forest-labs/FLUX.2-dev" })
+	assert.equal(flux.endpoint, "/infer")
+	assert.ok("guidance_scale" in flux.payload)
+	// akhaliq's Qwen duplicate must win over the generic /qwen/ match: it uses a
+	// different endpoint and a two-image payload (the block-out doubles as slot 2).
+	const akhaliq = imageEditRequest({ ...base, space: "akhaliq/Qwen-Image-Edit-2509" })
+	assert.equal(akhaliq.endpoint, "/edit_images")
+	assert.equal(akhaliq.payload.image2, file)
 })
 
 test("adds the aligned geometry map as a second Flux edit image", () => {

@@ -61,7 +61,7 @@ export function initReveal() {
 }
 
 // Staged copy: "A world is" arrives with the first blocks, "a cloud of
-// splats." only once the gaussian has fully materialized.
+// gaussians." rides in with the materialize.
 function showCopy(band, part) {
 	band.querySelector(`.reveal-${part}`)?.classList.add("show")
 }
@@ -233,6 +233,9 @@ async function main(band, canvas) {
 	for (const mat of [...mats, ...lines.map(l => l.material)]) {
 		mat.transparent = true
 		mat.depthWrite = false
+		// the materials were compiled opaque (blending off, opacity ignored);
+		// without a recompile the "fade" renders as a hard snap at dispose
+		mat.needsUpdate = true
 	}
 	await animate(FADE_MS, t => {
 		for (const mat of mats) mat.opacity = 1 - t

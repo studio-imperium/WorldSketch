@@ -130,10 +130,13 @@ if (band && row && gl) {
 		const travel = Math.max(1, rect.height - window.innerHeight) // sticky scroll distance
 		const p = -rect.top / travel // <0 before the band, 0..1 through it, >1 past it
 		const opacity = Math.max(0, Math.min(1, p / FADE_FRACTION, (1 - p) / FADE_FRACTION))
+		// Scroll scrubs the direction count across the whole sticky phase.
+		seed = SEED_MIN + (SEED_MAX - SEED_MIN) * Math.max(0, Math.min(1, p))
 		canvas.style.opacity = String(opacity)
 		canvas.style.visibility = opacity ? "visible" : "hidden"
 		if (opacity && !raf && !reducedMotion.matches) raf = requestAnimationFrame(tick)
 		if (!opacity && raf) { cancelAnimationFrame(raf); raf = 0 }
+		if (opacity && (raf === 0 || reducedMotion.matches)) draw() // reduced motion still sees the scrub
 	}
 
 	window.addEventListener("resize", () => { resize(); applyScroll() })
@@ -141,7 +144,6 @@ if (band && row && gl) {
 	reducedMotion.addEventListener?.("change", applyScroll)
 	new ResizeObserver(() => { resize(); applyScroll() }).observe(row)
 
-	useSeed(SEED)
 	resize()
 	applyScroll()
 }
