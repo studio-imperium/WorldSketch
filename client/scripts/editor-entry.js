@@ -4,9 +4,9 @@ import { configureHuggingFaceAuth, getHuggingFaceAuth } from "/scripts/huggingfa
 try {
 	const runtimeConfig = await getConfig()
 	configureHuggingFaceAuth(runtimeConfig?.generation)
-	if (!getHuggingFaceAuth().signedIn) location.replace("/")
+	if (!getHuggingFaceAuth().signedIn) location.replace("/login")
 	else await import("/scripts/renderer.js?v=direct-tools-1")
 } catch (error) {
 	console.error("Editor startup failed:", error)
-	location.replace("/")
+	location.replace("/login")
 }

@@ -24,6 +24,11 @@ func main() {
 
 	clientDir := filepath.Join(config.RootDir(), "client")
 	mux.Handle("/", httpx.StaticHeaders(http.FileServer(http.Dir(clientDir))))
+	// The Hugging Face sign-in page; mirrors the /login rewrite in vercel.json.
+	mux.Handle("/login", httpx.StaticHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-cache")
+		http.ServeFile(w, r, filepath.Join(clientDir, "login.html"))
+	})))
 
 	addr := config.Env("PORT", "8067")
 	log.Printf("WorldSketch listening on http://localhost:%s", addr)

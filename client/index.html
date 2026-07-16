@@ -3,81 +3,178 @@
 <head>
 	<meta charset="UTF-8">
 	<meta name="viewport" content="width=device-width, initial-scale=1.0">
-	<meta name="theme-color" content="#f5f3ee">
-	<title>WorldSketch — Sign in</title>
-	<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%235b6ee1' d='M12 1.6L21.5 7v10L12 22.4L2.5 17V7z'/%3E%3Cpath fill='%23fff' opacity='0.35' d='M12 1.6L21.5 7L12 12.4L2.5 7z'/%3E%3Cpath fill='%23000' opacity='0.15' d='M12 12.4L21.5 7v10L12 22.4z'/%3E%3C/svg%3E">
+	<title>worldsplat — Sketch a world. Walk inside it.</title>
+	<meta name="description" content="worldsplat turns rough sketches into explorable 3D worlds, one seamless gaussian splat at a time.">
+	<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cg fill='%23111110'%3E%3Cellipse cx='9' cy='10' rx='6' ry='5.2' transform='rotate(-18 9 10)'/%3E%3Cellipse cx='17' cy='8.5' rx='3.4' ry='2.9' transform='rotate(24 17 8.5)'/%3E%3Cellipse cx='15.5' cy='16.5' rx='4.4' ry='3.6' transform='rotate(-8 15.5 16.5)'/%3E%3Ccircle cx='6.5' cy='17.5' r='2.1'/%3E%3C/g%3E%3C/svg%3E">
 	<link rel="preconnect" href="https://fonts.googleapis.com">
 	<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-	<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400..700&display=swap" rel="stylesheet">
-	<link rel="stylesheet" href="/landing.css">
+	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&display=swap" rel="stylesheet">
+	<link rel="stylesheet" href="/site.css">
 	<script>
-		!function(t,e){var o,n,p,r;e.__SV||(window.posthog=e,e._i=[],e.init=function(i,s,a){function g(t,e){var o=e.split(".");2==o.length&&(t=t[o[0]],e=o[1]),t[e]=function(){t.push([e].concat(Array.prototype.slice.call(arguments,0)))}}(p=t.createElement("script")).type="text/javascript",p.crossOrigin="anonymous",p.async=!0,p.src=s.api_host.replace(".i.posthog.com","-assets.i.posthog.com")+"/static/array.js",(r=t.getElementsByTagName("script")[0]).parentNode.insertBefore(p,r);var u=e;for(void 0!==a?u=e[a]=[]:a="posthog",u.people=u.people||[],u.toString=function(t){var e="posthog";return"posthog"!==a&&(e+="."+a),t||(e+=" (stub)"),e},u.people.toString=function(){return u.toString(1)+".people (stub)"},o="init capture register register_once register_for_session unregister unregister_for_session getFeatureFlag getFeatureFlagPayload isFeatureEnabled reloadFeatureFlags updateEarlyAccessFeatureEnrollment getEarlyAccessFeatures on onFeatureFlags onSessionId getSurveys getActiveMatchingSurveys renderSurvey canRenderSurvey getNextSurveyStep identify setPersonProperties group resetGroups setPersonPropertiesForFlags resetPersonPropertiesForFlags setGroupPropertiesForFlags resetGroupPropertiesForFlags reset get_distinct_id getGroups get_session_id get_session_replay_url alias set_config startSessionRecording stopSessionRecording sessionRecordingStarted captureException loadToolbar get_property getSessionProperty createPersonProfile opt_in_capturing opt_out_capturing has_opted_in_capturing has_opted_out_capturing clear_opt_in_out_capturing debug".split(" "),n=0;n<o.length;n++)g(u,o[n]);e._i.push([i,s,a])},e.__SV=1)}(document,window.posthog||[]);
-		posthog.init('phc_vfBYNpKio4kbFsmdVxfgHQEz6Lk5YVh3uNGWznzkf6jL', {api_host: 'https://us.i.posthog.com', defaults: '2025-05-24'});
+		// "/" is the registered Hugging Face OAuth redirect URL; hand callback
+		// hits to the sign-in page, which finishes the token exchange.
+		if (/[?&](code|error)=/.test(location.search)) location.replace("/login" + location.search + location.hash)
 	</script>
+	<script type="importmap">
+	{
+		"imports": {
+			"three": "/lib/three.module.js",
+			"three/addons/": "https://cdn.jsdelivr.net/npm/three@0.182.0/examples/jsm/",
+			"spark": "https://cdn.jsdelivr.net/npm/@sparkjsdev/spark@2.1.0/dist/spark.module.js"
+		}
+	}
+	</script>
+	<style>
+		main { max-width: 1440px; margin: 0 auto; padding: 0 36px; }
+
+		/* ---- hero ---- */
+		.hero {
+			display: grid;
+			grid-template-columns: 1.15fr 0.85fr;
+			gap: 48px;
+			align-items: center;
+			padding: 96px 0 56px;
+		}
+		.hero h1 {
+			font-size: clamp(48px, 6.4vw, 84px);
+			font-weight: 500;
+			line-height: 1.03;
+			letter-spacing: -0.04em;
+			text-wrap: balance;
+		}
+		.hero-cta { display: flex; gap: 12px; margin-top: 44px; }
+		.hero-copy {
+			font-size: 18px;
+			line-height: 1.55;
+			color: var(--ink-soft);
+			max-width: 46ch;
+			justify-self: end;
+		}
+
+		/* ---- showcase card with the live splat ---- */
+		.showcase {
+			background: var(--card);
+			border-radius: 26px;
+			padding: 10px;
+			margin-bottom: 28px;
+		}
+		.tabs {
+			display: grid;
+			grid-template-columns: 1fr 1fr;
+			gap: 8px;
+			padding: 2px 2px 10px;
+		}
+		.tab {
+			height: 46px;
+			border-radius: 9999px;
+			display: inline-flex;
+			align-items: center;
+			justify-content: center;
+			gap: 9px;
+			font-size: 15px;
+			font-weight: 500;
+			color: var(--ink-soft);
+			cursor: pointer;
+			transition: background-color 0.4s ease, box-shadow 0.4s ease;
+		}
+		.tab.active {
+			background: var(--white);
+			color: var(--ink);
+			box-shadow: 0 1px 2px rgba(20, 20, 15, 0.07), 0 5px 18px rgba(20, 20, 15, 0.05);
+		}
+		.orb { width: 15px; height: 15px; border-radius: 50%; flex: none; }
+		.orb-sketch { background: radial-gradient(circle at 35% 30%, #f2a56b, #d96b2b 75%); }
+		.orb-splat { background: radial-gradient(circle at 35% 30%, #a8c6e8, #5e8a5e 55%, #2e4a3a); }
+
+		.stage {
+			position: relative;
+			height: min(72vh, 760px);
+			min-height: 460px;
+			border-radius: 18px;
+			background: var(--panel);
+			overflow: hidden;
+			touch-action: none;
+		}
+		.stage canvas {
+			position: absolute;
+			inset: 0;
+			width: 100%;
+			height: 100%;
+			display: block;
+			cursor: grab;
+			opacity: 0;
+			background: var(--panel); /* hard-opaque backing so layers can't bleed through */
+		}
+		/* Bottom (splat) layer: revealed instantly — it only ever shows through the
+		   top layer's fade, so transitioning it just invites compositor glitches. */
+		.stage canvas.base { opacity: 1; }
+		/* Top (sketch) layer: the 5-second sketch-to-splat crossfade. */
+		.stage canvas.fade { transition: opacity 1.4s ease; }
+		.stage canvas.fade.show { opacity: 1; }
+		.stage canvas:active { cursor: grabbing; }
+		.stage-hint {
+			position: absolute;
+			inset: 0;
+			display: flex;
+			align-items: center;
+			justify-content: center;
+			font-size: 15px;
+			color: var(--ink-faint);
+			pointer-events: none;
+		}
+		@media (max-width: 900px) {
+			main { padding: 0 20px; }
+			.hero { grid-template-columns: 1fr; gap: 28px; padding: 56px 0 36px; }
+			.hero-copy { justify-self: start; }
+			.tab span.tab-word { display: none; }
+			.stage { height: 58vh; min-height: 380px; }
+		}
+	</style>
 </head>
 <body>
-	<main class="landing-shell">
-		<section class="login-pane" aria-labelledby="login_title">
-			<a class="brand" href="/" aria-label="WorldSketch home">
-				<svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-					<path d="M16 2.5 28 9.2v13.6L16 29.5 4 22.8V9.2z" fill="currentColor"></path>
-					<path d="m16 2.5 12 6.7-12 6.7L4 9.2z" fill="#fff" opacity=".38"></path>
-					<path d="m16 15.9 12-6.7v13.6l-12 6.7z" fill="#111827" opacity=".18"></path>
-				</svg>
-				<span>WorldSketch</span>
-			</a>
+	<header class="nav">
+		<a class="wordmark" href="/" aria-label="worldsplat home">
+			<svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+				<ellipse cx="9" cy="10" rx="6" ry="5.2" transform="rotate(-18 9 10)"/>
+				<ellipse cx="17" cy="8.5" rx="3.4" ry="2.9" transform="rotate(24 17 8.5)"/>
+				<ellipse cx="15.5" cy="16.5" rx="4.4" ry="3.6" transform="rotate(-8 15.5 16.5)"/>
+				<circle cx="6.5" cy="17.5" r="2.1"/>
+			</svg>
+			worldsplat
+		</a>
+		<div class="nav-cta">
+			<a class="pill pill-outline" href="mailto:hello@worldsplat.ai">Contact sales</a>
+			<a class="pill pill-black" href="/login">Log in</a>
+		</div>
+	</header>
 
-			<div class="login-content">
-				<p class="eyebrow">Your 3D canvas</p>
-				<h1 id="login_title">Shape the idea.<br>Build the world.</h1>
-				<p class="login-lede">Connect your Hugging Face account to enter the editor and generate your scene.</p>
-
-				<button class="hf-login-button" id="hf_login_btn" type="button" disabled>
-					<span class="hf-logo" aria-hidden="true">🤗</span>
-					<span class="hf-login-label" id="hf_login_label">Continue with Hugging Face</span>
-					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14M13 6l6 6-6 6"></path></svg>
-				</button>
-				<p class="login-note">Secure OAuth sign-in. WorldSketch never sees your Hugging Face password.</p>
-				<p class="login-error hidden" id="login_error" role="alert"></p>
+	<main>
+		<section class="hero">
+			<div>
+				<h1>Sketch a world.<br>Walk inside it.</h1>
+				<div class="hero-cta">
+					<a class="pill pill-black pill-lg" href="/login">Sign up</a>
+					<a class="pill pill-outline pill-lg" href="mailto:hello@worldsplat.ai?subject=worldsplat%20demo">Book a demo</a>
+				</div>
 			</div>
-
-			<p class="landing-foot">Block out in 3D · Generate with your own compute</p>
+			<p class="hero-copy">Powering worldbuilders, game designers, and daydreamers. Draw a rough plot and worldsplat grows it into an explorable 3D world&nbsp;&mdash; one seamless gaussian splat at a time.</p>
 		</section>
 
-		<section class="world-pane" aria-hidden="true">
-			<div class="world-glow"></div>
-			<svg class="world-scene" viewBox="0 0 760 760" fill="none">
-				<defs>
-					<linearGradient id="ground" x1="140" y1="170" x2="620" y2="650" gradientUnits="userSpaceOnUse">
-						<stop stop-color="#eef0ff"></stop><stop offset="1" stop-color="#dcdff7"></stop>
-					</linearGradient>
-					<linearGradient id="front" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#697bea"></stop><stop offset="1" stop-color="#4b5ecb"></stop></linearGradient>
-					<linearGradient id="side" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#3949a5"></stop><stop offset="1" stop-color="#29367e"></stop></linearGradient>
-					<filter id="shadow" x="-30%" y="-30%" width="160%" height="180%"><feDropShadow dx="0" dy="24" stdDeviation="22" flood-color="#202a63" flood-opacity=".2"></feDropShadow></filter>
-				</defs>
-				<path d="M380 86 676 257 380 428 84 257z" fill="url(#ground)"></path>
-				<path d="M84 257v74l296 171v-74z" fill="#c4c9ed"></path>
-				<path d="M676 257v74L380 502v-74z" fill="#aeb5e2"></path>
-				<g opacity=".35" stroke="#7884c4" stroke-width="1">
-					<path d="m143 223 296 171M202 189l296 171M261 155l296 171M320 121l296 171M617 223 321 394M558 189 262 360M499 155 203 326M440 121 144 292"></path>
-				</g>
-				<g filter="url(#shadow)">
-					<path d="m319 232 90-52 90 52-90 52z" fill="#aeb9ff"></path>
-					<path d="m319 232 90 52v154l-90-52z" fill="url(#front)"></path>
-					<path d="m499 232-90 52v154l90-52z" fill="url(#side)"></path>
-					<path d="m202 303 67-39 67 39-67 39z" fill="#d2d8ff"></path>
-					<path d="m202 303 67 39v83l-67-39z" fill="#7f8ff0"></path>
-					<path d="m336 303-67 39v83l67-39z" fill="#4858b3"></path>
-					<path d="m444 375 52-30 52 30-52 30z" fill="#f3d9a4"></path>
-					<path d="m444 375 52 30v59l-52-30z" fill="#e5ad66"></path>
-					<path d="m548 375-52 30v59l52-30z" fill="#bd7445"></path>
-				</g>
-				<path d="M409 180v-48M409 132l28 16M409 132l-27 16" stroke="#5b6ee1" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"></path>
-				<circle cx="409" cy="132" r="10" fill="#f7c861" stroke="#fff" stroke-width="5"></circle>
-			</svg>
-			<div class="scene-caption"><span></span>From simple forms to generated worlds</div>
+		<section class="showcase" aria-label="Live world preview">
+			<div class="tabs">
+				<button class="tab active" type="button" data-phase="sketch"><span class="orb orb-sketch"></span><span class="tab-word">Sketch</span></button>
+				<button class="tab" type="button" data-phase="splat"><span class="orb orb-splat"></span><span class="tab-word">Splat</span></button>
+			</div>
+			<div class="stage" id="stage">
+				<div class="stage-hint" id="stage-hint">loading world&hellip;</div>
+			</div>
 		</section>
 	</main>
-	<script type="module" src="/scripts/landing.js?v=auth-landing-1"></script>
+
+	<footer class="footer">
+		<span>&copy; 2026 worldsplat</span>
+	</footer>
+
+	<script type="module" src="/scripts/landing.js?v=worldsplat-1"></script>
 </body>
 </html>

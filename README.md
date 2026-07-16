@@ -12,7 +12,7 @@ cd server
 go run .
 ```
 
-Open `http://localhost:8067/`, sign in with Hugging Face, and the landing page will take you to the editor at `/app/`. The included public OAuth client is already registered for the local landing-page URL.
+Open `http://localhost:8067/` for the landing page. `Log in` goes to the Hugging Face sign-in at `/login`, which then opens the editor at `/app/`. The included public OAuth client is already registered for the local root URL, so callbacks return to `/` and are handed to `/login` to finish.
 
 ## Deploy
 
@@ -39,7 +39,7 @@ The checked-in defaults are an inexpensive testing preset: a 512×512 image, fou
 
 ## Security and quota behavior
 
-- Sign-in uses OAuth Authorization Code with PKCE. The access token is stored in session storage for the current tab so the landing page can open the editor; it disappears when the tab is closed or the user signs out.
+- Sign-in uses OAuth Authorization Code with PKCE. The access token is stored in session storage for the current tab so the sign-in page can open the editor; it disappears when the tab is closed or the user signs out.
 - WorldSketch asks for `openid profile inference-api`; it has no repository or account write permission. The inference permission can spend monthly inference credits only when `Use inference credits` is enabled.
 - Prompt rewriting is disabled, so the image stage stays entirely on the selected Hugging Face Space.
 - Jobs are not retried automatically because retries could consume GPU allowance twice.
