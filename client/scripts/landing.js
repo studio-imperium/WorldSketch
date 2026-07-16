@@ -10,10 +10,10 @@ import { SparkRenderer, SplatMesh } from "spark"
 import { createPrimitive } from "/scripts/primitives.js"
 // reveal.js is versioned too — the server caches .js for 1h and a stale reveal.js
 // (old feed-me API) paired with a fresh landing.js leaves the band stuck empty.
-import { initReveal } from "/scripts/reveal.js?v=worldsplat-27"
+import { initReveal } from "/scripts/reveal.js?v=worldsplat-28"
 
 const ASSET = "/assets/japanese-courtyard"
-const PANEL = 0xfbfbfa // must match the page's paper colour so there is no inner window
+const PANEL = 0xfbfbfa // paper colour; layers clear it at alpha 0 (kept for premultiplied edge blending)
 
 const stage = document.getElementById("stage")
 const hint = document.getElementById("stage-hint")
@@ -103,7 +103,11 @@ async function main() {
 	}
 	const applyMorph = () => {
 		const p = morphProgress()
+		// True crossfade — both canvases are transparent (the bg3.js pattern sits
+		// behind the stage), so the splat can't hide under an opaque panel: it
+		// fades in exactly as the sketch fades out.
 		sketchLayer.canvas.style.opacity = String(splatReady ? 1 - p : 1)
+		splatLayer.canvas.style.opacity = String(splatReady ? p : 0)
 	}
 	if (!calib) {
 		applyMorph()
@@ -185,8 +189,10 @@ async function main() {
 	applyMorph()
 
 	function makeLayer() {
-		const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" })
-		renderer.setClearColor(PANEL, 1)
+		// alpha canvas cleared fully transparent: the stage floats on the page, so
+		// the bg3.js pattern behind it stays visible around the world.
+		const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: "high-performance" })
+		renderer.setClearColor(PANEL, 0)
 		renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
 		const scene = new THREE.Scene()
 		const camera = new THREE.PerspectiveCamera(46, 1, 0.05, 2000)

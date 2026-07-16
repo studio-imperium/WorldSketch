@@ -1,14 +1,22 @@
-// Scroll-reveal, two acts sharing one WebGL context. Act one is the editor
-// block-out (assets/reveal-blockout.json, baked by
-// scripts/generate-reveal-blockout.mjs): ~45 purposeful blocks construct
-// bottom-up, ramp white-hot, and vanish. Act two is the materialization: the
-// baked PLY (bake-reveal-splat.mjs, top 100k gaussians pre-normalized into a
-// unit frame) is split client-side into chunks by radial distance from the
-// plot's axis plus per-gaussian jitter — regional AND stochastic, so the build
-// sweeps outward behind a fuzzy frontier — and the chunks fade in on
-// staggered, overlapping ramps until the render is dense. Blocks and splat
-// share the scene exactly like hero-splat.js; Spark accumulators are
-// scene-scoped, so this can't ghost the hero or showcase splats.
+// Scroll-reveal "gaussian resolve": the arena assembles as an editor block-out
+// — the voxel geometry baked by scripts/generate-reveal-blockout.mjs — then
+// dissolves while the REAL gaussian splat materializes gaussian-by-gaussian,
+// growing outward from the centre of the plot (the hero mech's build-up, then
+// the radial materialize in place of a plain opacity fade).
+//
+// Baked assets:
+//   · reveal-blockout.json (generate-reveal-blockout.mjs) — ~45 purposeful
+//     blocks (base, deck, wall runs, domes, hedges) in the splat's display
+//     frame, a few KB, so construction starts fast;
+//   · reveal-splat.ply (bake-reveal-splat.mjs) — the top 100k gaussians,
+//     pre-normalized into the same unit frame, streaming in parallel. It is
+//     split client-side into chunks by radial distance from the plot's axis
+//     plus per-gaussian jitter — regional AND stochastic, so the build sweeps
+//     outward behind a fuzzy frontier — and the chunks fade in on staggered,
+//     overlapping ramps until the render is dense.
+// One WebGL context renders both: blocks and splat share the scene, exactly
+// like hero-splat.js (Spark accumulators are scene-scoped, so this can't ghost
+// the hero or showcase splats).
 
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
@@ -19,16 +27,22 @@ const DIST = 3.5                    // camera distance on +Z
 const YAW = Math.PI * 0.5 - 0.5     // fixed orientation (180° flip, then 90° left), no spin
 const FOCAL = 2.1                   // × min(W,H) — how much of the band the plot fills
 const OX = 0.5                      // projection centre as a fraction of band width
-const OY = 0.44                     // projection centre as a fraction of band height (< 0.5 sits it up a touch)
-const BLOCK_BUILD_S = 0.9           // seconds of staggered block construction
+const OY = 0.44                     // projection centre as a fraction of band height
+const BUILD_S = 0.9                 // seconds of staggered block construction
 const FADE_MS = 600                 // the matte blocks fade out evenly (smoothstep) while the
                                     // gaussians drizzle in beneath — a visible dissolve, but brief.
-const WARM_MS = 600                 // chunks seated invisibly behind the blocks so the sort settles
+                                    // No white flash: full white on the white page reads as the
+                                    // blocks blinking out and back.
+const WARM_MS = 600                 // splat warm-up behind the built blocks (hero+showcase
+                                    // already paid Spark's cold-start by the time we're here)
+// …and then the radial materialize: chunk i starts its own ramp at a staggered
+// offset through GROW_S, so several chunks are always mid-fade — gaussians
+// accumulate as a continuous drizzle instead of discrete pops.
 const CHUNKS = 16                   // reveal granularity — each chunk ≈ 1/16th of the gaussians
-const BUILD_S = 4.0                 // seconds from first gaussians to the full set
+const GROW_S = 4.0                  // seconds from first gaussians to the full set
 const RAMP_S = 1.2                  // outer chunks' fade — overlaps the next chunks' starts
-const RAMP_FIRST_S = 0.4            // the centre chunk snaps in fast; ramps
-                                    // lengthen toward RAMP_S across the first quarter of chunks
+const RAMP_FIRST_S = 0.4            // the centre chunk snaps in fast; ramps lengthen toward
+                                    // RAMP_S across the first quarter of chunks
 // Chunk area grows with radius (annuli get bigger), so a mild power keeps the
 // visual pace even: slightly wider gaps for the small central chunks, tighter
 // for the big outer rings.
@@ -39,19 +53,27 @@ const SPLAT = "/assets/reveal-splat.ply"
 
 export function initReveal() {
 	const band = document.getElementById("reveal")
-	if (!band) return
-	document.getElementById("reveal-canvas")?.remove() // retired ASCII layer
-	main(band).catch(error => console.error(error)) // band keeps its background on failure
+	const canvas = document.getElementById("reveal-canvas")
+	if (!band || !canvas) return
+	main(band, canvas).catch(error => {
+		console.error(error)
+		// The show is off — the copy must never stay invisible with it.
+		showCopy(band, "lead")
+		showCopy(band, "tail")
+	})
 }
 
-async function main(band) {
-	const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+// Staged copy: "A world is a" arrives with the first blocks, "a cloud of
+// splats." only once the gaussian has fully materialized.
+function showCopy(band, part) {
+	band.querySelector(`.reveal-${part}`)?.classList.add("show")
+}
 
-	const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: "high-performance" })
-	renderer.setClearColor(0x000000, 0) // paper and the pixel-wave background show through
+async function main(band, canvas) {
+	const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches
+	const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: true, powerPreference: "high-performance" })
+	renderer.setClearColor(0x000000, 0) // paper and the pixel-wave layer show through
 	renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
-	renderer.domElement.className = "reveal-splat show" // chunks/blocks carry the build, not the canvas
-	band.appendChild(renderer.domElement)
 	const scene = new THREE.Scene()
 	scene.add(new SparkRenderer({ renderer }))
 	// Splats are unlit; the lights are for the matte block-out (hero's rig).
@@ -59,6 +81,9 @@ async function main(band) {
 	const sun = new THREE.DirectionalLight(0xffffff, 1.8)
 	sun.position.set(5, 8, 3)
 	scene.add(sun)
+
+	// Same composite the ASCII cloud used: world = Ry(−YAW) · Rx(TILT), camera on
+	// +Z with the principal point at (OX, OY) — the band's framing is unchanged.
 	const tilt = new THREE.Group()
 	tilt.rotation.x = TILT
 	const yawGroup = new THREE.Group()
@@ -83,8 +108,8 @@ async function main(band) {
 	resize()
 	new ResizeObserver(resize).observe(band)
 
-	// Render only while the band is on screen; the tweens mutate state, the
-	// loop just draws it (Spark's sort worker needs the steady frames).
+	// Render only while the band is on screen; the loop is all this scene needs
+	// (block visibility and the tweens mutate state, the loop just draws it).
 	let running = false
 	function loop() {
 		if (!running) return
@@ -99,9 +124,9 @@ async function main(band) {
 		if (e.isIntersecting) armed() // first sight starts the show
 	}, { threshold: 0.25 }).observe(band)
 
-	// The splat streams and chunks while the blocks build; the .catch marks the
-	// rejection handled until the real await below.
-	const seating = loadChunks()
+	// The splat streams (and chunks) while the blocks build; the .catch marks
+	// the rejection handled until the real await below.
+	const seating = loadSplat()
 	seating.catch(() => {})
 
 	let blocks = null
@@ -109,12 +134,13 @@ async function main(band) {
 		blocks = await buildBlocks()
 		tilt.add(blocks)
 	} catch (error) {
-		console.warn("reveal block-out unavailable, going straight to the gaussians", error)
+		console.warn("reveal block-out unavailable, going straight to the splat", error)
 	}
 
 	await arm
+	showCopy(band, "lead")
 	// Don't play the show into a hidden tab — the setTimeout-driven build would
-	// advance while rAF is frozen and the dissolve would play unseen.
+	// advance while rAF is frozen and the flash would play unseen.
 	if (document.hidden) {
 		await new Promise(resolve => {
 			const onVisible = () => {
@@ -126,17 +152,19 @@ async function main(band) {
 		})
 	}
 
-	// Act one — bottom-up staggered construction, verbatim pacing from the
-	// editor's Apply-JSON path: time-based so timer throttling can't stretch it.
+	// Bottom-up staggered construction, verbatim pacing from the editor's
+	// Apply-JSON path: time-based so timer throttling can't stretch the build.
 	if (blocks && !reduceMotion) {
 		const meshes = [...blocks.children].sort(
 			(a, b) => (a.position.y - a.scale.y / 2) - (b.position.y - b.scale.y / 2),
 		)
+		// Elapsed-fraction pacing: the build always takes BUILD_S total, showing
+		// several blocks per frame when the count outruns the 16ms timer floor.
 		const start = performance.now()
 		let shown = 0
 		while (shown < meshes.length) {
 			const elapsed = performance.now() - start
-			const due = Math.min(meshes.length, Math.max(shown + 1, Math.ceil((elapsed / (BLOCK_BUILD_S * 1000)) * meshes.length)))
+			const due = Math.min(meshes.length, Math.max(shown + 1, Math.ceil((elapsed / (BUILD_S * 1000)) * meshes.length)))
 			while (shown < due) meshes[shown++].visible = true
 			await new Promise(resolve => window.setTimeout(resolve, 16))
 		}
@@ -150,35 +178,48 @@ async function main(band) {
 	} catch (error) {
 		if (!blocks) throw error // nothing on screen — let the outer catch log it
 		console.error("reveal splat unavailable; the block-out stays up", error)
+		showCopy(band, "tail") // the sentence still completes over the blocks
 		return
 	}
 
-	if (!blocks || reduceMotion) {
-		if (blocks) disposeObject(blocks)
-		for (const mesh of chunks) mesh.opacity = 1
-		return
-	}
-
-	// The chunks sit seated at opacity 0; give Spark's sort a beat behind the
-	// opaque blocks before the swap.
-	await new Promise(resolve => window.setTimeout(resolve, WARM_MS))
-
-	// Act two starts under act one's finale: the materialization clock begins
-	// as the blocks start dissolving, so the world is already forming behind
-	// the ghost geometry — no empty stage.
-	const span = Math.max(0.001, BUILD_S - RAMP_S) // last chunk still finishes inside BUILD_S
-	const materialize = animate(BUILD_S * 1000, t => {
-		const now = t * BUILD_S
+	// The radial materialize, shared by every path below: chunk i's own fade
+	// starts part-way through GROW_S by radial order — the world grows outward
+	// from the centre behind the jittered frontier baked into the chunk split.
+	const growStep = t => {
+		const clock = t * GROW_S
+		const span = Math.max(0.001, GROW_S - RAMP_S) // last chunk still finishes inside GROW_S
 		chunks.forEach((mesh, i) => {
 			const ramp = RAMP_FIRST_S + (RAMP_S - RAMP_FIRST_S) * Math.min(1, i / (chunks.length / 4))
-			const local = (now - Math.pow(i / (chunks.length - 1), STAGGER_POW) * span) / ramp
+			const local = (clock - Math.pow(i / (chunks.length - 1), STAGGER_POW) * span) / ramp
 			const o = local >= 1 ? 1 : local <= 0 ? 0 : local * local * (3 - 2 * local)
 			if (o !== mesh.opacity) mesh.opacity = o
 		})
-	})
+	}
 
-	// No white flash — full white on a white page reads as the blocks blinking
-	// out and back. The matte blocks fade out evenly over the forming gaussians.
+	if (reduceMotion) {
+		if (blocks) disposeObject(blocks)
+		for (const mesh of chunks) { mesh.opacity = 1; tilt.add(mesh) }
+		showCopy(band, "tail")
+		return
+	}
+	if (!blocks) {
+		// No block-out to dissolve — still enter with the radial materialize.
+		for (const mesh of chunks) tilt.add(mesh)
+		await animate(GROW_S * 1000, growStep)
+		for (const mesh of chunks) mesh.opacity = 1
+		showCopy(band, "tail")
+		return
+	}
+
+	// Seat the chunks invisibly and let Spark's sort settle behind the opaque
+	// blocks. No cold-start probe here (the hero and showcase splats already
+	// warmed WASM/workers/shaders during page load) — a fixed beat suffices.
+	for (const mesh of chunks) tilt.add(mesh)
+	await new Promise(resolve => window.setTimeout(resolve, WARM_MS))
+
+	// The payoff: the materialize clock starts as the blocks begin dissolving,
+	// so the world forms through the ghost geometry — no empty stage.
+	const materialize = animate(GROW_S * 1000, growStep)
 	const mats = []
 	for (const block of blocks.children) {
 		mats.push(block.material)
@@ -192,6 +233,7 @@ async function main(band) {
 		// without a recompile the "fade" renders as a hard snap at dispose
 		mat.needsUpdate = true
 	}
+	// The matte blocks fade out evenly over the forming gaussians.
 	await animate(FADE_MS, t => {
 		const o = 1 - t * t * (3 - 2 * t)
 		for (const mat of mats) mat.opacity = o
@@ -199,6 +241,7 @@ async function main(band) {
 	disposeObject(blocks)
 	await materialize
 	for (const mesh of chunks) mesh.opacity = 1
+	showCopy(band, "tail") // the gaussian is fully there — close the sentence
 
 	// The block-out is baked in the splat's display frame (see the generator),
 	// so the boxes drop straight into the tilt group with the editor's look.
@@ -216,9 +259,10 @@ async function main(band) {
 		return group
 	}
 
-	// The PLY ships pre-normalized into the block-out's exact unit frame; each
-	// chunk seats invisibly so the whole set is sort-warm before its fade.
-	async function loadChunks() {
+	// The PLY ships pre-normalized into the block-out's exact unit frame, so
+	// seating needs no measuring — just the stored-file Y-flip. Split into
+	// radial chunks up front; every chunk is its own mesh at opacity 0.
+	async function loadSplat() {
 		const response = await fetch(SPLAT)
 		if (!response.ok) throw new Error(`reveal splat fetch failed (${response.status})`)
 		const bytes = new Uint8Array(await response.arrayBuffer())
@@ -227,25 +271,9 @@ async function main(band) {
 			await mesh.initialized
 			mesh.rotation.x = Math.PI // stored splat files are Y-inverted vs the world
 			mesh.opacity = 0
-			tilt.add(mesh)
 			return mesh
 		}))
 	}
-}
-
-// rAF-driven tween, independent of the render loop so an off-screen band still
-// finishes its sequence (invisibly) instead of stalling mid-swap.
-function animate(ms, step) {
-	return new Promise(resolve => {
-		const start = performance.now()
-		const frame = () => {
-			const t = Math.min(1, (performance.now() - start) / ms)
-			step(t)
-			if (t < 1) requestAnimationFrame(frame)
-			else resolve()
-		}
-		requestAnimationFrame(frame)
-	})
 }
 
 // Split a binary-little-endian PLY into k sub-PLYs ordered for the reveal:
@@ -292,4 +320,19 @@ function chunkPly(bytes, k) {
 		chunks.push(out)
 	}
 	return chunks
+}
+
+// rAF-driven tween, independent of the render loop so an off-screen band still
+// finishes its sequence (invisibly) instead of stalling mid-swap.
+function animate(ms, step) {
+	return new Promise(resolve => {
+		const start = performance.now()
+		const frame = () => {
+			const t = Math.min(1, (performance.now() - start) / ms)
+			step(t)
+			if (t < 1) requestAnimationFrame(frame)
+			else resolve()
+		}
+		requestAnimationFrame(frame)
+	})
 }
