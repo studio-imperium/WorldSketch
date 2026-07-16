@@ -1,4 +1,5 @@
 import * as THREE from "three"
+import { bakeGroundField } from "/scripts/ground-field.js"
 
 // Third-person character controller for play mode (the Play tab). The body auto-spawns
 // on the generated world and walks around: WASD moves relative to the camera, Space
@@ -30,11 +31,9 @@ const OPACITY_MIN = 0.35
 const CELL_MIN_PTS = 3
 const GAP_BINS = 2
 
-// Walk-surface estimation (buildGroundMap) and the floor-snap step guard.
-const GROUND_K = 0.8 // rendered skin extends ~0.8σ above a gaussian's center
-const GROUND_TAU = 0.85 // top-down opacity accumulation that counts as "surface"
-const GROUND_MIN_TOTAL = 0.3 // cells thinner than this are holes → bilinear/ring/flat fallbacks
-const STEP = 0.45 // max upward floor snap per grounded frame — taller rises need a jump
+// Terrain step limit: ground rising more than this above the feet blocks horizontal
+// movement (a slope that steep is a wall); anything lower is walked straight up.
+const STEP = 0.45
 
 // buildBody makes a blocky mini-figure (boxes only, DB32 colours, accent shirt) with
 // hip/shoulder pivot groups so update() can swing the limbs while walking. Its origin
@@ -87,11 +86,10 @@ function buildBody() {
 	return group
 }
 
-// groundHeightAt(x, z) is the host's flat ground Y — the fallback wherever the floor
-// splat piece has no content (the walk height is otherwise sampled from that piece).
-// clampToGround(pos, radius) keeps the feet inside the union of ground tiles —
-// multi-plot worlds are not a single rect.
-export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
+// groundHeightAt(x, z) is the host's flat sheet Y — the bake's last resort when the
+// scene has no ground pieces at all. clampToGround(pos, radius) keeps the feet inside
+// the walkable ink bounds; getBounds() returns that rect (the baked field covers it).
+export function createPlayer({ camera, world, groundHeightAt, clampToGround, getBounds }) {
 	const body = buildBody()
 	body.visible = false
 	world.group.add(body)
@@ -105,7 +103,7 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 	let camDist = CAM_DIST
 	let onGround = false
 	let colliders = [] // Box3[] world-space voxel columns from the generated splats
-	let groundMap = null // "ix,iz" -> walkable Y sampled from the floor splat piece
+	let field = null // the baked ground heightfield — total over the play rect, no holes
 	let walkPhase = 0 // stride cycle, advances with ground speed
 	let walkSwing = 0 // limb swing amplitude, eases in/out so stopping doesn't freeze mid-stride
 	let mixer = null // AnimationMixer once the rigged avatar is in; null = placeholder rig
@@ -196,122 +194,9 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		return splatColliders()
 	}
 
-	// buildGroundMap samples the ground splat pieces into a per-cell walkable height, so
-	// the feet stand on the rendered surface rather than the block-out sheet (which can
-	// sit far below the fitted scene) or mid-slab (quantiles of centers put feet waist-
-	// deep in thick dirt). The estimator marches a top-down ray per cell: the surface is
-	// the gaussian top at which accumulated opacity reaches GROUND_TAU. Lone wisps above
-	// the floor can't reach TAU alone, so the ray falls through them into the dense skin.
-	function buildGroundMap() {
-		const cells = new Map()
-		const v = new THREE.Vector3()
-		for (const { mesh } of world.generated) {
-			const kind = mesh.userData.genKind
-			// "remainder" is the ground bucket when no ground ink was drawn — walkable too.
-			// Unsegmented "scene" monoliths (collapse-guard fallback) stay unwalkable.
-			if ((kind !== "floor" && kind !== "remainder") || !mesh.packedSplats) continue
-			mesh.updateWorldMatrix(true, false)
-			mesh.packedSplats.forEachSplat((_i, center, scales, quaternion, opacity) => {
-				// Lower bar than the colliders: smooth dirt is a few large sparse gaussians,
-				// and an empty cell here reads as "no floor" — a hole to fall through.
-				if (opacity < 0.15) return
-				v.copy(center).applyMatrix4(mesh.matrixWorld)
-				if (!Number.isFinite(v.x + v.y + v.z)) return
-				// World-vertical sigma: scales are LOCAL-axis sigmas (can be negative) —
-				// project through the splat rotation; hypot absorbs the signs.
-				const { x: qx, y: qy, z: qz, w: qw } = quaternion
-				const sv = Math.hypot(
-					2 * (qx * qy + qz * qw) * scales.x,
-					(1 - 2 * (qx * qx + qz * qz)) * scales.y,
-					2 * (qy * qz - qx * qw) * scales.z,
-				)
-				if (!Number.isFinite(sv)) return
-				const key = `${Math.floor(v.x / CELL)},${Math.floor(v.z / CELL)}`
-				let samples = cells.get(key)
-				if (!samples) cells.set(key, (samples = []))
-				samples.push({ top: v.y + GROUND_K * sv, w: opacity })
-			})
-		}
-		if (!cells.size) return null
-		const raw = new Map() // key -> { y, solid: reached GROUND_TAU }
-		for (const [key, samples] of cells) {
-			let total = 0
-			for (const s of samples) total += s.w
-			if (total < GROUND_MIN_TOTAL) continue // lone wisps don't make a floor
-			samples.sort((a, b) => b.top - a.top) // march the ray from the sky down
-			let acc = 0
-			let y = samples[0].top // translucent cell → stand on its topmost skin, never under it
-			for (const s of samples) {
-				acc += s.w
-				if (acc >= GROUND_TAU) {
-					y = s.top
-					break
-				}
-			}
-			raw.set(key, { y, solid: acc >= GROUND_TAU })
-		}
-		// Trust pass: translucent cells are kept only where no solid surface exists
-		// nearby — stray interior gaussians otherwise read as pockets of floor deep
-		// inside the terrain, and the fallbacks would rather fill from solid neighbors.
-		const map = new Map()
-		for (const [key, cell] of raw) {
-			if (!cell.solid) {
-				const [ix, iz] = key.split(",").map(Number)
-				let nearSolid = false
-				for (let dz = -5; dz <= 5 && !nearSolid; dz++) {
-					for (let dx = -5; dx <= 5; dx++) {
-						if (raw.get(`${ix + dx},${iz + dz}`)?.solid) {
-							nearSolid = true
-							break
-						}
-					}
-				}
-				if (nearSolid) continue
-			}
-			map.set(key, cell.y)
-		}
-		return map.size ? map : null
-	}
-
-	// groundAt is the walk surface: the floor splat's sampled height where it has
-	// content, the host's flat ground elsewhere (and everywhere when nothing was
-	// generated with a floor). The four surrounding cells blend bilinearly — raw
-	// per-cell heights step, which popped the feet above/into the floor while walking.
-	function groundAt(x, z) {
-		if (!groundMap) return groundHeightAt(x, z)
-		const gx = x / CELL - 0.5
-		const gz = z / CELL - 0.5
-		const x0 = Math.floor(gx)
-		const z0 = Math.floor(gz)
-		const fx = gx - x0
-		const fz = gz - z0
-		let sum = 0
-		let wsum = 0
-		for (const [ix, iz, w] of [[x0, z0, (1 - fx) * (1 - fz)], [x0 + 1, z0, fx * (1 - fz)], [x0, z0 + 1, (1 - fx) * fz], [x0 + 1, z0 + 1, fx * fz]]) {
-			if (!w) continue
-			const y = groundMap.get(`${ix},${iz}`)
-			if (y === undefined) continue
-			sum += y * w
-			wsum += w
-		}
-		if (wsum > 0) return sum / wsum
-		// Hole in the floor sampling (big sparse gaussians leave empty cells): take the
-		// nearest mapped cell within a few rings before conceding to the flat sheet.
-		for (let r = 1; r <= 6; r++) {
-			for (let dz = -r; dz <= r; dz++) {
-				for (let dx = -r; dx <= r; dx++) {
-					if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
-					const y = groundMap.get(`${x0 + dx},${z0 + dz}`)
-					if (y !== undefined) return y
-				}
-			}
-		}
-		return groundHeightAt(x, z)
-	}
-
-	// openGroundCell spirals out from a cell looking for real standing room: a cell with
-	// a sampled floor height AND body clearance from the collider columns (not inside a
-	// deck, wall, or trunk; canopies overhead don't count). Returns feet placement.
+	// openGroundCell spirals out from a cell looking for real standing room: a cell
+	// with observed ground data (not fill-guesses) and body clearance from the collider
+	// columns (not inside a deck, wall, or trunk; canopies overhead don't count).
 	function openGroundCell(cx, cz, maxR = 24) {
 		const probe = new THREE.Vector3()
 		for (let r = 0; r <= maxR; r++) {
@@ -320,24 +205,30 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 					if (Math.max(Math.abs(dx), Math.abs(dz)) !== r) continue
 					const ix = cx + dx
 					const iz = cz + dz
-					const y = groundMap.get(`${ix},${iz}`)
-					if (y === undefined) continue
+					if (!field.hasDataAt(ix, iz)) continue
 					const x = (ix + 0.5) * CELL
 					const z = (iz + 0.5) * CELL
+					const y = field.heightAt(x, z)
+					// Prefer open, level footing: reject crests/lips (steep immediate
+					// neighbors read as teetering) and basins (anything much higher within
+					// a couple of body-widths means a pit, a junk pocket, or a cliff base).
+					let uneven = false
+					for (let nz = -4; nz <= 4 && !uneven; nz++) {
+						for (let nx = -4; nx <= 4; nx++) {
+							const ny = field.heightAt(x + nx * CELL, z + nz * CELL)
+							const near = Math.max(Math.abs(nx), Math.abs(nz)) <= 1
+							if ((near && Math.abs(ny - y) > STEP) || ny - y > 2) {
+								uneven = true
+								break
+							}
+						}
+					}
+					if (uneven) continue
 					// Only cells inside the walkable ink bounds — otherwise the clamp
 					// later drags xz back with a stale, wrong y.
 					probe.set(x, y, z)
 					clampToGround(probe, RADIUS)
 					if (Math.abs(probe.x - x) > 1e-6 || Math.abs(probe.z - z) > 1e-6) continue
-					// Reject depressions: a cell most of whose neighbors sit a body-height
-					// above it is a slab-underside sample showing through a top-skin hole.
-					// Standing beside a single cliff face is fine (few higher neighbors).
-					let higher = 0
-					for (const [nx, nz] of [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]]) {
-						const ny = groundMap.get(`${ix + nx},${iz + nz}`)
-						if (ny !== undefined && ny - y > HEIGHT) higher++
-					}
-					if (higher >= 5) continue
 					let blocked = false
 					for (const box of colliders) {
 						if (x < box.min.x || x > box.max.x || z < box.min.z || z > box.max.z) continue
@@ -353,27 +244,26 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		return null
 	}
 
-	// spawn drops the body at a ground point and starts play. The requested point is a
-	// hint: the actual spawn is the nearest open floor cell (sampled ground + body
-	// clearance), because the plot center is often inside a deck, building, or hole in
-	// the floor sampling. Fallback: the ground sample, lifted onto any collider column
-	// covering the point (decks/patios live in object pieces, not the floor piece).
+	// spawn bakes the ground field and colliders, then drops the body at the nearest
+	// open floor cell to the requested point (the plot center is often inside a deck
+	// or building). Fallback: field height at the hint, lifted onto any collider
+	// column covering it.
 	function spawn(point) {
 		pos.set(point.x, 0, point.z)
 		clampToGround(pos, RADIUS)
-		groundMap = buildGroundMap()
+		field = bakeGroundField({ pieces: world.generated, cell: CELL, bounds: getBounds(), flatY: groundHeightAt(pos.x, pos.z) })
 		colliders = buildColliders()
-		const open = groundMap ? openGroundCell(Math.floor(pos.x / CELL), Math.floor(pos.z / CELL)) : null
+		const open = openGroundCell(Math.floor(pos.x / CELL), Math.floor(pos.z / CELL))
 		if (open) {
 			pos.set(open.x, open.y, open.z)
 			clampToGround(pos, RADIUS)
 		} else {
-			pos.y = groundAt(pos.x, pos.z)
+			pos.y = field.heightAt(pos.x, pos.z)
 			for (const box of colliders) {
 				if (pos.x >= box.min.x && pos.x <= box.max.x && pos.z >= box.min.z && pos.z <= box.max.z && box.max.y > pos.y) pos.y = box.max.y
 			}
 		}
-		console.log(`[play] spawn feet (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}) — groundMap ${groundMap ? groundMap.size + " cells" : "none"}, ${open ? "open cell" : "fallback placement"}`)
+		console.log(`[play] spawn feet (${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}) — ${open ? "open cell" : "fallback placement"}`)
 		vel.set(0, 0, 0)
 		camYaw = 0
 		camPolar = 1.05
@@ -420,7 +310,6 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		if (!body.visible) return
 		dt = Math.min(dt, 0.05) // clamp so a stutter can't tunnel through walls
 		updateBasis()
-		const wasGrounded = onGround
 
 		// Jump uses last frame's grounded state.
 		if (keys.has("Space") && onGround) {
@@ -434,19 +323,17 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		pos.y += vel.y * dt
 		onGround = false
 
-		// Land on the ground surface (curved: hills fold into the sampled floor).
-		const floorY = groundAt(pos.x, pos.z)
+		// Land on the baked ground — always exactly on it. Being under the surface is
+		// impossible by construction: horizontal moves below refuse to enter cells more
+		// than STEP above the feet, so the snap here can never exceed a step.
+		const floorY = field.heightAt(pos.x, pos.z)
 		if (pos.y <= floorY) {
-			// Step guard: wall tops can bleed into the ground map next to walls (remainder
-			// pieces, ring/bilinear fallbacks). Ground never rises a wall-height in one
-			// grounded frame — hold, and let the wall collider keep blocking. Airborne
-			// (jump/fall) snaps are unrestricted so ledges stay jumpable.
-			pos.y = wasGrounded && floorY - prevFeet > STEP ? prevFeet : floorY
+			pos.y = floorY
 			vel.y = 0
 			onGround = true
 		}
 
-		// Land on top of a primitive: only when descending through its top face this frame.
+		// Land on top of a collider column: only when descending through its top face.
 		if (vel.y <= 0) {
 			for (const box of colliders) {
 				if (pos.x < box.min.x || pos.x > box.max.x || pos.z < box.min.z || pos.z > box.max.z) continue
@@ -458,7 +345,11 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 			}
 		}
 
-		// Horizontal move from input, relative to the camera basis.
+		// Horizontal move from input, relative to the camera basis. Terrain acts as a
+		// wall: a destination whose ground is more than STEP above the feet is refused,
+		// per axis, so the player slides along steep rises instead of entering them
+		// (grounded or airborne — a jump clears a ledge only when the feet actually rise
+		// above it).
 		const speed = WALK * (keys.has("ShiftLeft") || keys.has("ShiftRight") ? SPRINT : 1)
 		let mx = 0, mz = 0
 		if (keys.has("KeyW")) { mx += forward.x; mz += forward.z }
@@ -467,8 +358,17 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		if (keys.has("KeyA")) { mx -= right.x; mz -= right.z }
 		const len = Math.hypot(mx, mz)
 		if (len > 1e-4) {
-			pos.x += (mx / len) * speed * dt
-			pos.z += (mz / len) * speed * dt
+			const stepX = (mx / len) * speed * dt
+			const stepZ = (mz / len) * speed * dt
+			const limit = pos.y + STEP
+			if (field.heightAt(pos.x + stepX, pos.z + stepZ) <= limit) {
+				pos.x += stepX
+				pos.z += stepZ
+			} else if (field.heightAt(pos.x + stepX, pos.z) <= limit) {
+				pos.x += stepX
+			} else if (field.heightAt(pos.x, pos.z + stepZ) <= limit) {
+				pos.z += stepZ
+			}
 			facing = Math.atan2(mx, mz) // face the move direction
 		}
 
@@ -543,8 +443,8 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 	}
 
 	// Dev diagnostic (console): window.__wsPlayDebug(x, z) dumps the ground-piece
-	// gaussian column, nearby ground-map cells, and the feet position — floor-height
-	// bugs recur, and this answers "what does the sampler actually see there".
+	// gaussian column, the baked field heights nearby (with data/fill flags), and the
+	// feet position — this answers "what does physics actually stand on there".
 	window.__wsPlayDebug = (x, z) => {
 		const v = new THREE.Vector3()
 		const out = []
@@ -561,13 +461,14 @@ export function createPlayer({ camera, world, groundHeightAt, clampToGround }) {
 		const cells = {}
 		for (let dz = -2; dz <= 2; dz++) {
 			for (let dx = -2; dx <= 2; dx++) {
-				const k = `${Math.floor(x / CELL) + dx},${Math.floor(z / CELL) + dz}`
-				const y = groundMap?.get(k)
-				if (y !== undefined) cells[k] = Number(y.toFixed(2))
+				const ix = Math.floor(x / CELL) + dx
+				const iz = Math.floor(z / CELL) + dz
+				if (!field) continue
+				cells[`${ix},${iz}`] = `${field.heightAt((ix + 0.5) * CELL, (iz + 0.5) * CELL).toFixed(2)}${field.hasDataAt(ix, iz) ? "" : " (fill)"}`
 			}
 		}
-		return { column: out.slice(0, 25), total: out.length, cells, feet: pos.toArray().map(n => Number(n.toFixed(2))) }
+		return { column: out.slice(0, 25), total: out.length, cells, ground: field ? Number(field.heightAt(x, z).toFixed(2)) : null, feet: pos.toArray().map(n => Number(n.toFixed(2))) }
 	}
 
-	return { body, spawn, hide, update, addLook, zoom, attach, detach, colliderBoxes: () => colliders }
+	return { body, spawn, hide, update, addLook, zoom, attach, detach, colliderBoxes: () => colliders, groundField: () => field }
 }
