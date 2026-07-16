@@ -1,16 +1,16 @@
-// Hero cursor-follower: the mascot splat in the hero's right column turns to
-// face wherever the cursor is on the page, like a robot tracking your gaze.
-// Own WebGL context + SparkRenderer + scene — Spark accumulators are scene-
-// scoped, so this can't ghost into the showcase splat below (and vice versa).
-// Standalone on purpose, same as landing.js: the marketing page shares nothing
-// with the editor.
+// Hero cursor-follower: the mech splat in the hero's right column floats on
+// the page — transparent canvas, no box — and turns to face wherever the
+// cursor is, like a robot tracking your gaze. Own WebGL context +
+// SparkRenderer + scene — Spark accumulators are scene-scoped, so this can't
+// ghost into the showcase splat below (and vice versa). Standalone on
+// purpose, same as landing.js: the marketing page shares nothing with the
+// editor.
 
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 
 const ASSET = "/assets/hero-splat.ply"
-const PAPER = 0xfbfbfa // must match --paper in site.css so the splat floats on the page
-const BASE_YAW = 0 // trim if the splat's "front" isn't toward +Z after seating
+const BASE_YAW = Math.PI * 1.5 // raw front points along -X; a 90° left turn faces the camera
 const MAX_YAW = 0.85 // rad each way toward the cursor
 const MAX_PITCH = 0.32
 const FOLLOW = 5.5 // 1/s — exponential chase toward the cursor
@@ -22,8 +22,10 @@ if (host) main().catch(error => {
 })
 
 async function main() {
-	const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" })
-	renderer.setClearColor(PAPER, 1)
+	// alpha canvas: only the splat's own gaussians paint, so it floats on the
+	// page with no visible rectangle no matter what the page background is.
+	const renderer = new THREE.WebGLRenderer({ antialias: false, alpha: true, powerPreference: "high-performance" })
+	renderer.setClearColor(0x000000, 0)
 	renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2))
 	host.appendChild(renderer.domElement)
 	const scene = new THREE.Scene()
@@ -43,24 +45,23 @@ async function main() {
 
 	const response = await fetch(ASSET)
 	if (!response.ok) throw new Error(`hero splat fetch failed (${response.status})`)
-	const mesh = new SplatMesh({ fileBytes: new Uint8Array(await response.arrayBuffer()), fileName: "hero-splat.ply" })
-	await mesh.initialized
-	mesh.rotation.x = Math.PI // stored splat files are Y-inverted vs the world
-	mesh.updateMatrixWorld(true)
+	const bytes = new Uint8Array(await response.arrayBuffer())
+	// Data-only load; never added to the scene. Everything below works in the
+	// file's RAW frame — the display mesh gets the Y-flip at the end.
+	const source = new SplatMesh({ fileBytes: bytes, fileName: "hero-splat.ply" })
+	await source.initialized
 
-	// Frame on percentile bounds, not min/max: generated splats almost always
-	// carry a few far-flung floater gaussians, and a raw bounding box would
-	// zoom the camera out until the subject is a speck.
-	const count = mesh.packedSplats?.numSplats ?? 0
+	// Percentile bounds, not min/max: generated splats carry floater gaussians
+	// and a baked background haze; a raw bounding box zooms the subject into a
+	// speck, and the haze is what painted the canvas as a visible rectangle.
+	const count = source.packedSplats?.numSplats ?? 0
 	const xs = new Float32Array(count)
 	const ys = new Float32Array(count)
 	const zs = new Float32Array(count)
-	const point = new THREE.Vector3()
 	let n = 0
-	mesh.packedSplats?.forEachSplat((_i, center) => {
+	source.packedSplats?.forEachSplat((_i, center) => {
 		if (![center.x, center.y, center.z].every(Number.isFinite)) return
-		point.copy(center).applyMatrix4(mesh.matrixWorld)
-		xs[n] = point.x; ys[n] = point.y; zs[n] = point.z
+		xs[n] = center.x; ys[n] = center.y; zs[n] = center.z
 		n++
 	})
 	if (!n) throw new Error("hero splat has no finite points")
@@ -68,20 +69,47 @@ async function main() {
 	for (const axis of [xs, ys, zs]) axis.subarray(0, n).sort()
 	const lo = new THREE.Vector3(pct(xs, 0.005), pct(ys, 0.005), pct(zs, 0.005))
 	const hi = new THREE.Vector3(pct(xs, 0.995), pct(ys, 0.995), pct(zs, 0.995))
+	const size = hi.clone().sub(lo)
+
+	// Rebuild with only the subject's gaussians: keep a 20%-margin box around
+	// the percentile bounds, drop the far haze/floaters entirely. Also drop
+	// giant fog blobs: this file carries ~10 gaussians up to 5 units across at
+	// ~1% opacity — a soft gray veil over the whole canvas (the "top shadow").
+	// Real surface splats top out near 2% of the subject size, so 5% is safe.
+	const margin = size.clone().multiplyScalar(0.2)
+	const keepLo = lo.clone().sub(margin)
+	const keepHi = hi.clone().add(margin)
+	const scaleCull = 0.05 * Math.max(size.x, size.y, size.z)
+	const mesh = new SplatMesh({
+		constructSplats: splats => {
+			source.packedSplats.forEachSplat((_i, center, scales, quaternion, opacity, color) => {
+				if (![center.x, center.y, center.z].every(Number.isFinite)) return
+				if (center.x < keepLo.x || center.x > keepHi.x) return
+				if (center.y < keepLo.y || center.y > keepHi.y) return
+				if (center.z < keepLo.z || center.z > keepHi.z) return
+				if (Math.max(scales.x, scales.y, scales.z) > scaleCull) return
+				splats.pushSplat(center, scales, quaternion, opacity, color)
+			})
+		},
+	})
+	await mesh.initialized
+	source.dispose?.()
+	mesh.rotation.x = Math.PI // stored splat files are Y-inverted vs the world
+
 	// Seat the splat centred on the origin at unit-ish size, then rotate the
 	// pivot (not the mesh) so the gaze turns about the object's own middle.
-	const size = hi.clone().sub(lo)
+	// The X-flip maps raw (x, y, z) → (x, -y, -z), so flip the centre with it.
 	const center = lo.clone().add(hi).multiplyScalar(0.5)
-	const s = 2 / Math.max(size.x, size.y, size.z, 0.001)
+	const s = 0.8 * 2 / Math.max(size.x, size.y, size.z, 0.001) // 80% of the full seat height
 	const inner = new THREE.Group()
 	inner.add(mesh)
 	inner.scale.setScalar(s)
-	inner.position.set(-center.x * s, -center.y * s, -center.z * s)
+	inner.position.set(-center.x * s, center.y * s, center.z * s)
 	const pivot = new THREE.Group()
 	pivot.add(inner)
 	pivot.rotation.y = BASE_YAW
 	scene.add(pivot)
-	camera.position.set(0, 0.12, 3.05) // fov 38° at 3.05 fits the full 2-unit seat height
+	camera.position.set(0, 0.1, 3.3) // fov 38° at 3.3 fits the 2-unit seat + bob headroom
 	camera.lookAt(0, 0, 0)
 
 	// Track the cursor anywhere on the page: the offset from the splat's own
@@ -115,7 +143,7 @@ async function main() {
 			pitch += (wantPitch - pitch) * k
 			pivot.rotation.y = BASE_YAW + yaw
 			pivot.rotation.x = pitch
-			pivot.position.y = Math.sin(now / 1700) * 0.035 // the float in "floating there"
+			pivot.position.y = Math.sin(now / 600) * 0.06 // hover: a visible ~3.8s bob
 		}
 		renderer.render(scene, camera)
 	}

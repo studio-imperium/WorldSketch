@@ -1,23 +1,22 @@
-// Landing-page hero stage: the japanese-courtyard block-out sketch crossfades
-// into its generated splat every 5 seconds — the product story in one loop.
-// Two stacked canvases share one orbit; the sketch layer CSS-fades over the
-// splat layer. Standalone on purpose — shares only primitives.js with the
-// editor so the marketing page can't drift the app.
+// Landing-page showcase stage: the japanese-courtyard block-out sketch and its
+// generated splat share one orbit on two stacked canvases. The card sits sticky
+// inside the tall #showcase-scroll band and scroll progress scrubs the sketch
+// layer's opacity — the further you scroll, the more the block-out dissolves
+// into the real splat. Standalone on purpose — shares only primitives.js with
+// the editor so the marketing page can't drift the app.
 
 import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 import { createPrimitive } from "/scripts/primitives.js"
-import { initReveal } from "/scripts/reveal.js"
-
-const REVEAL_SAMPLE = 3500 // points handed to the scroll-reveal ASCII cloud
+// reveal.js is versioned too — the server caches .js for 1h and a stale reveal.js
+// (old feed-me API) paired with a fresh landing.js leaves the band stuck empty.
+import { initReveal } from "/scripts/reveal.js?v=worldsplat-14"
 
 const ASSET = "/assets/japanese-courtyard"
-const PANEL = 0xf5f4f1 // must match --panel in site.css so the world floats on the card
-const CYCLE_MS = 5000
+const PANEL = 0xffffff // must match the showcase card's white so there is no inner window
 
 const stage = document.getElementById("stage")
 const hint = document.getElementById("stage-hint")
-const tabs = [...document.querySelectorAll(".tab[data-phase]")]
 
 // TEMP calibration harness — ?calib=1&yaw=0&k=1&dx=0&dz=0&theta=0.785&phi=1.12
 // freezes the orbit and overlays the sketch at half opacity over the splat.
@@ -35,6 +34,8 @@ booted.catch(error => {
 if (calib) await booted
 
 async function main() {
+	// Kick the heavy splat download off first so it streams while the sketch builds.
+	const splatFetch = fetch(`${ASSET}.ply`)
 	const splatLayer = makeLayer()
 	// Spark draws every SplatMesh through ANY SparkRenderer sharing its globals, so
 	// only the splat layer gets one — a second would ghost the splat into the sketch.
@@ -53,9 +54,9 @@ async function main() {
 	// can be registered onto the splat's frame (content is already centered on origin).
 	const seat = new THREE.Group()
 	seat.add(blockout)
-	seat.rotation.y = qn("yaw", 0)
-	seat.scale.setScalar(qn("k", 1))
-	seat.position.set(qn("dx", 0), 0, qn("dz", 0))
+	seat.rotation.y = qn("yaw", Math.PI / 2) // +90° turns the sketch to the left, onto the splat's heading
+	seat.scale.setScalar(qn("k", 1.04)) // 1.3 (matches the splat) × 0.8 world shrink
+	seat.position.set(qn("dx", 0), qn("dy", 0.12), qn("dz", 0)) // lift, also × 0.8 to stay registered
 	sketchLayer.scene.add(seat)
 
 	const view = frameFor(blockoutBox)
@@ -64,14 +65,8 @@ async function main() {
 		view.phi = qn("phi", view.phi)
 		view.radius *= qn("r", 1)
 	}
-	let phase = "sketch"
-	const setPhase = name => {
-		phase = name
-		sketchLayer.canvas.classList.toggle("show", name === "sketch")
-		for (const tab of tabs) tab.classList.toggle("active", tab.dataset.phase === name)
-	}
 	hint.remove()
-	setPhase("sketch")
+	sketchLayer.canvas.style.opacity = "1" // visible immediately; the scroll morph takes over below
 
 	// Drag to orbit; auto-rotate resumes after a beat of stillness.
 	const reduceMotion = calib || window.matchMedia("(prefers-reduced-motion: reduce)").matches
@@ -93,9 +88,58 @@ async function main() {
 	stage.addEventListener("pointerup", release)
 	stage.addEventListener("pointercancel", release)
 
-	// Mount the scroll-reveal band now (code field + grid) so it's alive before the
-	// 17MB splat arrives; feed it points once we've sampled them below.
-	const feedReveal = calib ? null : initReveal()
+	// Scroll is the slider: progress through the sticky band fades the sketch
+	// layer out over the splat, and the rail above the stage (--p) shows where
+	// you are. Until the splat is seated the sketch holds at full opacity so a
+	// fast scroller never stares at an empty panel.
+	const scroller = document.getElementById("showcase-scroll")
+	const morphRail = document.querySelector(".morph")
+	let splatReady = false
+	const morphProgress = () => {
+		const r = scroller.getBoundingClientRect()
+		const span = Math.max(1, r.height - (window.innerHeight || 1))
+		const raw = clamp(-r.top / span, 0, 1)
+		const t = clamp((raw - 0.12) / 0.76, 0, 1) // hold pure sketch / pure splat at the ends
+		return t * t * (3 - 2 * t)
+	}
+	const applyMorph = () => {
+		const p = morphProgress()
+		sketchLayer.canvas.style.opacity = String(splatReady ? 1 - p : 1)
+		morphRail.style.setProperty("--p", p.toFixed(4))
+	}
+	if (!calib) {
+		applyMorph()
+		window.addEventListener("scroll", applyMorph, { passive: true })
+		window.addEventListener("resize", applyMorph)
+
+		// The slider is draggable too: pointer x on the rail maps straight to a
+		// scroll position inside the band, so scroll stays the single source of
+		// truth and the two controls can never disagree. Move/up live on window
+		// (not the row) — the seek scrolls the page mid-drag, and capture on the
+		// row can drop the stream when the document shifts under the pointer.
+		const morphRow = document.getElementById("morph-row")
+		const seek = event => {
+			const rail = morphRail.getBoundingClientRect()
+			const f = clamp((event.clientX - rail.left) / Math.max(1, rail.width), 0, 1)
+			const r = scroller.getBoundingClientRect()
+			const span = Math.max(1, r.height - (window.innerHeight || 1))
+			window.scrollTo(0, window.scrollY + r.top + f * span)
+		}
+		let seeking = false
+		morphRow.addEventListener("pointerdown", event => {
+			seeking = true
+			event.preventDefault()
+			seek(event)
+		})
+		window.addEventListener("pointermove", event => { if (seeking) seek(event) })
+		const endSeek = () => { seeking = false }
+		window.addEventListener("pointerup", endSeek)
+		window.addEventListener("pointercancel", endSeek)
+	}
+
+	// Mount the scroll-reveal band now — it fetches its own pre-sampled points
+	// (assets/reveal-points.json), so it resolves without waiting on any splat.
+	if (!calib) initReveal()
 
 	const drawFrame = () => {
 		for (const layer of [splatLayer, sketchLayer]) {
@@ -124,8 +168,9 @@ async function main() {
 		if (e.isIntersecting) lastTime = performance.now()
 	}, { threshold: 0 }).observe(stage)
 
-	// Stream in the splat, seat it in the same normalized frame, then start the loop.
-	const response = await fetch(`${ASSET}.ply`)
+	// The splat has been streaming since the top of main(); seat it in the same
+	// normalized frame, then start the loop.
+	const response = await splatFetch
 	if (!response.ok) throw new Error(`splat fetch failed (${response.status})`)
 	const bytes = new Uint8Array(await response.arrayBuffer())
 	const mesh = new SplatMesh({ fileBytes: bytes, fileName: "japanese-courtyard.ply" })
@@ -135,27 +180,21 @@ async function main() {
 
 	const rawBox = new THREE.Box3()
 	const point = new THREE.Vector3()
-	// Reservoir-sample a fixed slice of the splat's points for the scroll-reveal cloud
-	// (unbiased, O(1) memory) while we already visit every splat for the bounds.
-	const sample = new Float32Array(REVEAL_SAMPLE * 3)
-	let seen = 0
 	mesh.packedSplats?.forEachSplat((_i, center) => {
 		if (![center.x, center.y, center.z].every(Number.isFinite)) return
-		point.copy(center).applyMatrix4(mesh.matrixWorld)
-		rawBox.expandByPoint(point)
-		const slot = seen < REVEAL_SAMPLE ? seen : Math.floor(Math.random() * (seen + 1))
-		if (slot < REVEAL_SAMPLE) { sample[slot * 3] = point.x; sample[slot * 3 + 1] = point.y; sample[slot * 3 + 2] = point.z }
-		seen++
+		rawBox.expandByPoint(point.copy(center).applyMatrix4(mesh.matrixWorld))
 	})
 	const { group: splat } = normalize({ group: new THREE.Group().add(mesh), box: rawBox })
-	splatLayer.scene.add(splat)
+	// Same 0.8 world shrink as the sketch seat — scaled about the origin, so it
+	// stays centered and resting on y=0.
+	const splatSeat = new THREE.Group()
+	splatSeat.add(splat)
+	splatSeat.scale.setScalar(0.8)
+	splatLayer.scene.add(splatSeat)
 	splatLayer.canvas.classList.add("base")
 
-	feedReveal?.(sample.subarray(0, Math.min(REVEAL_SAMPLE, seen) * 3), seen)
-
 	if (calib) {
-		// Overlay mode: both layers visible at once, camera frozen, no cycling.
-		sketchLayer.canvas.style.transition = "none"
+		// Overlay mode: both layers visible at once, camera frozen, no scroll morph.
 		sketchLayer.canvas.style.opacity = String(qn("op", 0.55))
 		stage.scrollIntoView({ block: "center" })
 		await new Promise(resolve => setTimeout(resolve, 800)) // let the sort worker settle
@@ -164,14 +203,10 @@ async function main() {
 		return
 	}
 
-	let timer = setInterval(() => setPhase(phase === "sketch" ? "splat" : "sketch"), CYCLE_MS)
-	for (const tab of tabs) {
-		tab.addEventListener("click", () => {
-			setPhase(tab.dataset.phase)
-			clearInterval(timer)
-			timer = setInterval(() => setPhase(phase === "sketch" ? "splat" : "sketch"), CYCLE_MS)
-		})
-	}
+	// The splat is seated — hand the sketch layer's opacity over to the scroll
+	// position, wherever the user has already scrolled to.
+	splatReady = true
+	applyMorph()
 
 	function makeLayer() {
 		const renderer = new THREE.WebGLRenderer({ antialias: false, powerPreference: "high-performance" })
@@ -279,12 +314,14 @@ function normalize({ group, box }) {
 	return { group: wrapper, box: normBox }
 }
 
+function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v }
+
 function frameFor(box) {
 	const sphere = box.getBoundingSphere(new THREE.Sphere())
 	return {
 		target: sphere.center.clone(),
 		radius: Math.max(0.5, sphere.radius * 1.9),
-		theta: Math.PI * 0.25,
+		theta: Math.PI * -0.25, // was 0.25; -90° turns the plot to the left
 		phi: 1.12, // polar angle from +Y — a gentle look down onto the plot
 	}
 }
