@@ -67,7 +67,12 @@ if (band && gl) {
 			vec2 uv = frag / uRes;
 			float corner = smoothstep(0.42, 0.8, length(uv))
 				* smoothstep(0.42, 0.8, length(vec2(1.0) - uv));
-			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * corner); // premultiplied
+			// …and never hard against the band's edges: dissolve over the last
+			// 140px top and bottom so the pattern meets the surrounding paper softly.
+			float edge = min(
+				smoothstep(0.0, 140.0, frag.y),
+				smoothstep(0.0, 140.0, uRes.y - frag.y));
+			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * corner * edge); // premultiplied
 		}`
 
 	const VERT = "attribute vec2 aPos; void main() { gl_Position = vec4(aPos, 0.0, 1.0); }"
