@@ -12,7 +12,7 @@ const PIXEL = 8 // CSS px per pattern cell (the retro chunkiness — do not DPR-
 const ZOOM = 16
 const SPEED = 13 // offset units per frame, /128 — matches the 2D version's tempo
 const SEED = 5.6 // 6 wave directions spread over 2π/5.6 steps (the .6 skews them)
-const COLOR = "#f5f5f5"
+const COLOR = "#f0f0f0"
 const SCROLL_FADE_PX = () => window.innerHeight * 0.5 // fully gone after this much scroll
 
 const canvas = document.createElement("canvas")
