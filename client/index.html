@@ -17,6 +17,7 @@
 	<link rel="preload" href="/assets/reveal-points.bin?v=2" as="fetch" crossorigin>
 	<link rel="preload" href="/assets/reveal-splat.ply" as="fetch" crossorigin>
 	<link rel="preload" href="/assets/japanese-courtyard-blockout.json" as="fetch" crossorigin>
+	<link rel="preload" href="/assets/hero-blockout.json" as="fetch" crossorigin>
 	<link rel="preload" href="/assets/hero-splat.ply" as="fetch" crossorigin>
 	<link rel="preload" href="/assets/japanese-courtyard.ply" as="fetch" crossorigin>
 	<script>
@@ -42,7 +43,7 @@
 			grid-template-columns: 1.15fr 0.85fr;
 			gap: 48px;
 			align-items: center;
-			padding: 52px 0 36px;
+			padding: 16px 0 36px;
 		}
 		.hero h1 {
 			font-family: "Newsreader", Georgia, "Times New Roman", serif;
@@ -94,6 +95,7 @@
 			position: relative;
 			height: clamp(570px, 51vw, 810px); /* 1.5× — the mech scales with its canvas */
 			overflow: hidden;
+			transform: translateY(-6%); /* sit the mech a touch higher in the hero */
 		}
 		.hero-stage canvas {
 			position: absolute;
@@ -104,32 +106,29 @@
 			pointer-events: none; /* ambient — it watches the cursor, never captures it */
 		}
 
-		/* ---- showcase: floating card on the left, copy on the right ---- */
+		/* ---- showcase: world on the left, copy on the right ---- */
 		/* Scroll-driven morph: the tall band supplies the scroll distance while the
-		   row stays sticky inside it; scroll progress (or dragging the slider)
-		   scrubs the sketch layer's opacity so the block-out dissolves into the
-		   real splat. The world sits on a rounded white card with a soft shadow;
-		   the canvas clears to the same white so there is no inner window. */
+		   row stays sticky inside it; scroll progress scrubs the sketch layer's
+		   opacity so the block-out dissolves into the real splat. The stage sits
+		   directly on the page — the canvas clears to the same paper colour so
+		   there is no inner window. */
 		.showcase-scroll { height: 300vh; margin-bottom: 28px; }
 		.showcase {
 			position: sticky;
-			top: max(10px, calc(14vh - 28px)); /* centers the ~(72vh + 56px) block */
-			display: grid;
-			grid-template-columns: 1.05fr 0.95fr;
-			gap: clamp(28px, 4vw, 64px);
-			align-items: center;
+			top: 0;
+			height: 100vh;
 		}
-		.showcase-box {
-			border-radius: 26px;
-			padding: 0 16px 16px;
-			background: var(--white);
-			box-shadow:
-				0 1px 2px rgba(20, 20, 15, 0.04),
-				0 10px 24px rgba(20, 20, 15, 0.05),
-				0 28px 64px rgba(20, 20, 15, 0.08);
-			overflow: hidden;
+		/* The copy floats ABOVE the full-bleed canvas, pinned to the content column's
+		   right edge; pointer events fall through to the draggable world below. */
+		.showcase-copy {
+			position: absolute;
+			right: 0;
+			top: 50%;
+			transform: translateY(-50%);
+			z-index: 1;
+			text-align: right;
+			pointer-events: none;
 		}
-		.showcase-copy { justify-self: end; text-align: right; } /* pinned to the row's right edge */
 		.showcase-copy h2 u {
 			text-decoration-thickness: 0.045em;
 			text-underline-offset: 0.09em;
@@ -143,62 +142,18 @@
 			text-wrap: balance;
 			max-width: 14ch;
 		}
-		/* the slider at top center — scroll progress, sketch → splat; draggable */
-		.morph-row {
-			display: flex;
-			justify-content: center;
-			padding: 14px 2px 18px;
-			cursor: pointer;
-			touch-action: none; /* drag seeks; it must not pan the page */
-		}
-		/* liquid-glass: frosted groove, translucent white fill, glass knob */
-		.morph {
-			position: relative;
-			width: min(380px, 60%);
-			height: 10px;
-			border-radius: 9999px;
-			background: rgba(13, 13, 12, 0.07);
-			box-shadow:
-				inset 0 1px 2px rgba(20, 20, 15, 0.09),
-				inset 0 0 0 0.5px rgba(20, 20, 15, 0.04);
-		}
-		.morph-fill {
-			position: absolute;
-			inset: 0;
-			width: calc(var(--p, 0) * 100%);
-			border-radius: inherit;
-			background: rgba(255, 255, 255, 0.85);
-			-webkit-backdrop-filter: blur(6px) saturate(1.4);
-			backdrop-filter: blur(6px) saturate(1.4);
-			box-shadow:
-				inset 0 0 0 0.5px rgba(255, 255, 255, 0.9),
-				0 1px 3px rgba(20, 20, 15, 0.08);
-		}
-		.morph-knob {
-			position: absolute;
-			top: 50%;
-			left: calc(var(--p, 0) * 100%);
-			width: 26px;
-			height: 26px;
-			border-radius: 50%;
-			background: rgba(255, 255, 255, 0.72);
-			-webkit-backdrop-filter: blur(10px) saturate(1.5);
-			backdrop-filter: blur(10px) saturate(1.5);
-			box-shadow:
-				inset 0 1px 1px rgba(255, 255, 255, 0.95),
-				inset 0 -1px 1px rgba(20, 20, 15, 0.06),
-				0 0 0 0.5px rgba(20, 20, 15, 0.08),
-				0 1px 2px rgba(20, 20, 15, 0.16),
-				0 6px 16px rgba(20, 20, 15, 0.16);
-			transform: translate(-50%, -50%);
-			transition: transform 0.15s ease;
-		}
-		.morph-row:active .morph-knob { transform: translate(-50%, -50%) scale(1.12); } /* swells on grab */
+		/* Full-bleed stage: the canvas spans the whole viewport, so a big world runs
+		   off the actual screen edge instead of being sliced at a mid-page rectangle.
+		   landing.js shifts the render window so the world sits around the left
+		   third, leaving the right side to the copy. */
 		.stage {
-			position: relative;
-			height: min(72vh, 760px);
-			min-height: 460px;
-			background: var(--white);
+			position: absolute;
+			top: 0;
+			left: 50%;
+			transform: translateX(-50%);
+			width: 100vw;
+			height: 100%;
+			background: var(--paper);
 			overflow: hidden;
 			touch-action: none;
 		}
@@ -210,7 +165,7 @@
 			display: block;
 			cursor: grab;
 			opacity: 0;
-			background: var(--white); /* hard-opaque backing so layers can't bleed through */
+			background: var(--paper); /* hard-opaque backing so layers can't bleed through */
 		}
 		/* Bottom (splat) layer: revealed instantly — it only ever shows through the
 		   top layer's fade, so transitioning it just invites compositor glitches. */
@@ -352,9 +307,8 @@
 			.hero { grid-template-columns: 1fr; gap: 28px; padding: 32px 0 28px; }
 			.hero-stage { height: 69vw; min-height: 390px; }
 			.showcase-scroll { height: 220vh; }
-			.showcase { top: max(10px, calc(21vh - 39px)); grid-template-columns: 1fr; gap: 22px; }
+			.showcase-copy { top: auto; bottom: 8vh; transform: none; }
 			.showcase-copy h2 { font-size: clamp(30px, 7vw, 44px); }
-			.stage { height: 48vh; min-height: 320px; }
 			.reveal { min-height: 78vh; }
 			.reveal-lead { padding-left: 20px; padding-right: 20px; }
 		}
@@ -363,7 +317,7 @@
 <body>
 	<header class="nav">
 		<a class="wordmark" href="/" aria-label="worldsplat home">
-			<svg width="21" height="21" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+			<svg width="26" height="26" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
 				<ellipse cx="9" cy="10" rx="6" ry="5.2" transform="rotate(-18 9 10)"/>
 				<ellipse cx="17" cy="8.5" rx="3.4" ry="2.9" transform="rotate(24 17 8.5)"/>
 				<ellipse cx="15.5" cy="16.5" rx="4.4" ry="3.6" transform="rotate(-8 15.5 16.5)"/>
@@ -371,16 +325,13 @@
 			</svg>
 			worldsplat
 		</a>
-		<div class="nav-cta">
-			<a class="pill pill-black" href="/login" data-hf-login>Log in</a>
-		</div>
 	</header>
 
 	<main>
 		<section class="hero">
 			<div>
-				<h1>Build a world,<br>bring it to life.</h1>
-				<p class="hero-copy">Powering daydreamers.<br>Turning your 3D primitives into splats.</p>
+				<h1>Build anything,<br>bring it to life.</h1>
+				<p class="hero-copy">Powering daydreamers.<br>Turn your 3D creations into detailed splats.</p>
 				<div class="hero-cta">
 					<a class="pill pill-black pill-hf" href="/login" data-hf-login>
 						<span class="hf-badge" aria-hidden="true">&#129303;</span>
@@ -394,16 +345,11 @@
 
 		<div class="showcase-scroll" id="showcase-scroll">
 			<section class="showcase" aria-label="Live world preview">
-				<div class="showcase-box">
-					<div class="morph-row" id="morph-row">
-						<div class="morph"><div class="morph-fill"></div><div class="morph-knob"></div></div>
-					</div>
-					<div class="stage" id="stage">
-						<div class="stage-hint" id="stage-hint">loading world&hellip;</div>
-					</div>
+				<div class="stage" id="stage">
+					<div class="stage-hint" id="stage-hint">loading world&hellip;</div>
 				</div>
 				<div class="showcase-copy">
-					<h2>We transform <u>your creativity</u> into fantasy art.</h2>
+					<h2>You lay the blueprints, we make it <u>real</u></h2>
 				</div>
 			</section>
 		</div>
@@ -441,8 +387,8 @@
 			})
 		}
 	</script>
-	<script type="module" src="/assets/bg.js?v=webgl-1"></script>
+	<script type="module" src="/assets/bg.js?v=webgl-2"></script>
 	<script type="module" src="/scripts/landing.js?v=worldsplat-14"></script>
-	<script type="module" src="/scripts/hero-splat.js?v=5"></script>
+	<script type="module" src="/scripts/hero-splat.js?v=6"></script>
 </body>
 </html>

@@ -13,7 +13,7 @@ import { createPrimitive } from "/scripts/primitives.js"
 import { initReveal } from "/scripts/reveal.js?v=worldsplat-14"
 
 const ASSET = "/assets/japanese-courtyard"
-const PANEL = 0xffffff // must match the showcase card's white so there is no inner window
+const PANEL = 0xfbfbfa // must match the page's paper colour so there is no inner window
 
 const stage = document.getElementById("stage")
 const hint = document.getElementById("stage-hint")
@@ -60,6 +60,7 @@ async function main() {
 	sketchLayer.scene.add(seat)
 
 	const view = frameFor(blockoutBox)
+	view.radius *= 1.1 // pull the camera back ~10% so the world sits a bit smaller in frame
 	if (calib) {
 		view.theta = qn("theta", view.theta)
 		view.phi = qn("phi", view.phi)
@@ -88,12 +89,10 @@ async function main() {
 	stage.addEventListener("pointerup", release)
 	stage.addEventListener("pointercancel", release)
 
-	// Scroll is the slider: progress through the sticky band fades the sketch
-	// layer out over the splat, and the rail above the stage (--p) shows where
-	// you are. Until the splat is seated the sketch holds at full opacity so a
-	// fast scroller never stares at an empty panel.
+	// Scroll drives the morph: progress through the sticky band fades the sketch
+	// layer out over the splat. Until the splat is seated the sketch holds at
+	// full opacity so a fast scroller never stares at an empty panel.
 	const scroller = document.getElementById("showcase-scroll")
-	const morphRail = document.querySelector(".morph")
 	let splatReady = false
 	const morphProgress = () => {
 		const r = scroller.getBoundingClientRect()
@@ -105,36 +104,11 @@ async function main() {
 	const applyMorph = () => {
 		const p = morphProgress()
 		sketchLayer.canvas.style.opacity = String(splatReady ? 1 - p : 1)
-		morphRail.style.setProperty("--p", p.toFixed(4))
 	}
 	if (!calib) {
 		applyMorph()
 		window.addEventListener("scroll", applyMorph, { passive: true })
 		window.addEventListener("resize", applyMorph)
-
-		// The slider is draggable too: pointer x on the rail maps straight to a
-		// scroll position inside the band, so scroll stays the single source of
-		// truth and the two controls can never disagree. Move/up live on window
-		// (not the row) — the seek scrolls the page mid-drag, and capture on the
-		// row can drop the stream when the document shifts under the pointer.
-		const morphRow = document.getElementById("morph-row")
-		const seek = event => {
-			const rail = morphRail.getBoundingClientRect()
-			const f = clamp((event.clientX - rail.left) / Math.max(1, rail.width), 0, 1)
-			const r = scroller.getBoundingClientRect()
-			const span = Math.max(1, r.height - (window.innerHeight || 1))
-			window.scrollTo(0, window.scrollY + r.top + f * span)
-		}
-		let seeking = false
-		morphRow.addEventListener("pointerdown", event => {
-			seeking = true
-			event.preventDefault()
-			seek(event)
-		})
-		window.addEventListener("pointermove", event => { if (seeking) seek(event) })
-		const endSeek = () => { seeking = false }
-		window.addEventListener("pointerup", endSeek)
-		window.addEventListener("pointercancel", endSeek)
 	}
 
 	// Mount the scroll-reveal band now — it fetches its own pre-sampled points

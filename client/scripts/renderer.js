@@ -3077,6 +3077,20 @@ function syncTabGates() {
 	gate("build", frames.build.length, false)
 	gate("view", frames.view.length, splatting)
 	gate("play", frames.view.length, splatting) // Play walks the generated splats, so it unlocks with View
+	// With only Build available the bar is pure chrome — show it once a second tab
+	// has content (or is being generated, so the View spinner stays visible). On
+	// reveal it fades in FROM white (see .tabs-enter in styles.css) instead of popping.
+	const tabBar = document.querySelector(".view-tabs")
+	if (tabBar) {
+		const collapse = frames.view.length === 0 && !splatting
+		if (collapse) {
+			tabBar.classList.add("hidden")
+			tabBar.classList.remove("tabs-enter")
+		} else if (tabBar.classList.contains("hidden")) {
+			tabBar.classList.remove("hidden")
+			tabBar.classList.add("tabs-enter")
+		}
+	}
 }
 const syncViewGate = syncTabGates // existing call sites
 
@@ -5952,7 +5966,7 @@ async function generateWorld(prompt) {
 			theta: FRONT_THETA + Math.round((orbit.theta - FRONT_THETA) / QUARTER) * QUARTER,
 			phi: FRONT_PHI,
 		}
-		const capture = await captureWorld(renderer, scene, world, box, objectGroups, viewAngles)
+		const capture = await captureWorldQuiet(renderer, scene, world, box, objectGroups, viewAngles)
 		logGenerationDebugImage("capture", "Block-out capture sent to the image model", capture.guide)
 		logGenerationDebugImage("structure", useInferenceCredits
 			? "Aligned structural map (not sent on the inference-credit route)"
@@ -6427,7 +6441,7 @@ async function applyStoredBuild({ primitives, sceneMetadata, splatBytes }) {
 			phi: Number.isFinite(sceneMetadata.capturePhi) ? sceneMetadata.capturePhi : FRONT_PHI,
 		}
 		let guide = null
-		try { guide = (await captureWorld(renderer, scene, world, box, null, captureAngles)).guide }
+		try { guide = (await captureWorldQuiet(renderer, scene, world, box, null, captureAngles)).guide }
 		catch (error) { console.warn("capture restored yaw guide:", error) }
 		const estimate = await estimateSceneYaw(splatBytes, sourcePrimitives, guide, captureAngles)
 		yawDeg = estimate?.yawDeg ?? (Number.isFinite(sceneMetadata.yawDeg) ? sceneMetadata.yawDeg : sceneFit.yawDeg)
@@ -6539,7 +6553,7 @@ function applyOverlayVisibility() {
 // texture edit and then to TripoSplat.
 async function screenshotScene() {
 	try {
-		const cap = await captureWorld(renderer, scene, world, wholeSceneBox())
+		const cap = await captureWorldQuiet(renderer, scene, world, wholeSceneBox())
 		downloadBlob(cap.guide, `scene-${Date.now()}.png`)
 	} catch (err) {
 		setStatus("Scene screenshot failed: " + (err.message || err))
@@ -6908,6 +6922,22 @@ window.addEventListener("resize", () => {
 	renderer.setSize(window.innerWidth, window.innerHeight)
 })
 
+// The capture pipeline swaps LIVE scene materials (flat ID / semantic colours, edge
+// lines, black clear) and awaits image encoding mid-swap; a single main-loop frame in
+// that window paints the whole viewport in those colours — an ugly inverted flash on
+// every generate. Hold the visible render while any capture is in flight: the last
+// real frame simply persists on screen for the few hundred milliseconds it takes.
+let worldCaptureDepth = 0
+
+async function captureWorldQuiet(...args) {
+	worldCaptureDepth++
+	try {
+		return await captureWorld(...args)
+	} finally {
+		worldCaptureDepth--
+	}
+}
+
 let lastAnimateTime = performance.now()
 
 function animate(now = performance.now()) {
@@ -6920,7 +6950,7 @@ function animate(now = performance.now()) {
 	sky.position.copy(camera.position)
 	updateTransformGizmo()
 	syncViewTransformOverlay()
-	renderer.render(scene, camera)
+	if (!worldCaptureDepth) renderer.render(scene, camera) // captures swap live materials — don't show them
 	requestAnimationFrame(animate)
 }
 

@@ -43,7 +43,7 @@ button { font: inherit; color: inherit; background: none; border: 0; cursor: poi
 .wordmark {
 	display: inline-flex;
 	align-items: center;
-	gap: 7px;
+	gap: 8px;
 	font-size: 19px;
 	font-weight: 650;
 	letter-spacing: -0.03em;

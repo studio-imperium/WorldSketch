@@ -43,8 +43,13 @@ if (gl) {
 			}
 			float on = step(0.5, sum / ${SEED});
 
-			// 100% opacity at the viewport bottom, 0% at the top.
-			float fade = clamp(frag.y / uRes.y, 0.0, 1.0);
+			// 100% opacity at the viewport bottom, 0% above a cutoff line that stays
+			// LOW on the left (clear of the hero copy and CTA), runs flat to
+			// mid-screen, then curves up to the right edge's full height.
+			float x = gl_FragCoord.x / uRes.x;
+			float cut = 0.8 * (1.0 - smoothstep(0.45, 0.85, x));
+			float t = frag.y / uRes.y;
+			float fade = clamp((t - cut) / max(0.0001, 1.0 - cut), 0.0, 1.0);
 			gl_FragColor = vec4(${hexToGlsl(COLOR)}, 1.0) * (on * fade); // premultiplied
 		}`
 

@@ -129,6 +129,33 @@ body.is-generating #canvas canvas {
 	color: var(--ink);
 }
 
+/* Reveal: the bar arrives as a plain white pill and its ink fades in — labels and
+   the active pill start white-on-white, then resolve to their real colours. */
+.view-tabs.tabs-enter {
+	animation: view-tabs-in 0.4s ease both;
+}
+
+.view-tabs.tabs-enter .view-tab {
+	animation: view-tab-ink-in 0.9s ease both;
+}
+
+.view-tabs.tabs-enter .view-tab.active {
+	animation: view-tab-active-in 0.9s ease both;
+}
+
+@keyframes view-tabs-in {
+	from { opacity: 0; transform: translateX(-50%) translateY(-6px); }
+	to { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+
+@keyframes view-tab-ink-in {
+	from { color: #fff; }
+}
+
+@keyframes view-tab-active-in {
+	from { background: #fff; color: #fff; }
+}
+
 .view-tab.active {
 	background: var(--ink); /* THE project accent — the landing page's black pill, also in renderer.js */
 	color: var(--white);
