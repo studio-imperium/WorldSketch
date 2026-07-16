@@ -8,8 +8,8 @@ import {
 } from "/scripts/huggingface-auth.js"
 import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=flat-ground-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
-import { imageEditRequest, spaceSupportsGeometry } from "/scripts/huggingface-image.js?v=kontext-1"
-import { inferenceCreditImageRequest } from "/scripts/huggingface-provider.js"
+import { imageEditRequest, spaceSupportsGeometry } from "/scripts/huggingface-image.js?v=style-ref-1"
+import { falQueueImageEdit, inferenceCreditImageRequest } from "/scripts/huggingface-provider.js?v=style-ref-1"
 import { resolveAuthenticatedSpaceFileURL, resolveDirectGradioFileURL } from "/scripts/huggingface-url.js?v=direct-tripo-1"
 
 const DEFAULT_CONFIG = {
@@ -20,6 +20,7 @@ const DEFAULT_CONFIG = {
 	tripoDirectUrl: "",
 	inferenceProvider: "fal-ai",
 	inferenceModel: "Qwen/Qwen-Image-Edit-2509",
+	imageCredits: true, // image detail always runs on inference credits (WS_HF_IMAGE_CREDITS=0 reverts)
 	image: { steps: 20, guidance: 4, width: 1024, height: 1024 },
 	tripo: { steps: 30, guidance: 3, gaussians: 131072, format: "splat" },
 }
@@ -51,6 +52,14 @@ export { getHuggingFaceAuth }
 
 export function cancelHuggingFaceGeneration() {
 	activeJob?.cancel?.()
+}
+
+// Whether the image-detail step runs on inference credits. True by default —
+// the ZeroGPU image routes kept dying in the GPU queue while credits deliver
+// reliably (~1-2¢/image) — and also true when the caller opts in explicitly.
+// The splat step is unaffected: TripoSplat stays on ZeroGPU.
+export function imageStepUsesCredits(userToggle = false) {
+	return userToggle || (config.imageCredits !== false && String(config.imageCredits) !== "0")
 }
 
 function fileReference(value) {
@@ -225,25 +234,47 @@ function randomSeed() {
 	return crypto.getRandomValues(new Uint32Array(1))[0] & 0x7fffffff
 }
 
-// Image-detail stage only: block-out render (+ optional aligned geometry map) →
-// detailed image blob. `prompt` is the FULL prompt text, not the scene description.
-// A fixed `seed` makes runs reproducible for A/B comparisons.
-export async function detailImageOnHuggingFace({ prompt, image, geometryImage = null, seed = randomSeed(), useInferenceCredits = false, signal, onProgress }) {
+// Image-detail stage only: block-out render (+ optional aligned geometry map,
+// + optional style reference whose art style the output should copy) →
+// detailed image blob. `prompt` is the FULL prompt text, not the scene
+// description. A fixed `seed` makes runs reproducible for A/B comparisons.
+export async function detailImageOnHuggingFace({ prompt, image, geometryImage = null, styleImage = null, seed = randomSeed(), useInferenceCredits = false, signal, onProgress }) {
 	if (!getHuggingFaceAuth().signedIn) throw new Error("Sign in with Hugging Face before generating")
+	// Credits-by-default: every image caller (app generation AND the A/B lab)
+	// rides the reliable paid route unless WS_HF_IMAGE_CREDITS=0 opts out.
+	useInferenceCredits = imageStepUsesCredits(useInferenceCredits)
 	try {
 		if (useInferenceCredits) {
 			onProgress?.(0, "Using inference credits for image detail")
-			const inference = new InferenceClient(getHuggingFaceAccessToken())
+			// Extra images (geometry map, style reference) can't ride through the
+			// official client — it only carries one image — so multi-image edits
+			// go straight to fal's queue on the HF router (fal-ai only).
+			const extras = [geometryImage, styleImage].filter(Boolean)
 			let editedImage
 			try {
-				editedImage = await inference.imageToImage(inferenceCreditImageRequest({
-					image,
-					prompt,
-					seed,
-					settings: config.image,
-					provider: config.inferenceProvider,
-					model: config.inferenceModel,
-				}), { signal, retry_on_error: false })
+				if (extras.length && config.inferenceProvider === "fal-ai") {
+					editedImage = await falQueueImageEdit({
+						images: [image, ...extras],
+						prompt,
+						seed,
+						settings: config.image,
+						accessToken: getHuggingFaceAccessToken(),
+						signal,
+						onProgress: stage => onProgress?.(0.5, stage === "generating"
+							? "Image detail — generating (inference credits)"
+							: "Image detail — queued (inference credits)"),
+					})
+				} else {
+					const inference = new InferenceClient(getHuggingFaceAccessToken())
+					editedImage = await inference.imageToImage(inferenceCreditImageRequest({
+						image,
+						prompt,
+						seed,
+						settings: config.image,
+						provider: config.inferenceProvider,
+						model: config.inferenceModel,
+					}), { signal, retry_on_error: false })
+				}
 			} catch (error) {
 				throw friendlyHuggingFaceError(error, { useInferenceCredits: true })
 			}
@@ -255,6 +286,7 @@ export async function detailImageOnHuggingFace({ prompt, image, geometryImage = 
 		const { endpoint, payload } = imageEditRequest({
 			file: handle_file(image),
 			geometryFile: geometryImage ? handle_file(geometryImage) : null,
+			styleFile: styleImage ? handle_file(styleImage) : null,
 			prompt,
 			seed,
 			settings: config.image,
@@ -317,7 +349,7 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 	// Multi-image Spaces take the aligned geometry map alongside the block-out;
 	// single-image routes (Kontext, the paid inference API) can't, so the prompt
 	// only mentions the geometry map on paths that actually send it.
-	const useGeometryReference = !useInferenceCredits && Boolean(geometryImage) && spaceSupportsGeometry(config.imageSpace)
+	const useGeometryReference = !imageStepUsesCredits(useInferenceCredits) && Boolean(geometryImage) && spaceSupportsGeometry(config.imageSpace)
 	const editedImage = await detailImageOnHuggingFace({
 		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference }),
 		image,

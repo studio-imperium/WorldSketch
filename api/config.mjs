@@ -35,6 +35,10 @@ export function runtimeConfig() {
 			// endpoint is a fixed consistency-preserving preset that ignores both.
 			inferenceProvider: env("WS_HF_INFERENCE_PROVIDER", "fal-ai"),
 			inferenceModel: env("WS_HF_INFERENCE_MODEL", "Qwen/Qwen-Image-Edit-2509"),
+			// Image detail ALWAYS runs on inference credits by default — ZeroGPU
+			// queues kept starving the image step while credits deliver reliably.
+			// Set WS_HF_IMAGE_CREDITS=0 to fall back to the imageSpace route.
+			imageCredits: env("WS_HF_IMAGE_CREDITS", "1") !== "0",
 			image: {
 				steps: envInt("WS_HF_IMAGE_STEPS", 20, 1, 100),
 				guidance: envFloat("WS_HF_IMAGE_GUIDANCE", 4),

@@ -3,9 +3,10 @@
 
 // FLUX.2 Spaces. The klein Space adds a mode_choice picker (distilled vs base)
 // that the full FLUX.2-dev Space does not have.
-export function fluxEditPayload({ file, geometryFile = null, prompt, seed, settings, space = "" }) {
+export function fluxEditPayload({ file, geometryFile = null, styleFile = null, prompt, seed, settings, space = "" }) {
 	const inputImages = [{ image: file, caption: null }]
 	if (geometryFile) inputImages.push({ image: geometryFile, caption: null })
+	if (styleFile) inputImages.push({ image: styleFile, caption: null })
 	const payload = {
 		prompt,
 		input_images: inputImages,
@@ -23,9 +24,10 @@ export function fluxEditPayload({ file, geometryFile = null, prompt, seed, setti
 
 // Qwen-Image-Edit-2509 Space. rewrite_prompt stays off so the exact WorldSketch
 // prompt reaches the model instead of a machine-expanded paraphrase.
-export function qwenEditPayload({ file, geometryFile = null, prompt, seed, settings }) {
+export function qwenEditPayload({ file, geometryFile = null, styleFile = null, prompt, seed, settings }) {
 	const images = [{ image: file, caption: null }]
 	if (geometryFile) images.push({ image: geometryFile, caption: null })
+	if (styleFile) images.push({ image: styleFile, caption: null })
 	return {
 		prompt,
 		images,
@@ -46,10 +48,12 @@ export function qwenEditPayload({ file, geometryFile = null, prompt, seed, setti
 // slots, so without a geometry map the block-out render fills slot 2 as well.
 // Lightning has its own tuned sampler numbers (8 steps, cfg 1) — the
 // WS_HF_IMAGE_STEPS / WS_HF_IMAGE_GUIDANCE knobs do not apply on this Space.
-export function akhaliqEditPayload({ file, geometryFile = null, prompt, seed }) {
+export function akhaliqEditPayload({ file, geometryFile = null, styleFile = null, prompt, seed }) {
 	return {
 		image1: file,
-		image2: geometryFile ?? file,
+		// exactly two slots: geometry map wins slot 2, else the style reference,
+		// else the block-out doubles up (the Space requires both slots filled)
+		image2: geometryFile ?? styleFile ?? file,
 		prompt,
 		seed,
 		true_cfg_scale: 1,

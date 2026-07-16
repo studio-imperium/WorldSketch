@@ -98,6 +98,10 @@ async function run() {
 	const image = el("input_image").files[0]
 	if (!image) return setStatus("Pick a block-out image first")
 	const geometryImage = el("geometry_image").files[0] ?? null
+	// Style reference: sent as an extra input image (fal multi-image queue on the
+	// credits route, extra gallery image on multi-image Spaces). The model only
+	// copies its art style if the prompt says so — the presets don't.
+	const styleImage = el("style_image").files[0] ?? null
 	const variants = [
 		{ variant: "A", prompt: el("prompt_a").value.trim() },
 		{ variant: "B", prompt: el("prompt_b").value.trim() },
@@ -125,6 +129,7 @@ async function run() {
 					prompt,
 					image,
 					geometryImage,
+					styleImage,
 					seed,
 					useInferenceCredits: viaCredits,
 					signal: controller.signal,

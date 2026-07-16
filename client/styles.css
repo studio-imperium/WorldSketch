@@ -497,10 +497,20 @@ body.tab-view canvas.is-splat-rotate {
 	padding: 1rem;
 	pointer-events: none;
 	box-sizing: border-box;
+	transition: opacity 0.35s ease;
 }
 
 .ui * {
 	pointer-events: all;
+}
+
+/* Generation cutscene (renderer.js playGenerationCutscene): the UI steps aside
+   while the block-out flashes into the fresh splats, then fades back in. */
+body.cutscene .ui {
+	opacity: 0;
+}
+body.cutscene .ui * {
+	pointer-events: none;
 }
 
 .panel {

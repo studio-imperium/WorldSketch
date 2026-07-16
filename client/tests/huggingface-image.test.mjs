@@ -96,6 +96,27 @@ test("only multi-image Spaces advertise geometry-map support", () => {
 	assert.equal(spaceSupportsGeometry("black-forest-labs/FLUX.2-dev"), true)
 })
 
+test("appends the style reference after the geometry map on multi-image Spaces", () => {
+	const file = { blob: "guide" }
+	const geometryFile = { blob: "geometry" }
+	const styleFile = { blob: "style" }
+	const payload = qwenEditPayload({
+		file,
+		geometryFile,
+		styleFile,
+		prompt: "Match the art style of the last input image",
+		seed: 7,
+		settings: { width: 1024, height: 1024, steps: 8, guidance: 1 },
+	})
+	assert.deepEqual(payload.images.map(entry => entry.image), [file, geometryFile, styleFile])
+	// akhaliq has exactly two slots: geometry wins, style takes slot 2 only when
+	// there is no geometry, and the block-out doubles up when neither exists.
+	const base = { file, prompt: "p", seed: 1, settings: { width: 512, height: 512, steps: 8, guidance: 1 }, space: "akhaliq/Qwen-Image-Edit-2509" }
+	assert.equal(imageEditRequest({ ...base, geometryFile, styleFile }).payload.image2, geometryFile)
+	assert.equal(imageEditRequest({ ...base, styleFile }).payload.image2, styleFile)
+	assert.equal(imageEditRequest({ ...base }).payload.image2, file)
+})
+
 test("adds the aligned geometry map as a second Flux edit image", () => {
 	const file = { blob: "guide" }
 	const geometryFile = { blob: "geometry" }

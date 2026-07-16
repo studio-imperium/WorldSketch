@@ -7,8 +7,9 @@ import {
 	configureHuggingFace,
 	generateSceneOnHuggingFace,
 	getHuggingFaceAuth,
+	imageStepUsesCredits,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=kontext-1"
+} from "/scripts/huggingface.js?v=style-ref-1"
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
 import { fitSplatToBox } from "/scripts/fit.js"
 import { computeObjects } from "/scripts/geometry.js"
@@ -3456,6 +3457,98 @@ async function revealPrimitivesBottomUp() {
 	if (uiTab === "build") for (const mesh of meshes) mesh.visible = true
 }
 
+// Generation cutscene: the moment the splat is ready the UI steps aside and the
+// editor replays the product promise in the View tab — the original block-out
+// constructs bottom-up, flashes white-hot, and vanishes as the freshly
+// generated splats take its place; then the UI fades back in (body.cutscene
+// drives the CSS fade on .ui). The block materials are the editor's REAL
+// materials, so everything touched here is restored in the finally block.
+const CUTSCENE_BUILD_MS = 700
+const CUTSCENE_FLASH_MS = 200
+const CUTSCENE_HOLD_MS = 200 // beat on the fresh splats before the UI returns
+
+function cutsceneTween(ms, step) {
+	return new Promise(resolve => {
+		const start = performance.now()
+		const frame = () => {
+			const t = Math.min(1, (performance.now() - start) / ms)
+			step(t)
+			if (t < 1) requestAnimationFrame(frame)
+			else resolve()
+		}
+		requestAnimationFrame(frame)
+	})
+}
+
+async function playGenerationCutscene() {
+	const blocks = world.allBlockoutMeshes()
+	if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !blocks.length || !world.generated.length) {
+		setUiTab("view")
+		frameGeneratedSplats()
+		return
+	}
+	document.body.classList.add("cutscene")
+	setUiTab("view")
+	frameGeneratedSplats()
+	// Everything below runs before the next frame paints, so the stage opens
+	// empty: splats held back, blocks staged invisible for the build-up.
+	for (const { mesh } of world.generated) mesh.visible = false
+	const meshes = [...blocks].sort(
+		(a, b) => (a.position.y - a.scale.y / 2) - (b.position.y - b.scale.y / 2),
+	)
+	for (const mesh of meshes) {
+		setColliderStyle(mesh, false)
+		mesh.visible = false
+	}
+	const saved = meshes.map(mesh => ({
+		emissive: mesh.material.emissive.getHex(),
+		intensity: mesh.material.emissiveIntensity,
+		edges: mesh.children
+			.filter(child => child.userData.isEdgeOutline)
+			.map(edge => ({ edge, base: edge.material.color.clone() })),
+	}))
+	try {
+		// Bottom-up build, elapsed-fraction paced so it always lands in
+		// CUTSCENE_BUILD_MS no matter how many blocks there are — no per-tick
+		// minimum, or a small build (a handful of blocks) sprints in ~100ms.
+		const start = performance.now()
+		let shown = 0
+		while (shown < meshes.length) {
+			const elapsed = performance.now() - start
+			const due = Math.min(meshes.length, Math.ceil((elapsed / CUTSCENE_BUILD_MS) * meshes.length))
+			while (shown < due) meshes[shown++].visible = true
+			await new Promise(resolve => window.setTimeout(resolve, 16))
+		}
+		// Every block ramps to white-hot…
+		for (let i = 0; i < meshes.length; i++) {
+			meshes[i].material.emissive.set(0xffffff)
+			meshes[i].material.emissiveIntensity = 0
+		}
+		await cutsceneTween(CUTSCENE_FLASH_MS, t => {
+			for (let i = 0; i < meshes.length; i++) {
+				meshes[i].material.emissiveIntensity = t
+				for (const { edge, base } of saved[i].edges) edge.material.color.copy(base).lerp(cutsceneWhite, t)
+			}
+		})
+		// …and vanishes — the splats appear exactly where the blocks stood.
+		for (const mesh of meshes) mesh.visible = false
+		for (const { mesh } of world.generated) {
+			mesh.visible = showSplatFloor || mesh.userData.genKind !== "floor"
+		}
+		await new Promise(resolve => window.setTimeout(resolve, CUTSCENE_HOLD_MS))
+	} finally {
+		for (let i = 0; i < meshes.length; i++) {
+			meshes[i].material.emissive.setHex(saved[i].emissive)
+			meshes[i].material.emissiveIntensity = saved[i].intensity
+			for (const { edge, base } of saved[i].edges) edge.material.color.copy(base)
+		}
+		applyUiTab() // re-assert canonical View visibility whatever happened
+		document.body.classList.remove("cutscene") // CSS fades the UI back in
+	}
+}
+const cutsceneWhite = new THREE.Color(0xffffff)
+window.__wsPlayCutscene = playGenerationCutscene // devtools: replay the reveal on the current scene
+
 function scheduleSegmentationRetune() {
 	if (!segmentationTuneAutoRetune) return
 	if (!sceneSplat) return
@@ -5983,7 +6076,7 @@ async function generateWorld(prompt) {
 		}
 		const capture = await captureWorldQuiet(renderer, scene, world, box, objectGroups, viewAngles)
 		logGenerationDebugImage("capture", "Block-out capture sent to the image model", capture.guide)
-		logGenerationDebugImage("structure", useInferenceCredits
+		logGenerationDebugImage("structure", imageStepUsesCredits(useInferenceCredits)
 			? "Aligned structural map (not sent on the inference-credit route)"
 			: "Aligned structural map sent to the image model", capture.semanticMap)
 		const captureMs = performance.now() - tCap
@@ -6053,8 +6146,7 @@ async function generateWorld(prompt) {
 		world.state = "generated"
 		splatting = false
 		applyOverlayVisibility()
-		setUiTab("view")
-		frameGeneratedSplats()
+		await playGenerationCutscene()
 		saveBuildToHistory(world.prompt)
 		window.posthog?.capture("generate_completed", { duration_s: Math.round((performance.now() - genStart) / 1000) })
 		showProgress(1, 1, "Done")
@@ -6856,8 +6948,8 @@ els.useInferenceCredits?.addEventListener("change", () => {
 	useInferenceCredits = els.useInferenceCredits.checked
 	try { localStorage.setItem("worldsketch.useInferenceCredits", String(useInferenceCredits)) } catch {}
 	setStatus(useInferenceCredits
-		? "Inference credits enabled for image detail. This usually costs about 1–2¢ per generation."
-		: "Image detail will use your ZeroGPU allowance.")
+		? "Inference credits on: TripoSplat also uses the direct server when one is configured."
+		: "Image detail still runs on inference credits (~1–2¢ each); TripoSplat uses your ZeroGPU allowance.")
 })
 
 els.settingsBtn?.addEventListener("click", event => {
