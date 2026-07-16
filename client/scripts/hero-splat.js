@@ -48,16 +48,30 @@ async function main() {
 	mesh.rotation.x = Math.PI // stored splat files are Y-inverted vs the world
 	mesh.updateMatrixWorld(true)
 
-	const box = new THREE.Box3()
+	// Frame on percentile bounds, not min/max: generated splats almost always
+	// carry a few far-flung floater gaussians, and a raw bounding box would
+	// zoom the camera out until the subject is a speck.
+	const count = mesh.packedSplats?.numSplats ?? 0
+	const xs = new Float32Array(count)
+	const ys = new Float32Array(count)
+	const zs = new Float32Array(count)
 	const point = new THREE.Vector3()
+	let n = 0
 	mesh.packedSplats?.forEachSplat((_i, center) => {
 		if (![center.x, center.y, center.z].every(Number.isFinite)) return
-		box.expandByPoint(point.copy(center).applyMatrix4(mesh.matrixWorld))
+		point.copy(center).applyMatrix4(mesh.matrixWorld)
+		xs[n] = point.x; ys[n] = point.y; zs[n] = point.z
+		n++
 	})
+	if (!n) throw new Error("hero splat has no finite points")
+	const pct = (sorted, p) => sorted[Math.min(n - 1, Math.floor(p * n))]
+	for (const axis of [xs, ys, zs]) axis.subarray(0, n).sort()
+	const lo = new THREE.Vector3(pct(xs, 0.005), pct(ys, 0.005), pct(zs, 0.005))
+	const hi = new THREE.Vector3(pct(xs, 0.995), pct(ys, 0.995), pct(zs, 0.995))
 	// Seat the splat centred on the origin at unit-ish size, then rotate the
 	// pivot (not the mesh) so the gaze turns about the object's own middle.
-	const size = box.getSize(new THREE.Vector3())
-	const center = box.getCenter(new THREE.Vector3())
+	const size = hi.clone().sub(lo)
+	const center = lo.clone().add(hi).multiplyScalar(0.5)
 	const s = 2 / Math.max(size.x, size.y, size.z, 0.001)
 	const inner = new THREE.Group()
 	inner.add(mesh)
@@ -67,7 +81,7 @@ async function main() {
 	pivot.add(inner)
 	pivot.rotation.y = BASE_YAW
 	scene.add(pivot)
-	camera.position.set(0, 0.14, 2.7)
+	camera.position.set(0, 0.12, 3.05) // fov 38° at 3.05 fits the full 2-unit seat height
 	camera.lookAt(0, 0, 0)
 
 	// Track the cursor anywhere on the page: the offset from the splat's own
@@ -101,6 +115,7 @@ async function main() {
 			pitch += (wantPitch - pitch) * k
 			pivot.rotation.y = BASE_YAW + yaw
 			pivot.rotation.x = pitch
+			pivot.position.y = Math.sin(now / 1700) * 0.035 // the float in "floating there"
 		}
 		renderer.render(scene, camera)
 	}
