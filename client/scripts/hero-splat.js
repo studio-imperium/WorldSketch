@@ -10,7 +10,7 @@ import * as THREE from "three"
 import { SparkRenderer, SplatMesh } from "spark"
 
 const ASSET = "/assets/hero-splat.ply"
-const BASE_YAW = Math.PI // the raw splat faces away from the camera
+const BASE_YAW = Math.PI / 2 // raw front points along +X; a 90° right turn faces the camera
 const MAX_YAW = 0.85 // rad each way toward the cursor
 const MAX_PITCH = 0.32
 const FOLLOW = 5.5 // 1/s — exponential chase toward the cursor
@@ -95,7 +95,7 @@ async function main() {
 	// pivot (not the mesh) so the gaze turns about the object's own middle.
 	// The X-flip maps raw (x, y, z) → (x, -y, -z), so flip the centre with it.
 	const center = lo.clone().add(hi).multiplyScalar(0.5)
-	const s = 2 / Math.max(size.x, size.y, size.z, 0.001)
+	const s = 0.8 * 2 / Math.max(size.x, size.y, size.z, 0.001) // 80% of the full seat height
 	const inner = new THREE.Group()
 	inner.add(mesh)
 	inner.scale.setScalar(s)
