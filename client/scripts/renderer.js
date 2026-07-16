@@ -54,7 +54,7 @@ const gizmoCameraDir = new THREE.Vector3()
 const gizmoPlaneNormal = new THREE.Vector3()
 const primitiveMovePlane = new THREE.Plane()
 const primitiveMovePoint = new THREE.Vector3()
-const backgroundColor = new THREE.Color(0xfcfcfc)
+const backgroundColor = new THREE.Color(0xf5f4f1) // landing page's --panel: the stage colour behind the splat
 
 const shapeTools = new Set(["box"])
 const selectionTools = new Set(["pointer", "move"]) // both select; move also shows the translate widget
@@ -65,8 +65,9 @@ const baseGroundColor = "#587553" // default terrain; painted regions layer on t
 const WORKSPACE_SCALE = 3
 const GROUND_SHEET_SIZE = 48 * WORKSPACE_SCALE // 144 world units: 3× the previous drawable/buildable sheet
 // THE project accent — the single colour every UI affordance uses (tabs, colliders,
-// transform controls, primary button). DB32 "bright blue"; also set in styles.css.
-const accent = 0x5b6ee1
+// transform controls, primary button). The landing page's ink black; also set in
+// styles.css as --ink.
+const accent = 0x0d0d0c
 
 const defaultFitSettings = {
 	yOffset: 0,
@@ -1955,7 +1956,7 @@ let viewTool = "orbit" // "orbit" | "lasso"
 const selectedSplatMeshes = new Set()
 
 const splatProxyMaterial = new THREE.MeshBasicMaterial({ transparent: true, opacity: 0, depthWrite: false, colorWrite: false })
-const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: 0x5b6ee1, transparent: true, opacity: 0.9 })
+const splatSelectionMaterial = new THREE.LineBasicMaterial({ color: accent, transparent: true, opacity: 0.9 })
 const splatDragPlane = new THREE.Plane()
 const splatRotQuat = new THREE.Quaternion()
 const splatDragPoint = new THREE.Vector3()
