@@ -348,11 +348,11 @@ body.tab-view canvas.is-splat-rotate {
 	width: 12.25rem;
 	border-radius: 1rem;
 	overflow: hidden;
-	/* Hidden by default — Escape toggles it (renderer.js). The guarded selector
-	   below keeps the Play-tab and flying hides winning over an open panel. */
+	/* Dev chrome: hidden unless the browser devtools are open (renderer.js
+	   toggles body.devtools-open); the Play-tab hide still wins. */
 	display: none;
 }
-body:not(.tab-play) .frames-panel.builds-open { display: flex; }
+body.devtools-open:not(.tab-play) .frames-panel { display: flex; }
 
 .frames-panel .card-body {
 	gap: 0.45rem;
@@ -1913,7 +1913,9 @@ input[type="color"] {
 	position: absolute;
 	right: 1rem;
 	bottom: 1rem;
-	display: flex;
+	/* Dev chrome: hidden unless the browser devtools are open (renderer.js
+	   toggles body.devtools-open); Play tab still wins and hides it. */
+	display: none;
 	align-items: center;
 	gap: 0.25rem;
 	padding: 0.3rem;
@@ -1922,6 +1924,7 @@ input[type="color"] {
 	border-radius: 0.85rem;
 	box-shadow: 0 0.45rem 1.4rem rgba(20, 20, 15, 0.16), 0 0.08rem 0.18rem rgba(20, 20, 15, 0.12);
 }
+body.devtools-open:not(.tab-play) .cam-bar { display: flex; }
 
 .cam-btn {
 	border: 0;

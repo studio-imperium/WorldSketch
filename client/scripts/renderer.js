@@ -7195,10 +7195,21 @@ document.addEventListener("keydown", event => {
 			setStatus("")
 		}
 		else if (uiTab === "view" && selectedSplatMeshes.size) deselectSplat()
-		// Nothing else wanted the key: toggle the (default-hidden) Builds panel.
-		else els.framesPanel?.classList.toggle("builds-open")
 	}
 })
+
+// Dev chrome (the camera bar and the Builds panel) appears only while the
+// browser devtools are open. Docked devtools shrink the page's inner size
+// against the window's outer size — the classic size-delta heuristic. An
+// UNDOCKED devtools window is invisible to this check; dock it to get the
+// dev chrome.
+const applyDevtoolsChrome = () => {
+	const open = window.outerWidth - window.innerWidth > 160 || window.outerHeight - window.innerHeight > 160
+	document.body.classList.toggle("devtools-open", open)
+}
+applyDevtoolsChrome()
+window.addEventListener("resize", applyDevtoolsChrome)
+window.setInterval(applyDevtoolsChrome, 1000)
 
 els.historyToggle?.addEventListener("click", () => toggleHistoryPanel())
 
