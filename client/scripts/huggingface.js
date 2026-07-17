@@ -6,7 +6,7 @@ import {
 	getHuggingFaceAuth,
 	signOutHuggingFaceAuth,
 } from "/scripts/huggingface-auth.js"
-import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=style-guide-1"
+import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=subject-aware-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
 import { imageEditRequest, spaceSupportsGeometry } from "/scripts/huggingface-image.js?v=style-ref-1"
 import { falQueueImageEdit, inferenceCreditImageRequest } from "/scripts/huggingface-provider.js?v=flux2-credits-1"

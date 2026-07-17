@@ -12,7 +12,7 @@ test("keeps the minimal prompt's invariants", () => {
 		"FLAT GROUND",
 		"平坦地面",
 		"Same camera, same composition, same proportions",
-		"every block becomes a full-sized real structure exactly in place",
+		"every block becomes the full-sized real thing it stands for", // subject-aware: robots must not become houses
 		"painted ground colors become the terrain features they mark",
 		"rough massing stand-ins, not final shapes", // deblockify: silhouettes must escape the box
 		"reads as a plain box",
@@ -28,7 +28,8 @@ test("mentions the style guide only when one actually rides along", () => {
 	assert.ok(!without.includes("STYLE guide"))
 	const withStyle = sceneGenerationPrompt("A fishing dock", { hasStyleReference: true })
 	assert.ok(withStyle.includes("The final input image is a STYLE guide"))
-	assert.ok(withStyle.includes("Take no objects, layout, or camera from it"))
+	assert.ok(withStyle.includes("copy ONLY its rendering style"))
+	assert.ok(withStyle.includes("Never take subject matter, objects, architecture"))
 	assert.ok(withStyle.trim().split(/\s+/).length < 210, "style-guide prompt should remain concise")
 })
 
