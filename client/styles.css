@@ -346,7 +346,11 @@ body.tab-view canvas.is-splat-rotate {
 	width: 12.25rem;
 	border-radius: 1rem;
 	overflow: hidden;
+	/* Hidden by default — Escape toggles it (renderer.js). The guarded selector
+	   below keeps the Play-tab and flying hides winning over an open panel. */
+	display: none;
 }
+body:not(.tab-play) .frames-panel.builds-open { display: flex; }
 
 .frames-panel .card-body {
 	gap: 0.45rem;

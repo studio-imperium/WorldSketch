@@ -7195,6 +7195,8 @@ document.addEventListener("keydown", event => {
 			setStatus("")
 		}
 		else if (uiTab === "view" && selectedSplatMeshes.size) deselectSplat()
+		// Nothing else wanted the key: toggle the (default-hidden) Builds panel.
+		else els.framesPanel?.classList.toggle("builds-open")
 	}
 })
 
