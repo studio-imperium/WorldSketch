@@ -3995,7 +3995,65 @@ function paintedGroundSampler() {
 	}
 }
 
-async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = null) {
+// Downsample a generation image into a content-bounds-normalized colour grid for
+// the estimator's render-and-compare term. Same conventions as guideOccupancy:
+// content bounds from non-background pixels, canvas Y flipped so the grid's v
+// axis points up like the projection basis. Background = transparent, near-black
+// (the capture's empty surround), or near-white (the image model's plain backdrop).
+const PHOTO_GRID = 20
+async function imageColorGrid(blob) {
+	if (!blob || typeof createImageBitmap !== "function") return null
+	let bitmap
+	try {
+		bitmap = await createImageBitmap(blob)
+		const size = 160
+		const canvas = document.createElement("canvas")
+		canvas.width = canvas.height = size
+		const ctx = canvas.getContext("2d", { willReadFrequently: true })
+		ctx.drawImage(bitmap, 0, 0, size, size)
+		const data = ctx.getImageData(0, 0, size, size).data
+		const keep = []
+		let minX = size, maxX = -1, minY = size, maxY = -1
+		for (let y = 0; y < size; y++) {
+			for (let x = 0; x < size; x++) {
+				const o = (y * size + x) * 4
+				const sum = data[o] + data[o + 1] + data[o + 2]
+				if (data[o + 3] <= 20 || sum <= 30 || sum >= 735) continue
+				keep.push([x, y, data[o], data[o + 1], data[o + 2]])
+				minX = Math.min(minX, x); maxX = Math.max(maxX, x)
+				minY = Math.min(minY, y); maxY = Math.max(maxY, y)
+			}
+		}
+		if (keep.length < size * size * 0.04) return null // nearly empty — no usable photo evidence
+		const G = PHOTO_GRID
+		const sums = new Float32Array(G * G * 3)
+		const counts = new Uint32Array(G * G)
+		for (const [x, y, r, g, b] of keep) {
+			const gx = Math.min(G - 1, Math.floor(((x - minX) / Math.max(1, maxX - minX + 1)) * G))
+			const gy = Math.min(G - 1, Math.floor(((maxY - y) / Math.max(1, maxY - minY + 1)) * G))
+			const cell = gx * G + gy
+			counts[cell]++
+			sums[cell * 3] += r; sums[cell * 3 + 1] += g; sums[cell * 3 + 2] += b
+		}
+		const cellPixels = (size / G) ** 2 * ((maxX - minX + 1) * (maxY - minY + 1)) / (size * size)
+		const grid = new Float32Array(G * G * 3)
+		const cover = new Uint8Array(G * G)
+		for (let c = 0; c < G * G; c++) {
+			if (counts[c] < Math.max(2, cellPixels * 0.25)) continue // mostly background
+			cover[c] = 1
+			grid[c * 3] = sums[c * 3] / counts[c]
+			grid[c * 3 + 1] = sums[c * 3 + 1] / counts[c]
+			grid[c * 3 + 2] = sums[c * 3 + 2] / counts[c]
+		}
+		return { grid: [...grid], cover: [...cover], size: G }
+	} catch {
+		return null
+	} finally {
+		bitmap?.close?.()
+	}
+}
+
+async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = null, photoImage = null) {
 	const basis = captureAngles ? captureProjectionBasis(captureAngles.theta, captureAngles.phi) : { right: ISO_PROJ_RIGHT, up: ISO_PROJ_UP, yawOffsetDeg: 0 }
 	const projRight = basis.right
 	const projUp = basis.up
@@ -4137,6 +4195,12 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 
 	// The bytes copy is rebuilt per attempt: a transferred buffer is unusable afterwards,
 	// and the fallback must never receive a detached one.
+	// Render-and-compare evidence: the generated image IS the ground truth of what
+	// the splat depicts from the capture camera, so a colour grid of it separates
+	// mirrored candidates that fool every geometric term (see yaw-core's photo term).
+	// Prefer the detailed output image (the splat's colours reproduce it); the
+	// block-out guide is a weaker fallback for replays that only saved the capture.
+	const photo = await imageColorGrid(photoImage) ?? await imageColorGrid(guide)
 	const buildInput = () => ({
 		bytes: bytes.slice(),
 		projRight,
@@ -4151,6 +4215,7 @@ async function estimateSceneYaw(bytes, meshes, guide = null, captureAngles = nul
 			blockMass,
 		},
 		ground,
+		photo,
 	})
 	let result = null
 	try {
@@ -6213,6 +6278,7 @@ async function generateWorld(prompt) {
 
 		sceneSplat = null
 		sceneSession = null
+		let generatedOutputImage = null
 		showProgress(0, 100, "Sending the scene to Hugging Face…")
 		const { bytes } = await generateSceneOnHuggingFace({
 			prompt,
@@ -6221,7 +6287,10 @@ async function generateWorld(prompt) {
 			useInferenceCredits,
 			signal: generationAbort.signal,
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),
-			onImageReady: image => logGenerationDebugImage("output", "Final detailed image sent to TripoSplat", image),
+			onImageReady: image => {
+				generatedOutputImage = image // orientation ground truth for the yaw/mirror estimate
+				logGenerationDebugImage("output", "Final detailed image sent to TripoSplat", image)
+			},
 		})
 		showProgress(97, 100, "Analyzing the 3D scene…")
 		await yieldForProgressPaint()
@@ -6232,7 +6301,7 @@ async function generateWorld(prompt) {
 		// Estimate every one-shot scene's quarter-turn from its content. The config yaw is
 		// only a fallback when a scene is too monochrome or symmetric to disambiguate.
 		const captureYawDeg = captureProjectionBasis(capture.theta, capture.phi).yawOffsetDeg
-		const sceneEstimate = await estimateSceneYaw(bytes, subjectMeshes, capture.guide, capture)
+		const sceneEstimate = await estimateSceneYaw(bytes, subjectMeshes, capture.guide, capture, generatedOutputImage)
 		const sceneYawDeg = sceneEstimate?.yawDeg ?? (sceneFit.yawDeg + captureYawDeg)
 		const sceneMirrorZ = sceneEstimate?.mirrorZ ?? false
 		showProgress(98, 100, "Loading the 3D scene…")

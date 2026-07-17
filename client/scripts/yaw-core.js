@@ -24,6 +24,11 @@ export function unitChroma(r, g, b) {
 //     waterCells, waterCenter, target: {tcx,tcz,tSpanX,tSpanZ,fx0,fz0,fw,fh},
 //     inkGrid: Uint8Array(FTP_G²), inkCells, anchorClasses: [{dir|null, targets:[[x,z]]}],
 //   },
+//   photo: null | { grid: number[size²×3], cover: number[size²], size } — the generated
+//     image as a content-normalized colour grid (imageColorGrid in renderer.js). The
+//     image IS what the splat depicts from the capture camera, so a candidate whose
+//     visible-surface colours correlate with it is the true orientation — the one term
+//     that separates mirrors on geometrically symmetric scenes.
 // }
 // Returns null (not enough signal) or { yawDeg, mirrorZ, top, log }.
 export function estimateYawFromData(input) {
@@ -118,6 +123,15 @@ export function estimateYawFromData(input) {
 		if (usable.length) anchorClumps = usable
 	}
 
+	// Photo term prep: toward-camera axis for visible-surface selection. The capture
+	// basis is right-handed (right = ŷ×eye, up = eye×right), so right×up = eye.
+	const photo = input.photo
+	const eye = [
+		projRight[1] * projUp[2] - projRight[2] * projUp[1],
+		projRight[2] * projUp[0] - projRight[0] * projUp[2],
+		projRight[0] * projUp[1] - projRight[1] * projUp[0],
+	]
+
 	const baseCandidates = [0, 90, 180, 270]
 	const offset = yawOffsetDeg
 	// With ground evidence, sweep finely; without it, only the quarter candidates are decidable.
@@ -127,9 +141,9 @@ export function estimateYawFromData(input) {
 		...baseCandidates.map(yaw => yaw - offset),
 		...(groundGeom || anchorClumps ? Array.from({ length: 72 }, (_, i) => i * 5) : []),
 	].map(yaw => Math.round((((yaw % 360) + 360) % 360) * 1000) / 1000))]
-	// Handedness is only decidable with ground evidence; a mirrored candidate must beat
-	// the best regular one by a real margin before we accept the flip.
-	const mirrorCandidates = groundGeom || anchorClumps ? [false, true] : [false]
+	// Handedness is only decidable with ground, anchor, or photo evidence; a mirrored
+	// candidate must beat the best regular one by a real margin before we accept the flip.
+	const mirrorCandidates = groundGeom || anchorClumps || photo ? [false, true] : [false]
 	let bestYaw = null, bestMirror = false, bestScore = -Infinity
 	const candidatesOut = []
 	for (const mirror of mirrorCandidates) {
@@ -143,6 +157,7 @@ export function estimateYawFromData(input) {
 				wx * projRight[0] + y * projRight[1] + wz * projRight[2],
 				wx * projUp[0] + y * projUp[1] + wz * projUp[2],
 				r, g, b, y,
+				wx * eye[0] + y * eye[1] + wz * eye[2], // toward-camera depth for the photo term
 			])
 		}
 		const us = uv.map(p => p[0]).sort((a, b) => a - b)
@@ -153,13 +168,23 @@ export function estimateYawFromData(input) {
 		const colorSums = new Map([...anchors.keys()].map(key => [key, [0, 0, 0]]))
 		const rectCounts = new Array(normRects.length).fill(0)
 		const RECT_PAD = 0.03
+		// Photo term pass 1 collection: cell + depth + colour per in-frame point.
+		const PG = photo?.size ?? 0
+		const photoPts = photo ? [] : null
+		let dMin = Infinity, dMax = -Infinity
 		let n = 0
-		for (const [u, v, r, g, b, wy] of uv) {
+		for (const [u, v, r, g, b, wy, d] of uv) {
 			const x = (u - u0) / Math.max(1e-9, u1 - u0)
 			const y = (v - v0) / Math.max(1e-9, v1 - v0)
 			if (x < 0 || x > 1 || y < 0 || y > 1) continue
 			n++
 			splatOcc.add(Math.min(YAW_GRID - 1, x * YAW_GRID | 0) * YAW_GRID + Math.min(YAW_GRID - 1, y * YAW_GRID | 0))
+			if (photo) {
+				const cell = Math.min(PG - 1, x * PG | 0) * PG + Math.min(PG - 1, y * PG | 0)
+				photoPts.push(cell, d, r, g, b)
+				if (d < dMin) dMin = d
+				if (d > dMax) dMax = d
+			}
 			if (wy > aboveY) {
 				for (let ri = 0; ri < normRects.length; ri++) {
 					const [ru0, ru1, rv0, rv1] = normRects[ri]
@@ -185,6 +210,50 @@ export function estimateYawFromData(input) {
 			if (bestKey) {
 				const s = colorSums.get(bestKey)
 				s[0] += x; s[1] += y; s[2]++
+			}
+		}
+		// Photo term (render-and-compare): visible-surface colours vs the generated
+		// image. Pass 1 finds each cell's nearest-to-camera depth; pass 2 averages
+		// colours within a thin shell behind it — the surface the capture camera
+		// actually saw; then a per-channel, mean-centred correlation against the
+		// photo grid over cells both sides cover. Wrong quarters — and especially
+		// mirrors, which geometry terms can't separate on symmetric scenes —
+		// decorrelate hard because the image is the ground truth of the scene.
+		let photoNcc = null
+		if (photo && photoPts.length >= 500 * 5) {
+			const shell = 0.08 * Math.max(1e-6, dMax - dMin)
+			const near = new Float32Array(PG * PG).fill(-Infinity)
+			for (let i = 0; i < photoPts.length; i += 5) {
+				const cell = photoPts[i], d = photoPts[i + 1]
+				if (d > near[cell]) near[cell] = d
+			}
+			const sums = new Float32Array(PG * PG * 3)
+			const counts = new Uint32Array(PG * PG)
+			for (let i = 0; i < photoPts.length; i += 5) {
+				const cell = photoPts[i], d = photoPts[i + 1]
+				if (d < near[cell] - shell) continue
+				counts[cell]++
+				sums[cell * 3] += photoPts[i + 2]
+				sums[cell * 3 + 1] += photoPts[i + 3]
+				sums[cell * 3 + 2] += photoPts[i + 4]
+			}
+			const shared = []
+			for (let c = 0; c < PG * PG; c++) if (counts[c] && photo.cover[c]) shared.push(c)
+			if (shared.length >= 30) {
+				let ncc = 0
+				for (let ch = 0; ch < 3; ch++) {
+					let ma = 0, mb = 0
+					for (const c of shared) { ma += sums[c * 3 + ch] / counts[c]; mb += photo.grid[c * 3 + ch] }
+					ma /= shared.length; mb /= shared.length
+					let ab = 0, aa = 0, bb = 0
+					for (const c of shared) {
+						const a = sums[c * 3 + ch] / counts[c] - ma
+						const b = photo.grid[c * 3 + ch] - mb
+						ab += a * b; aa += a * a; bb += b * b
+					}
+					ncc += aa > 1e-6 && bb > 1e-6 ? ab / Math.sqrt(aa * bb) : 0
+				}
+				photoNcc = ncc / 3
 			}
 		}
 		// Water correlation: sharp peak at the true (yaw, mirror); collapses at wrong ones.
@@ -265,9 +334,12 @@ export function estimateYawFromData(input) {
 		const groundFrac = overlapFrac == null && waterProx == null ? null : Math.max(overlapFrac ?? 0, 0.8 * (waterProx ?? 0))
 		const groundTermScore = groundFrac == null ? 0 : 2.5 * normRects.length * groundFrac
 		const anchorTermScore = anchorWorldTerm == null ? 0 : 1.5 * normRects.length * anchorWorldTerm
+		// The photo term is an absolute correlation (same target for every candidate),
+		// so it weighs in directly — no cross-sweep normalization needed.
+		const photoTermScore = photoNcc == null ? 0 : 3 * normRects.length * Math.max(0, photoNcc)
 		// A mirrored seating is exotic; demand a decisive margin before accepting it.
-		const baseScore = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0) + groundTermScore + anchorTermScore - (mirror ? 0.06 * normRects.length : 0)
-		candidatesOut.push({ yaw, mirror, baseScore, ftp: footprintIoU, dbg: `${mirror ? "M" : ""}${yaw}°(blk ${covered}/${normRects.length} iou ${iou.toFixed(2)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(2) : "—"} wat ${groundFrac == null ? "—" : groundFrac.toFixed(2)} anc ${anchorWorldTerm == null ? "—" : anchorWorldTerm.toFixed(2)} ftp ${footprintIoU == null ? "—" : footprintIoU.toFixed(2)})` })
+		const baseScore = covered * 4 + iou + (anchorWeight ? 2 * (anchorTerm / anchorWeight) : 0) + groundTermScore + anchorTermScore + photoTermScore - (mirror ? 0.06 * normRects.length : 0)
+		candidatesOut.push({ yaw, mirror, baseScore, ftp: footprintIoU, dbg: `${mirror ? "M" : ""}${yaw}°(blk ${covered}/${normRects.length} iou ${iou.toFixed(2)} col ${anchorWeight ? (anchorTerm / anchorWeight).toFixed(2) : "—"} wat ${groundFrac == null ? "—" : groundFrac.toFixed(2)} anc ${anchorWorldTerm == null ? "—" : anchorWorldTerm.toFixed(2)} ftp ${footprintIoU == null ? "—" : footprintIoU.toFixed(2)} pho ${photoNcc == null ? "—" : photoNcc.toFixed(2)})` })
 	}
 	}
 	// Footprint IoU carries the drawn ground's outline, but its ABSOLUTE spread is small,

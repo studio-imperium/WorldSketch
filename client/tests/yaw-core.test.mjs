@@ -193,6 +193,108 @@ function groundWorldCloud() {
 	return points
 }
 
+// ---- Photo (render-and-compare) evidence path ---------------------------------------
+// The generated image is the ground truth of what the splat depicts from the capture
+// camera. A colour grid of it lets the estimator separate mirrored candidates even on
+// object-only scenes, where mirror detection used to be gated off entirely.
+
+// Content-normalized colour grid of the TRUE (identity) orientation — the estimator's
+// splat-side cell convention: gx from the right axis, gy from the up axis, gx*G+gy.
+function photoFromCloud(points) {
+	const G = 20
+	const uv = points.map(([x, y, z, r, g, b]) => [
+		x * PROJ_RIGHT[0] + y * PROJ_RIGHT[1] + z * PROJ_RIGHT[2],
+		x * PROJ_UP[0] + y * PROJ_UP[1] + z * PROJ_UP[2],
+		r, g, b,
+	])
+	let u0 = Infinity, u1 = -Infinity, v0 = Infinity, v1 = -Infinity
+	for (const [u, v] of uv) { u0 = Math.min(u0, u); u1 = Math.max(u1, u); v0 = Math.min(v0, v); v1 = Math.max(v1, v) }
+	const sums = new Float32Array(G * G * 3)
+	const counts = new Uint32Array(G * G)
+	for (const [u, v, r, g, b] of uv) {
+		const gx = Math.min(G - 1, ((u - u0) / (u1 - u0)) * G | 0)
+		const gy = Math.min(G - 1, ((v - v0) / (v1 - v0)) * G | 0)
+		const cell = gx * G + gy
+		counts[cell]++
+		sums[cell * 3] += r; sums[cell * 3 + 1] += g; sums[cell * 3 + 2] += b
+	}
+	const grid = new Float32Array(G * G * 3)
+	const cover = new Uint8Array(G * G)
+	for (let c = 0; c < G * G; c++) {
+		if (!counts[c]) continue
+		cover[c] = 1
+		grid[c * 3] = sums[c * 3] / counts[c]
+		grid[c * 3 + 1] = sums[c * 3 + 1] / counts[c]
+		grid[c * 3 + 2] = sums[c * 3 + 2] / counts[c]
+	}
+	return { grid: [...grid], cover: [...cover], size: G }
+}
+
+// Mirror-symmetric geometry, asymmetric colours: red pillar at +Z, blue at −Z. Only
+// colour evidence can tell the mirrored seating from the straight one.
+const MIRROR_BLOCKS = [
+	{ pos: [0, 1, 8], scale: [2, 2, 2], hex: "c82828" },
+	{ pos: [0, 1, -8], scale: [2, 2, 2], hex: "2828c8" },
+]
+const bakeMirrorZ = points => points.map(([x, y, z, r, g, b]) => [x, y, -z, r, g, b])
+
+test("photo evidence recovers a mirrored object-only scene", () => {
+	const saved = BLOCKS.splice(0, BLOCKS.length, ...MIRROR_BLOCKS)
+	try {
+		const photo = photoFromCloud(worldCloud())
+		const result = estimateYawFromData({
+			bytes: splatBytes(bakeMirrorZ(worldCloud())),
+			projRight: PROJ_RIGHT,
+			projUp: PROJ_UP,
+			yawOffsetDeg: 0,
+			blocks: blockInputs(),
+			ground: null,
+			photo,
+		})
+		assert.equal(result.mirrorZ, true)
+		assert.equal(result.yawDeg, 0)
+		assert.doesNotMatch(result.top[0], /pho —/) // the photo term actually fired
+	} finally {
+		BLOCKS.splice(0, BLOCKS.length, ...saved)
+	}
+})
+
+test("photo evidence does not invent a mirror on a straight scene", () => {
+	const saved = BLOCKS.splice(0, BLOCKS.length, ...MIRROR_BLOCKS)
+	try {
+		const photo = photoFromCloud(worldCloud())
+		const result = estimateYawFromData({
+			bytes: splatBytes(worldCloud()),
+			projRight: PROJ_RIGHT,
+			projUp: PROJ_UP,
+			yawOffsetDeg: 0,
+			blocks: blockInputs(),
+			ground: null,
+			photo,
+		})
+		assert.equal(result.mirrorZ, false)
+		assert.equal(result.yawDeg, 0)
+	} finally {
+		BLOCKS.splice(0, BLOCKS.length, ...saved)
+	}
+})
+
+test("photo evidence agrees with the baked quarter-turn", () => {
+	const photo = photoFromCloud(worldCloud())
+	const result = estimateYawFromData({
+		bytes: splatBytes(bakeYaw(worldCloud(), 180)),
+		projRight: PROJ_RIGHT,
+		projUp: PROJ_UP,
+		yawOffsetDeg: 0,
+		blocks: blockInputs(),
+		ground: null,
+		photo,
+	})
+	assert.equal(result.yawDeg, 180)
+	assert.equal(result.mirrorZ, false)
+	assert.doesNotMatch(result.top[0], /pho —/)
+})
+
 test("painted water pins the yaw when blocks carry no signal", () => {
 	const centeredBlock = [{ pos: [0, 1, 0], scale: [2, 2, 2], hex: "909090" }]
 	const saved = BLOCKS.splice(0, BLOCKS.length, ...centeredBlock)

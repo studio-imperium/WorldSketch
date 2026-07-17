@@ -12,13 +12,19 @@ html {
 	/* Highlight trio — used sparingly, one job each, everything else stays ink:
 	   sun = the active tool, coral = generation in flight, sky = splat selection
 	   (sky is also renderer.js's selectionAccent). */
-	--hl-sun: #ffe45e;
-	--hl-coral: #ff6392;
-	--hl-sky: #7fc8f8;
+	/* Colored highlights retired (2026-07-16): everything active/selected now
+	   wears daisyUI's default greys. --accent = solid fills/thumbs/rings
+	   (gray-500), --accent-fill = light active-pill fill (base-300). The old
+	   --hl-* names stay so their many call sites keep working. */
+	--accent: #6b7280;
+	--accent-fill: #e5e6e6;
+	--hl-sun: #e5e6e6;
+	--hl-coral: #6b7280;
+	--hl-sky: #6b7280;
 	/* The landing page's serif voice (hero headline), reserved for panel headers. */
 	--font-display: "Newsreader", Georgia, "Times New Roman", serif;
 	/* daisyUI hooks (its themes are :where()-scoped, so these win). */
-	--color-primary: var(--ink);
+	--color-primary: var(--accent);
 	--color-primary-content: var(--white);
 	--color-base-200: var(--panel);
 	--color-base-300: var(--line);
@@ -165,7 +171,7 @@ body.is-generating #canvas canvas {
 }
 
 .view-tab.active {
-	background: var(--ink); /* fallback for any tab without a highlight below */
+	background: var(--accent); /* fallback for any tab without a highlight below */
 	color: var(--white);
 }
 
@@ -177,9 +183,9 @@ body.is-generating #canvas canvas {
 	color: var(--ink);
 	font-weight: 600;
 }
-.view-tab[data-view-tab="build"].active { background: var(--hl-sun); }
-.view-tab[data-view-tab="view"].active { background: var(--hl-sky); }
-.view-tab[data-view-tab="play"].active { background: var(--hl-coral); }
+.view-tab[data-view-tab="build"].active { background: var(--accent-fill); }
+.view-tab[data-view-tab="view"].active { background: var(--accent-fill); }
+.view-tab[data-view-tab="play"].active { background: var(--accent-fill); }
 
 .view-tab:disabled {
 	cursor: default;
@@ -462,7 +468,7 @@ body.tab-view canvas.is-splat-rotate {
 /* Own both hover layers — daisyUI's ghost hover paints a LIGHT pill, which turned the
    white × on the active (ink) row invisible right as the cursor reached it. */
 .frame-del:hover {
-	background: color-mix(in srgb, var(--ink) 10%, transparent) !important;
+	background: color-mix(in srgb, var(--accent) 10%, transparent) !important;
 	color: var(--ink) !important;
 }
 
@@ -558,7 +564,7 @@ body.cutscene .ui * {
 }
 
 .viewer-ui .btn.primary {
-	background: var(--ink);
+	background: var(--accent);
 	color: #fff;
 	font-weight: 700;
 	text-transform: uppercase;
@@ -797,7 +803,7 @@ body.cutscene .ui * {
 }
 
 .side-rail .color-swatch.active span {
-	box-shadow: inset 0 0 0 1px rgba(20, 20, 15, 0.08), 0 0 0 2px #fff, 0 0 0 3.5px var(--ink);
+	box-shadow: inset 0 0 0 1px rgba(20, 20, 15, 0.08), 0 0 0 2px #fff, 0 0 0 3.5px var(--accent);
 }
 
 /* Hovering a swatch reveals its remove badge (Canva-style palette editing). */
@@ -917,7 +923,7 @@ body.cutscene .ui * {
 	border: 0;
 	border-radius: 0.45rem;
 	padding: 0.34rem 0.55rem;
-	background: var(--ink);
+	background: var(--accent);
 	color: #fff;
 	font-weight: 600;
 	font-size: 0.82rem;
@@ -956,7 +962,7 @@ body.cutscene .ui * {
 	width: var(--brush-dot, 0.66rem);
 	height: var(--brush-dot, 0.66rem);
 	border-radius: 50%;
-	background: var(--ink);
+	background: var(--accent);
 	box-shadow: inset 0 0 0 1px rgba(20, 20, 15, 0.08);
 }
 
@@ -983,7 +989,7 @@ body.cutscene .ui * {
 	height: 0.8rem;
 	margin-top: -0.3rem;
 	border-radius: 50%;
-	background: var(--ink);
+	background: var(--accent);
 	border: 2px solid #fff;
 	box-shadow: 0 0 0 1px rgba(20, 20, 15, 0.12);
 }
@@ -998,7 +1004,7 @@ body.cutscene .ui * {
 	width: 0.8rem;
 	height: 0.8rem;
 	border-radius: 50%;
-	background: var(--ink);
+	background: var(--accent);
 	border: 2px solid #fff;
 	box-shadow: 0 0 0 1px rgba(20, 20, 15, 0.12);
 }
@@ -1136,7 +1142,7 @@ body.dev-controls-visible .tuning-panel {
 .tuning-row input[type="range"] {
 	width: 100%;
 	padding: 0;
-	accent-color: var(--ink);
+	accent-color: var(--accent);
 }
 
 .tuning-row > .tuning-range-labels {
@@ -1205,7 +1211,7 @@ body.dev-controls-visible .tuning-panel {
 }
 
 .build-json-group textarea:focus {
-	border-color: var(--ink);
+	border-color: var(--accent);
 	outline: 2px solid rgba(13, 13, 12, 0.1);
 }
 
@@ -1254,7 +1260,7 @@ body.dev-controls-visible .tuning-panel {
 .build-json-speed input {
 	width: 100%;
 	margin: 0;
-	accent-color: var(--ink);
+	accent-color: var(--accent);
 }
 
 .tuning-actions {
@@ -1389,7 +1395,7 @@ body.dev-controls-visible .tuning-panel {
 .color-swatch:hover,
 .color-swatch.active,
 .add-color-swatch:hover {
-	background: color-mix(in srgb, var(--ink) 22%, transparent) !important;
+	background: color-mix(in srgb, var(--accent) 22%, transparent) !important;
 }
 
 .color-swatch span {
@@ -1763,7 +1769,7 @@ input[type="color"] {
 	align-items: center;
 	justify-content: center;
 	border-radius: 999px;
-	background: color-mix(in srgb, var(--ink) 30%, #fff);
+	background: color-mix(in srgb, var(--accent) 30%, #fff);
 	color: var(--ink-soft);
 	font-size: 0.7rem;
 	font-weight: 700;
@@ -1892,7 +1898,7 @@ input[type="color"] {
 }
 
 .settings-item.active {
-	background: color-mix(in srgb, var(--ink) 18%, #fff);
+	background: color-mix(in srgb, var(--accent) 18%, #fff);
 }
 
 /* --- Camera bar: fly mode + shot path (bottom-right) ------------------------- */
@@ -1929,7 +1935,7 @@ input[type="color"] {
 }
 
 .cam-btn.active {
-	background: var(--ink);
+	background: var(--accent);
 	color: #fff;
 }
 
@@ -1994,7 +2000,7 @@ input[type="color"] {
 	width: 0.95rem;
 	height: 0.95rem;
 	border-radius: 50%;
-	background: var(--ink);
+	background: var(--accent);
 	color: #fff;
 	font-size: 0.62rem;
 	line-height: 1;
