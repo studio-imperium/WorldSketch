@@ -223,6 +223,7 @@ const els = {
 	sceneShot: document.getElementById("scene_shot_btn"),
 	viewRawSplat: document.getElementById("view_raw_splat_input"),
 	uploadSceneSplat: document.getElementById("upload_scene_splat_input"),
+	cutsceneSplat: document.getElementById("cutscene_splat_input"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
 	downloadZip: document.getElementById("download_zip_btn"),
@@ -3533,16 +3534,18 @@ function cutsceneGroundingRig() {
 	return rig
 }
 
-async function playGenerationCutscene() {
+// `keepCamera: true` leaves the orbit exactly as the user staged it (no reframe/zoom)
+// — the cutscene-splat devtools flow uses it so a prepared shot survives the reveal.
+async function playGenerationCutscene({ keepCamera = false } = {}) {
 	const blocks = world.allBlockoutMeshes()
 	if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !blocks.length || !world.generated.length) {
 		setUiTab("view")
-		frameGeneratedSplats()
+		if (!keepCamera) frameGeneratedSplats()
 		return
 	}
 	document.body.classList.add("cutscene")
 	setUiTab("view")
-	frameGeneratedSplats()
+	if (!keepCamera) frameGeneratedSplats()
 	// Everything below runs before the next frame paints, so the stage opens
 	// empty: splats held back, blocks staged invisible for the build-up.
 	for (const { mesh } of world.generated) mesh.visible = false
@@ -6560,7 +6563,10 @@ async function viewRawSplat(file) {
 }
 
 // Fit one uploaded whole-scene splat against the current block-out.
-async function uploadSceneSplat(file) {
+// `cutscene: true` simulates a fresh generation: after the fit, every piece of UI
+// hides (the "o" shortcut's class — press "o" to bring it back) and the same
+// reveal a real generation plays runs on the uploaded splat.
+async function uploadSceneSplat(file, { cutscene = false } = {}) {
 	if (!file || generating) return
 	generating = true
 	splatting = true
@@ -6587,10 +6593,16 @@ async function uploadSceneSplat(file) {
 		try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment uploaded scene:", error) }
 		world.state = "generated"
 		splatting = false
-		setUiTab("view")
-		frameGeneratedSplats()
-		applyOverlayVisibility()
-		setStatus(`Loaded ${file.name}`)
+		if (cutscene) {
+			applyOverlayVisibility()
+			document.body.classList.add("hide-ui")
+			await playGenerationCutscene({ keepCamera: true })
+		} else {
+			setUiTab("view")
+			frameGeneratedSplats()
+			applyOverlayVisibility()
+		}
+		setStatus(cutscene ? `Cutscene played on ${file.name} — press O to bring the UI back` : `Loaded ${file.name}`)
 		showProgress(1, 1, "Done")
 		window.setTimeout(hideProgress, 1000)
 	} catch (error) {
@@ -7111,6 +7123,12 @@ els.uploadSceneSplat?.addEventListener("change", async event => {
 	event.target.value = "" // let the same file be re-selected
 })
 
+els.cutsceneSplat?.addEventListener("change", async event => {
+	toggleSettings(false)
+	await uploadSceneSplat(event.target.files[0], { cutscene: true })
+	event.target.value = "" // let the same file be re-selected
+})
+
 els.downloadPrims?.addEventListener("click", downloadPrimitives)
 
 els.uploadPrims?.addEventListener("change", async event => {
@@ -7182,6 +7200,17 @@ document.addEventListener("keydown", event => {
 		if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target?.isContentEditable) return
 		event.preventDefault()
 		document.body.classList.toggle("hide-ui")
+		return
+	}
+	// "e" wipes the active build frame back to an empty block-out (Build tab only).
+	// It checkpoints first, so Ctrl/Cmd+Z brings the cleared build straight back.
+	if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && key === "e") {
+		if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target?.isContentEditable) return
+		if (uiTab !== "build" || generating || drag || buildHistoryBusy) return
+		event.preventDefault()
+		beginBuildAction()
+		applyBuildSnapshot(emptyBuildSnapshot())
+		setStatus("Build cleared — undo brings it back")
 		return
 	}
 	// "i" reveals/hides the camera bar (fly, shots, path playback, video export)
