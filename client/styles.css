@@ -1085,6 +1085,13 @@ body.dev-controls-visible .tuning-panel {
 	width: auto;
 }
 
+/* dev-panel scene-flip checkboxes sit as one row */
+.tuning-flips {
+	display: flex;
+	gap: 0.9rem;
+	padding: 0.25rem 0;
+}
+
 .tuning-group {
 	padding: 0.65rem 0;
 	border-top: 1px solid var(--line);

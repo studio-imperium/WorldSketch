@@ -3616,6 +3616,50 @@ function scheduleSegmentationRetune() {
 	segmentationTuneTimer = window.setTimeout(() => { retuneCurrentSceneSegmentation() }, 350)
 }
 
+// Dev-panel scene flips: mirror the fitted splat pieces about the seat centre
+// to eyeball orientation problems (Tripo's random mirroring) without a re-fit.
+// Spark drops the mirror sign of a negative mesh scale (the seating pipeline
+// bakes mirrorZ into the gaussians for the same reason), so each flip REBUILDS
+// every piece's splat data: centres reflected about the scene-box centre, each
+// gaussian's quaternion conjugated for the reflection (for a flip of axis a,
+// negate the two OTHER imaginary components). A mirror is its own inverse, so
+// toggling a box twice restores the exact original data.
+async function applySceneFlip(axis) {
+	if (!world.generated.length) return
+	deselectSplat() // the rebuild replaces mesh identities
+	const center = wholeSceneBox().getCenter(new THREE.Vector3())
+	const local = new THREE.Vector3()
+	const p = new THREE.Vector3()
+	const q = new THREE.Quaternion()
+	for (const record of [...world.generated]) {
+		const old = record.mesh
+		if (!old.packedSplats?.forEachSplat) continue
+		old.updateMatrix()
+		local.copy(center).applyMatrix4(old.matrix.clone().invert()) // mirror plane in the mesh's own frame
+		const mirrored = new SplatMesh({
+			constructSplats: splats => {
+				old.packedSplats.forEachSplat((_i, ctr, scales, quaternion, opacity, color) => {
+					p.copy(ctr)
+					if (axis === "x") { p.x = 2 * local.x - p.x; q.set(quaternion.x, -quaternion.y, -quaternion.z, quaternion.w) }
+					else if (axis === "y") { p.y = 2 * local.y - p.y; q.set(-quaternion.x, quaternion.y, -quaternion.z, quaternion.w) }
+					else { p.z = 2 * local.z - p.z; q.set(-quaternion.x, -quaternion.y, quaternion.z, quaternion.w) }
+					splats.pushSplat(p, scales, q, opacity, color)
+				})
+			},
+		})
+		await mirrored.initialized
+		mirrored.position.copy(old.position)
+		mirrored.quaternion.copy(old.quaternion)
+		mirrored.scale.copy(old.scale)
+		mirrored.userData = old.userData
+		mirrored.visible = old.visible
+		world.group.add(mirrored)
+		record.mesh = mirrored
+		world.group.remove(old)
+		old.dispose?.()
+	}
+}
+
 function createSegmentationTunePanel() {
 	if (segmentationTunePanel) return
 	const panel = document.createElement("aside")
@@ -3631,6 +3675,14 @@ function createSegmentationTunePanel() {
 			<label class="tuning-live"><input type="checkbox" data-tune-live checked> Retune live</label>
 		</header>
 		<div class="tuning-groups"></div>
+		<section class="tuning-group">
+			<h3>Flip fitted scene</h3>
+			<div class="tuning-flips" title="Mirror the seated splat pieces about the scene centre — a quick orientation check without re-fitting. Applies to the CURRENT scene; a new generation starts unflipped.">
+				<label class="tuning-live"><input type="checkbox" data-tune-flip="x"> Flip X</label>
+				<label class="tuning-live"><input type="checkbox" data-tune-flip="y"> Flip Y</label>
+				<label class="tuning-live"><input type="checkbox" data-tune-flip="z"> Flip Z</label>
+			</div>
+		</section>
 		<section class="build-json-group">
 			<div class="build-json-head">
 				<h3>Build JSON</h3>
@@ -3737,6 +3789,21 @@ function createSegmentationTunePanel() {
 		})
 	}
 	panel.querySelector("[data-tune-retune]")?.addEventListener("click", () => retuneCurrentSceneSegmentation())
+	{
+		const flipInputs = [...panel.querySelectorAll("[data-tune-flip]")]
+		for (const input of flipInputs) {
+			input.addEventListener("change", async () => {
+				for (const other of flipInputs) other.disabled = true
+				try {
+					await applySceneFlip(input.dataset.tuneFlip)
+				} catch (error) {
+					console.warn("scene flip failed:", error)
+				} finally {
+					for (const other of flipInputs) other.disabled = false
+				}
+			})
+		}
+	}
 	panel.querySelector("[data-tune-copy]")?.addEventListener("click", async event => {
 		const button = event.currentTarget
 		const originalLabel = button.textContent
