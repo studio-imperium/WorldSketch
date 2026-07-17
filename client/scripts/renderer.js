@@ -227,6 +227,8 @@ const els = {
 	cutsceneStage: document.getElementById("cutscene_stage"),
 	cutsceneRange: document.getElementById("cutscene_build_range"),
 	cutsceneSecs: document.getElementById("cutscene_build_secs"),
+	cutsceneFadeRange: document.getElementById("cutscene_fade_range"),
+	cutsceneFadeSecs: document.getElementById("cutscene_fade_secs"),
 	cutscenePlay: document.getElementById("cutscene_play_btn"),
 	cutsceneTrimPanel: document.getElementById("cutscene_trim"),
 	trimYaw: document.getElementById("trim_yaw_range"),
@@ -3477,13 +3479,15 @@ async function revealPrimitivesBottomUp() {
 
 // Generation cutscene: the moment the splat is ready the UI steps aside and the
 // editor replays the product promise in the View tab — the original block-out
-// constructs bottom-up, flashes white-hot, and vanishes as the freshly
-// generated splats take its place; then the UI fades back in (body.cutscene
-// drives the CSS fade on .ui). The block materials are the editor's REAL
-// materials, so everything touched here is restored in the finally block.
+// constructs bottom-up, dissolves into the fresh splats rendered as a point
+// cloud, and the points swell into full gaussians; then the UI fades back in
+// (body.cutscene drives the CSS fade on .ui). The block materials are the
+// editor's REAL materials, so everything touched here is restored in the
+// finally block.
 const CUTSCENE_BUILD_MS = 700
-const CUTSCENE_FLASH_MS = 200
+const CUTSCENE_FADE_MS = 1000 // point-cloud → full-gaussian materialize (staging slider overrides)
 const CUTSCENE_HOLD_MS = 200 // beat on the fresh splats before the UI returns
+const CUTSCENE_POINT_STD_DEV = 0.3 // rendered extent (in σ) of the "point cloud" dots
 
 // Staged cutscene (the upload flow): the build-up length comes from a slider shown
 // after the upload lands, remembered across sessions. Generation reveals keep the
@@ -3491,6 +3495,10 @@ const CUTSCENE_HOLD_MS = 200 // beat on the fresh splats before the UI returns
 let cutsceneBuildMs = (() => {
 	const stored = Number(localStorage.getItem("worldsketch.cutsceneBuildMs"))
 	return Number.isFinite(stored) && stored >= 200 ? stored : 3000
+})()
+let cutsceneFadeMs = (() => {
+	const stored = Number(localStorage.getItem("worldsketch.cutsceneFadeMs"))
+	return Number.isFinite(stored) && stored >= 0 ? stored : CUTSCENE_FADE_MS
 })()
 
 // Show-off orbit for the staged cutscene: starts the moment the build-up begins and
@@ -3558,6 +3566,8 @@ function showCutsceneStage() {
 	if (!els.cutsceneStage) return
 	if (els.cutsceneRange) els.cutsceneRange.value = String(cutsceneBuildMs)
 	if (els.cutsceneSecs) els.cutsceneSecs.textContent = `${(cutsceneBuildMs / 1000).toFixed(1)}s`
+	if (els.cutsceneFadeRange) els.cutsceneFadeRange.value = String(cutsceneFadeMs)
+	if (els.cutsceneFadeSecs) els.cutsceneFadeSecs.textContent = `${(cutsceneFadeMs / 1000).toFixed(1)}s`
 	if (els.trimYaw) els.trimYaw.value = String(cutsceneTrim.yawDeg)
 	if (els.trimScale) els.trimScale.value = String(cutsceneTrim.scale)
 	if (els.trimY) els.trimY.value = String(cutsceneTrim.y)
@@ -3628,8 +3638,9 @@ function cutsceneGroundingRig() {
 
 // `keepCamera: true` leaves the orbit exactly as the user staged it (no reframe/zoom)
 // — the cutscene-splat devtools flow uses it so a prepared shot survives the reveal.
-// `pan: true` adds the slow staged-cutscene orbit; `buildMs` overrides the build-up length.
-async function playGenerationCutscene({ keepCamera = false, pan = false, buildMs = CUTSCENE_BUILD_MS } = {}) {
+// `pan: true` adds the slow staged-cutscene orbit; `buildMs` overrides the build-up
+// length and `fadeMs` the blocks→splat cross-fade (0 = hard swap).
+async function playGenerationCutscene({ keepCamera = false, pan = false, buildMs = CUTSCENE_BUILD_MS, fadeMs = CUTSCENE_FADE_MS } = {}) {
 	const blocks = world.allBlockoutMeshes()
 	if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !blocks.length || !world.generated.length) {
 		setUiTab("view")
@@ -3641,7 +3652,13 @@ async function playGenerationCutscene({ keepCamera = false, pan = false, buildMs
 	if (!keepCamera) frameGeneratedSplats()
 	// Everything below runs before the next frame paints, so the stage opens
 	// empty: splats held back, blocks staged invisible for the build-up.
-	for (const { mesh } of world.generated) mesh.visible = false
+	// Opacity 0 is set NOW because Spark bakes SplatMesh opacity asynchronously —
+	// the build-up gives that bake time to land, so the fade's first visible
+	// frame really starts from nothing instead of flashing fully opaque.
+	for (const { mesh } of world.generated) {
+		mesh.visible = false
+		mesh.opacity = 0
+	}
 	const meshes = [...blocks].sort(
 		(a, b) => (a.position.y - a.scale.y / 2) - (b.position.y - b.scale.y / 2),
 	)
@@ -3654,13 +3671,17 @@ async function playGenerationCutscene({ keepCamera = false, pan = false, buildMs
 		mesh.visible = false
 		rig.add(mesh)
 	}
-	const saved = meshes.map(mesh => ({
-		emissive: mesh.material.emissive.getHex(),
-		intensity: mesh.material.emissiveIntensity,
-		edges: mesh.children
+	const fadeMats = meshes
+		.flatMap(mesh => [mesh.material, ...mesh.children
 			.filter(child => child.userData.isEdgeOutline)
-			.map(edge => ({ edge, base: edge.material.color.clone() })),
-	}))
+			.map(edge => edge.material)])
+		.map(material => ({
+			material,
+			transparent: material.transparent,
+			opacity: material.opacity,
+			depthWrite: material.depthWrite,
+		}))
+	const fullStdDev = sparkRenderer.maxStdDev // restored after the point-cloud grow
 	try {
 		if (pan) startCutscenePan()
 		// Bottom-up build, elapsed-fraction paced so it always lands in
@@ -3674,36 +3695,50 @@ async function playGenerationCutscene({ keepCamera = false, pan = false, buildMs
 			while (shown < due) meshes[shown++].visible = true
 			await new Promise(resolve => window.setTimeout(resolve, 16))
 		}
-		// Every block ramps to white-hot…
-		for (let i = 0; i < meshes.length; i++) {
-			meshes[i].material.emissive.set(0xffffff)
-			meshes[i].material.emissiveIntensity = 0
-		}
-		await cutsceneTween(CUTSCENE_FLASH_MS, t => {
-			for (let i = 0; i < meshes.length; i++) {
-				meshes[i].material.emissiveIntensity = t
-				for (const { edge, base } of saved[i].edges) edge.material.color.copy(base).lerp(cutsceneWhite, t)
-			}
-		})
-		// …and vanishes — the splats appear exactly where the blocks stood.
-		for (const mesh of meshes) mesh.visible = false
+		// Point-cloud materialize: the splats first show as a field of tiny dots —
+		// sparkRenderer.maxStdDev clamps every gaussian's rendered extent GPU-side
+		// (a live uniform, no data rewrites), so a small value renders just each
+		// gaussian's opaque core. The block-out dissolves under the dots during the
+		// first third, then the dots swell into the full gaussians over fadeMs.
 		for (const { mesh } of world.generated) {
 			mesh.visible = showSplatFloor || mesh.userData.genKind !== "floor"
 		}
+		if (fadeMs > 0) {
+			sparkRenderer.maxStdDev = CUTSCENE_POINT_STD_DEV
+			for (const { material } of fadeMats) {
+				material.transparent = true
+				material.depthWrite = false
+				// the materials were compiled opaque (blending off, opacity ignored);
+				// without a recompile the "fade" renders as a hard snap
+				material.needsUpdate = true
+			}
+			await cutsceneTween(fadeMs, t => {
+				const swap = Math.min(1, t * 3) // blocks out / dots in over the first third
+				for (const { mesh } of world.generated) mesh.opacity = swap
+				for (const { material } of fadeMats) material.opacity = 1 - swap
+				const grow = t * t * (3 - 2 * t) // smoothstep: dots hold a beat, then bloom
+				sparkRenderer.maxStdDev = CUTSCENE_POINT_STD_DEV + (fullStdDev - CUTSCENE_POINT_STD_DEV) * grow
+			})
+		}
+		for (const mesh of meshes) mesh.visible = false
+		for (const { mesh } of world.generated) mesh.opacity = 1
+		sparkRenderer.maxStdDev = fullStdDev
 		await new Promise(resolve => window.setTimeout(resolve, CUTSCENE_HOLD_MS))
 	} finally {
-		for (let i = 0; i < meshes.length; i++) {
-			meshes[i].material.emissive.setHex(saved[i].emissive)
-			meshes[i].material.emissiveIntensity = saved[i].intensity
-			for (const { edge, base } of saved[i].edges) edge.material.color.copy(base)
-			world.group.add(meshes[i]) // hand back with the original local pose
+		for (const { material, transparent, opacity, depthWrite } of fadeMats) {
+			material.transparent = transparent
+			material.opacity = opacity
+			material.depthWrite = depthWrite
+			material.needsUpdate = true
 		}
+		for (const { mesh } of world.generated) mesh.opacity = 1 // never leave pieces ghosted
+		sparkRenderer.maxStdDev = fullStdDev // never leave the renderer in point-cloud mode
+		for (const mesh of meshes) world.group.add(mesh) // hand back with the original local pose
 		rig.removeFromParent()
 		applyUiTab() // re-assert canonical View visibility whatever happened
 		document.body.classList.remove("cutscene") // CSS fades the UI back in
 	}
 }
-const cutsceneWhite = new THREE.Color(0xffffff)
 window.__wsPlayCutscene = playGenerationCutscene // devtools: replay the reveal on the current scene
 
 function scheduleSegmentationRetune() {
@@ -7297,12 +7332,18 @@ els.cutsceneRange?.addEventListener("input", () => {
 	if (els.cutsceneSecs) els.cutsceneSecs.textContent = `${(cutsceneBuildMs / 1000).toFixed(1)}s`
 })
 
+els.cutsceneFadeRange?.addEventListener("input", () => {
+	cutsceneFadeMs = Number(els.cutsceneFadeRange.value)
+	localStorage.setItem("worldsketch.cutsceneFadeMs", String(cutsceneFadeMs))
+	if (els.cutsceneFadeSecs) els.cutsceneFadeSecs.textContent = `${(cutsceneFadeMs / 1000).toFixed(1)}s`
+})
+
 els.cutscenePlay?.addEventListener("click", async () => {
 	if (generating || !world.generated.length) return
 	els.cutsceneStage?.classList.remove("visible")
 	els.cutsceneTrimPanel?.classList.remove("visible")
 	try {
-		await playGenerationCutscene({ keepCamera: true, pan: true, buildMs: cutsceneBuildMs })
+		await playGenerationCutscene({ keepCamera: true, pan: true, buildMs: cutsceneBuildMs, fadeMs: cutsceneFadeMs })
 	} finally {
 		showCutsceneStage() // back for another take
 	}
