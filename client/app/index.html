@@ -11,7 +11,7 @@
 	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=Newsreader:opsz,wght@6..72,400..600&display=swap" rel="stylesheet">
 	<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css">
 	<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-	<link rel="stylesheet" href="/styles.css?v=stage-2">
+	<link rel="stylesheet" href="/styles.css?v=stage-3">
 	<script type="importmap">
 	{
 		"imports": {
@@ -250,6 +250,11 @@
 		<span class="cutscene-stage-secs" id="cutscene_build_secs">3.0s</span>
 		<button class="cutscene-stage-play" id="cutscene_play_btn" type="button" title="Play the build-up reveal">Play</button>
 	</div>
-	<script type="module" src="/scripts/editor-entry.js?v=stage-2"></script>
+	<div class="cutscene-trim" id="cutscene_trim" aria-label="Splat trim">
+		<label><span class="trim-name">Yaw</span><input type="range" id="trim_yaw_range" min="-180" max="180" step="1" value="0" aria-label="Splat yaw"><span class="trim-val" id="trim_yaw_val">0&deg;</span></label>
+		<label><span class="trim-name">Scale</span><input type="range" id="trim_scale_range" min="0.5" max="1.5" step="0.01" value="1" aria-label="Splat scale"><span class="trim-val" id="trim_scale_val">1.00&times;</span></label>
+		<label><span class="trim-name">Height</span><input type="range" id="trim_y_range" min="-5" max="5" step="0.05" value="0" aria-label="Splat height"><span class="trim-val" id="trim_y_val">0.0</span></label>
+	</div>
+	<script type="module" src="/scripts/editor-entry.js?v=stage-3"></script>
 </body>
 </html>

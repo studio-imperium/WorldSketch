@@ -228,6 +228,13 @@ const els = {
 	cutsceneRange: document.getElementById("cutscene_build_range"),
 	cutsceneSecs: document.getElementById("cutscene_build_secs"),
 	cutscenePlay: document.getElementById("cutscene_play_btn"),
+	cutsceneTrimPanel: document.getElementById("cutscene_trim"),
+	trimYaw: document.getElementById("trim_yaw_range"),
+	trimYawVal: document.getElementById("trim_yaw_val"),
+	trimScale: document.getElementById("trim_scale_range"),
+	trimScaleVal: document.getElementById("trim_scale_val"),
+	trimY: document.getElementById("trim_y_range"),
+	trimYVal: document.getElementById("trim_y_val"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
 	downloadZip: document.getElementById("download_zip_btn"),
@@ -3506,14 +3513,57 @@ function startCutscenePan() {
 	requestAnimationFrame(frame)
 }
 
+// Trim sliders (side panel): a shared yaw/scale/height nudge about the scene
+// centre, baked into every generated piece's own transform — the reveal's
+// grounding rig reads mesh matrices, so it stays aligned with what's on screen.
+const cutsceneTrim = { yawDeg: 0, scale: 1, y: 0, pivot: null, bases: [] }
+
+function captureCutsceneTrimBase() {
+	const box = wholeSceneBox()
+	cutsceneTrim.yawDeg = 0
+	cutsceneTrim.scale = 1
+	cutsceneTrim.y = 0
+	cutsceneTrim.pivot = new THREE.Vector3((box.min.x + box.max.x) / 2, groundTopY, (box.min.z + box.max.z) / 2)
+	cutsceneTrim.bases = world.generated.map(({ mesh }) => {
+		mesh.updateMatrix()
+		return { mesh, matrix: mesh.matrix.clone() }
+	})
+}
+
+function applyCutsceneTrim() {
+	const { pivot, bases, yawDeg, scale, y } = cutsceneTrim
+	if (!pivot || !bases.length) return
+	const adj = new THREE.Matrix4().makeTranslation(pivot.x, pivot.y + y, pivot.z)
+		.multiply(new THREE.Matrix4().makeRotationY((yawDeg * Math.PI) / 180))
+		.multiply(new THREE.Matrix4().makeScale(scale, scale, scale))
+		.multiply(new THREE.Matrix4().makeTranslation(-pivot.x, -pivot.y, -pivot.z))
+	const composed = new THREE.Matrix4()
+	for (const { mesh, matrix } of bases) {
+		if (!mesh.parent) continue // piece got removed since staging
+		composed.copy(adj).multiply(matrix)
+		composed.decompose(mesh.position, mesh.quaternion, mesh.scale)
+	}
+}
+
+function syncCutsceneTrimLabels() {
+	if (els.trimYawVal) els.trimYawVal.textContent = `${Math.round(cutsceneTrim.yawDeg)}°`
+	if (els.trimScaleVal) els.trimScaleVal.textContent = `${cutsceneTrim.scale.toFixed(2)}×`
+	if (els.trimYVal) els.trimYVal.textContent = cutsceneTrim.y.toFixed(1)
+}
+
 // The staging bar shown after a cutscene upload: a build-time slider and a Play
-// button. It lives outside .ui so it survives hide-ui (see #cutscene_stage in CSS);
-// pressing O (which drops hide-ui) dismisses it along with everything else.
+// button, plus the trim panel on the side. Both live outside .ui so they survive
+// hide-ui; pressing O (which drops hide-ui) dismisses them along with everything else.
 function showCutsceneStage() {
 	if (!els.cutsceneStage) return
 	if (els.cutsceneRange) els.cutsceneRange.value = String(cutsceneBuildMs)
 	if (els.cutsceneSecs) els.cutsceneSecs.textContent = `${(cutsceneBuildMs / 1000).toFixed(1)}s`
+	if (els.trimYaw) els.trimYaw.value = String(cutsceneTrim.yawDeg)
+	if (els.trimScale) els.trimScale.value = String(cutsceneTrim.scale)
+	if (els.trimY) els.trimY.value = String(cutsceneTrim.y)
+	syncCutsceneTrimLabels()
 	els.cutsceneStage.classList.add("visible")
+	els.cutsceneTrimPanel?.classList.add("visible")
 }
 
 function cutsceneTween(ms, step) {
@@ -6707,6 +6757,7 @@ async function uploadSceneSplat(file, { cutscene = false } = {}) {
 			frameGeneratedSplats()
 			applyOverlayVisibility()
 			document.body.classList.add("hide-ui")
+			captureCutsceneTrimBase()
 			showCutsceneStage()
 		} else {
 			setUiTab("view")
@@ -7249,12 +7300,21 @@ els.cutsceneRange?.addEventListener("input", () => {
 els.cutscenePlay?.addEventListener("click", async () => {
 	if (generating || !world.generated.length) return
 	els.cutsceneStage?.classList.remove("visible")
+	els.cutsceneTrimPanel?.classList.remove("visible")
 	try {
 		await playGenerationCutscene({ keepCamera: true, pan: true, buildMs: cutsceneBuildMs })
 	} finally {
 		showCutsceneStage() // back for another take
 	}
 })
+
+for (const [input, key] of [[els.trimYaw, "yawDeg"], [els.trimScale, "scale"], [els.trimY, "y"]]) {
+	input?.addEventListener("input", () => {
+		cutsceneTrim[key] = Number(input.value)
+		syncCutsceneTrimLabels()
+		applyCutsceneTrim()
+	})
+}
 
 els.downloadPrims?.addEventListener("click", downloadPrimitives)
 
