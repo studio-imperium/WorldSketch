@@ -7184,6 +7184,14 @@ document.addEventListener("keydown", event => {
 		document.body.classList.toggle("hide-ui")
 		return
 	}
+	// "i" reveals/hides the camera bar (fly, shots, path playback, video export)
+	// without needing the devtools-open chrome.
+	if (!event.repeat && !event.ctrlKey && !event.metaKey && !event.altKey && key === "i") {
+		if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target?.isContentEditable) return
+		event.preventDefault()
+		document.body.classList.toggle("cam-bar-open")
+		return
+	}
 	if (event.key === "Escape") {
 		const settingsOpen = !els.settingsPopover.classList.contains("hidden")
 		if (els.colorPop && !els.colorPop.classList.contains("hidden")) toggleColorPop(false)

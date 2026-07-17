@@ -1913,8 +1913,9 @@ input[type="color"] {
 	position: absolute;
 	right: 1rem;
 	bottom: 1rem;
-	/* Dev chrome: hidden unless the browser devtools are open (renderer.js
-	   toggles body.devtools-open); Play tab still wins and hides it. */
+	/* Hidden unless the browser devtools are open (body.devtools-open) or the
+	   "i" key toggled it (body.cam-bar-open) — both set by renderer.js; the
+	   Play tab still wins and hides it. */
 	display: none;
 	align-items: center;
 	gap: 0.25rem;
@@ -1924,7 +1925,8 @@ input[type="color"] {
 	border-radius: 0.85rem;
 	box-shadow: 0 0.45rem 1.4rem rgba(20, 20, 15, 0.16), 0 0.08rem 0.18rem rgba(20, 20, 15, 0.12);
 }
-body.devtools-open:not(.tab-play) .cam-bar { display: flex; }
+body.devtools-open:not(.tab-play) .cam-bar,
+body.cam-bar-open:not(.tab-play) .cam-bar { display: flex; }
 
 .cam-btn {
 	border: 0;
