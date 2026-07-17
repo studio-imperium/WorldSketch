@@ -9,7 +9,7 @@ import {
 	getHuggingFaceAuth,
 	imageStepUsesCredits,
 	signOutHuggingFace,
-} from "/scripts/huggingface.js?v=subject-aware-1"
+} from "/scripts/huggingface.js?v=no-floor-1"
 import { createGenerationImageDebugger } from "/scripts/generation-debug-images.js?v=flux-preview-1"
 import { fitSplatToBox } from "/scripts/fit.js?v=wisp-cull-2"
 import { computeObjects } from "/scripts/geometry.js"
@@ -6284,6 +6284,7 @@ async function generateWorld(prompt) {
 			prompt,
 			image: capture.guide,
 			geometryImage: capture.semanticMap,
+			hasGround: Boolean(world.groundInkBounds()), // objects-only scenes get the no-floor prompt variant
 			useInferenceCredits,
 			signal: generationAbort.signal,
 			onProgress: (fraction, label) => showProgress(Math.round(fraction * 100), 100, label),

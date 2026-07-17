@@ -6,7 +6,7 @@ import {
 	getHuggingFaceAuth,
 	signOutHuggingFaceAuth,
 } from "/scripts/huggingface-auth.js"
-import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=subject-aware-1"
+import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=no-floor-1"
 import { friendlyHuggingFaceError } from "/scripts/huggingface-errors.js?v=hf-credits-1"
 import { imageEditRequest, spaceSupportsGeometry } from "/scripts/huggingface-image.js?v=style-ref-1"
 import { falQueueImageEdit, inferenceCreditImageRequest } from "/scripts/huggingface-provider.js?v=flux2-credits-1"
@@ -369,7 +369,7 @@ function loadStyleGuide() {
 	return styleGuidePromise
 }
 
-export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, useInferenceCredits = false, signal, onProgress, onImageReady }) {
+export async function generateSceneOnHuggingFace({ prompt, image, geometryImage = null, hasGround = true, useInferenceCredits = false, signal, onProgress, onImageReady }) {
 	// Multi-image Spaces take the aligned geometry map alongside the block-out;
 	// single-image routes (Kontext, the plain inference API) can't, so the
 	// prompt only mentions the geometry map on paths that actually send it.
@@ -382,7 +382,7 @@ export async function generateSceneOnHuggingFace({ prompt, image, geometryImage 
 	const useStyleReference = Boolean(styleImage)
 		&& (viaCredits ? config.inferenceProvider === "fal-ai" : spaceSupportsGeometry(config.imageSpace))
 	const editedImage = await detailImageOnHuggingFace({
-		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference, hasStyleReference: useStyleReference }),
+		prompt: sceneGenerationPrompt(prompt, { hasGeometryReference: useGeometryReference, hasStyleReference: useStyleReference, hasGround }),
 		image,
 		geometryImage: useGeometryReference ? geometryImage : null,
 		styleImage: useStyleReference ? styleImage : null,

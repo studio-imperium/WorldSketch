@@ -23,6 +23,27 @@ test("keeps the minimal prompt's invariants", () => {
 	assert.ok(prompt.trim().split(/\s+/).length < 200, "the minimal prompt must stay minimal (170 + the deblockify clause)")
 })
 
+test("objects-only scenes get the no-floor variant", () => {
+	const prompt = sceneGenerationPrompt("epic robot", { hasGround: false })
+	// no ground → no flat-ground block, no terrain-color line, and no
+	// building-shaped deblockify examples pulling subjects toward architecture
+	assert.ok(!prompt.includes("FLAT GROUND"))
+	assert.ok(!prompt.includes("painted ground colors become the terrain features"))
+	assert.ok(!prompt.includes("buildings get pitched roofs"))
+	for (const invariant of [
+		"Transform this block-out into: epic robot",
+		"add NO new objects: Only objects should be ones outlined in Image 1",
+		"rough massing stand-ins, not final shapes",
+		"creatures and machines get their organic or mechanical silhouettes",
+		"every block becomes the full-sized real thing it stands for",
+		"Never a miniature, toy, or diorama",
+		"every pixel outside the terrain chunk stays flat #000000",
+	]) assert.ok(prompt.includes(invariant), `missing no-floor invariant: ${invariant}`)
+	// style clause still rides when a style guide is attached
+	const withStyle = sceneGenerationPrompt("epic robot", { hasGround: false, hasStyleReference: true })
+	assert.ok(withStyle.includes("The final input image is a STYLE guide"))
+})
+
 test("mentions the style guide only when one actually rides along", () => {
 	const without = sceneGenerationPrompt("A fishing dock")
 	assert.ok(!without.includes("STYLE guide"))

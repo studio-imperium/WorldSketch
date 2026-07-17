@@ -1,4 +1,4 @@
-import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=subject-aware-1"
+import { sceneGenerationPrompt } from "/scripts/generation-prompt.js?v=no-floor-1"
 
 function geometryLine(hasGeometryReference) {
 	return hasGeometryReference
