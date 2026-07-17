@@ -186,6 +186,8 @@ body.is-generating #canvas canvas {
 .view-tab[data-view-tab="build"].active { background: var(--accent-fill); }
 .view-tab[data-view-tab="view"].active { background: var(--accent-fill); }
 .view-tab[data-view-tab="play"].active { background: var(--accent-fill); }
+/* Play is parked for now — the tab is hidden but all its wiring stays. */
+.view-tab[data-view-tab="play"] { display: none; }
 
 .view-tab:disabled {
 	cursor: default;
