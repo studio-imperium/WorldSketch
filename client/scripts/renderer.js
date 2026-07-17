@@ -224,6 +224,10 @@ const els = {
 	viewRawSplat: document.getElementById("view_raw_splat_input"),
 	uploadSceneSplat: document.getElementById("upload_scene_splat_input"),
 	cutsceneSplat: document.getElementById("cutscene_splat_input"),
+	cutsceneStage: document.getElementById("cutscene_stage"),
+	cutsceneRange: document.getElementById("cutscene_build_range"),
+	cutsceneSecs: document.getElementById("cutscene_build_secs"),
+	cutscenePlay: document.getElementById("cutscene_play_btn"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
 	downloadZip: document.getElementById("download_zip_btn"),
@@ -3474,6 +3478,44 @@ const CUTSCENE_BUILD_MS = 700
 const CUTSCENE_FLASH_MS = 200
 const CUTSCENE_HOLD_MS = 200 // beat on the fresh splats before the UI returns
 
+// Staged cutscene (the upload flow): the build-up length comes from a slider shown
+// after the upload lands, remembered across sessions. Generation reveals keep the
+// short CUTSCENE_BUILD_MS default.
+let cutsceneBuildMs = (() => {
+	const stored = Number(localStorage.getItem("worldsketch.cutsceneBuildMs"))
+	return Number.isFinite(stored) && stored >= 200 ? stored : 3000
+})()
+
+// Show-off orbit for the staged cutscene: starts the moment the build-up begins and
+// keeps circling — one full lap a minute, pretty dang gradual — until the user grabs
+// the camera (any pointer press) or something else takes the camera over.
+let cutscenePanToken = 0
+function startCutscenePan() {
+	const token = ++cutscenePanToken
+	window.addEventListener("pointerdown", () => {
+		if (token === cutscenePanToken) cutscenePanToken++
+	}, { once: true, capture: true })
+	let last = performance.now()
+	const frame = now => {
+		if (token !== cutscenePanToken || camMode !== "orbit") return
+		orbit.theta -= ((now - last) / 60000) * Math.PI * 2
+		last = now
+		updateCamera()
+		requestAnimationFrame(frame)
+	}
+	requestAnimationFrame(frame)
+}
+
+// The staging bar shown after a cutscene upload: a build-time slider and a Play
+// button. It lives outside .ui so it survives hide-ui (see #cutscene_stage in CSS);
+// pressing O (which drops hide-ui) dismisses it along with everything else.
+function showCutsceneStage() {
+	if (!els.cutsceneStage) return
+	if (els.cutsceneRange) els.cutsceneRange.value = String(cutsceneBuildMs)
+	if (els.cutsceneSecs) els.cutsceneSecs.textContent = `${(cutsceneBuildMs / 1000).toFixed(1)}s`
+	els.cutsceneStage.classList.add("visible")
+}
+
 function cutsceneTween(ms, step) {
 	return new Promise(resolve => {
 		const start = performance.now()
@@ -3536,7 +3578,8 @@ function cutsceneGroundingRig() {
 
 // `keepCamera: true` leaves the orbit exactly as the user staged it (no reframe/zoom)
 // — the cutscene-splat devtools flow uses it so a prepared shot survives the reveal.
-async function playGenerationCutscene({ keepCamera = false } = {}) {
+// `pan: true` adds the slow staged-cutscene orbit; `buildMs` overrides the build-up length.
+async function playGenerationCutscene({ keepCamera = false, pan = false, buildMs = CUTSCENE_BUILD_MS } = {}) {
 	const blocks = world.allBlockoutMeshes()
 	if (window.matchMedia("(prefers-reduced-motion: reduce)").matches || !blocks.length || !world.generated.length) {
 		setUiTab("view")
@@ -3569,14 +3612,15 @@ async function playGenerationCutscene({ keepCamera = false } = {}) {
 			.map(edge => ({ edge, base: edge.material.color.clone() })),
 	}))
 	try {
+		if (pan) startCutscenePan()
 		// Bottom-up build, elapsed-fraction paced so it always lands in
-		// CUTSCENE_BUILD_MS no matter how many blocks there are — no per-tick
+		// buildMs no matter how many blocks there are — no per-tick
 		// minimum, or a small build (a handful of blocks) sprints in ~100ms.
 		const start = performance.now()
 		let shown = 0
 		while (shown < meshes.length) {
 			const elapsed = performance.now() - start
-			const due = Math.min(meshes.length, Math.ceil((elapsed / CUTSCENE_BUILD_MS) * meshes.length))
+			const due = Math.min(meshes.length, Math.ceil((elapsed / buildMs) * meshes.length))
 			while (shown < due) meshes[shown++].visible = true
 			await new Promise(resolve => window.setTimeout(resolve, 16))
 		}
@@ -6576,33 +6620,100 @@ async function uploadSceneSplat(file, { cutscene = false } = {}) {
 		const cfg = await getConfig()
 		applyRuntimeConfig(cfg)
 		clearRawSplatPreview()
+
+		// A .zip bundles the blocks WITH the splat: one build-geometry JSON (primitives
+		// + floor paint) and one .splat/.ply. The blocks are applied first so the splat
+		// is fitted to them, not to whatever block-out happened to be open.
+		let splatName = file.name
+		let bytes
+		if (/\.zip$/i.test(file.name)) {
+			showProgress(0, 1, "Reading scene ZIP...")
+			const raw = new Uint8Array(await file.arrayBuffer())
+			const zipped = await new Promise((resolve, reject) => unzip(raw, (err, data) => err ? reject(err) : resolve(data)))
+			const entries = Object.entries(zipped)
+				.filter(([name]) => !name.startsWith("__MACOSX/") && !name.split("/").pop().startsWith("."))
+			let geometryBytes = null
+			for (const [name, data] of entries) {
+				if (!/\.json$/i.test(name)) continue
+				try {
+					if (Array.isArray(JSON.parse(new TextDecoder().decode(data))?.primitives)) {
+						geometryBytes = data
+						break
+					}
+				} catch { /* some other JSON — keep looking */ }
+			}
+			const splatEntry = entries.find(([name]) => /\.(splat|ply)$/i.test(name))
+			if (!geometryBytes) throw new Error("ZIP has no blocks JSON (expected a file with a primitives array)")
+			if (!splatEntry) throw new Error("ZIP has no .splat or .ply scene splat")
+			// Like a history restore, the imported build gets its own frame so whatever
+			// block-out was open survives untouched.
+			snapshotActiveBuildFrame()
+			pushBuildFrame()
+			if (!await applyPrimitives(new File([geometryBytes], "blocks.json", { type: "application/json" }))) {
+				throw new Error("Could not apply the ZIP's blocks")
+			}
+			splatName = splatEntry[0].split("/").pop()
+			bytes = splatEntry[1]
+		} else {
+			bytes = new Uint8Array(await file.arrayBuffer())
+		}
+
 		beginNewSplatFrame()
 		sceneSplat = null
 		sceneSession = null
 
 		showProgress(0, 1, "Loading scene splat...")
-		const bytes = new Uint8Array(await file.arrayBuffer())
 		const hasGround = Boolean(world.groundInkBounds())
-		await seatScene(bytes.slice(), wholeSceneBox(), {
-			yawDeg: sceneFit.yawDeg,
+		const box = wholeSceneBox()
+
+		// Auto-orient: generated splats come back with a random quarter-turn and/or
+		// mirror, so run the same yaw×mirror estimator as a session restore. It reads
+		// the 32-byte .splat layout — .ply uploads keep the config default. forceYaw/
+		// forceMirror URL params override both, as everywhere else.
+		let yawDeg = sceneFit.yawDeg
+		let mirrorZ = false
+		const params = new URLSearchParams(location.search)
+		const forcedYaw = params.get("forceYaw")
+		if (forcedYaw != null && Number.isFinite(Number(forcedYaw))) {
+			yawDeg = Number(forcedYaw)
+			mirrorZ = params.get("forceMirror") === "1"
+		} else if (/\.splat$/i.test(splatName)) {
+			showProgress(0, 1, "Orienting scene splat...")
+			const captureAngles = { theta: FRONT_THETA, phi: FRONT_PHI }
+			const sourcePrimitives = hasGround ? world.allBlockoutMeshes() : [...world.primitives]
+			let guide = null
+			try { guide = (await captureWorldQuiet(renderer, scene, world, box, null, captureAngles)).guide }
+			catch (error) { console.warn("capture upload yaw guide:", error) }
+			const estimate = await estimateSceneYaw(bytes, sourcePrimitives, guide, captureAngles)
+			yawDeg = estimate?.yawDeg ?? yawDeg
+			mirrorZ = estimate?.mirrorZ ?? false
+		}
+
+		await seatScene(bytes.slice(), box, {
+			yawDeg,
+			mirrorZ,
 			yOffset: sceneFit.yOffset,
-			fileName: file.name,
+			fileName: splatName,
 		})
 		sceneSplat = bytes
-		sceneSession = { hasGround, yawDeg: sceneFit.yawDeg, mirrorZ: false }
+		sceneSession = { hasGround, yawDeg, mirrorZ }
 		try { segmentSceneSplat(hasGround) } catch (error) { console.warn("segment uploaded scene:", error) }
 		world.state = "generated"
 		splatting = false
 		if (cutscene) {
+			// Don't play yet: hide the UI and hand over to the staging bar (slider +
+			// Play), so the build-up length can be dialed in first and replayed.
+			setUiTab("view")
+			frameGeneratedSplats()
 			applyOverlayVisibility()
 			document.body.classList.add("hide-ui")
-			await playGenerationCutscene({ keepCamera: true })
+			showCutsceneStage()
 		} else {
 			setUiTab("view")
 			frameGeneratedSplats()
 			applyOverlayVisibility()
 		}
-		setStatus(cutscene ? `Cutscene played on ${file.name} — press O to bring the UI back` : `Loaded ${file.name}`)
+		setStatus(cutscene ? `Staged ${file.name} — set the build time and press Play (O brings the UI back)` : `Loaded ${file.name}`)
 		showProgress(1, 1, "Done")
 		window.setTimeout(hideProgress, 1000)
 	} catch (error) {
@@ -7127,6 +7238,22 @@ els.cutsceneSplat?.addEventListener("change", async event => {
 	toggleSettings(false)
 	await uploadSceneSplat(event.target.files[0], { cutscene: true })
 	event.target.value = "" // let the same file be re-selected
+})
+
+els.cutsceneRange?.addEventListener("input", () => {
+	cutsceneBuildMs = Number(els.cutsceneRange.value)
+	localStorage.setItem("worldsketch.cutsceneBuildMs", String(cutsceneBuildMs))
+	if (els.cutsceneSecs) els.cutsceneSecs.textContent = `${(cutsceneBuildMs / 1000).toFixed(1)}s`
+})
+
+els.cutscenePlay?.addEventListener("click", async () => {
+	if (generating || !world.generated.length) return
+	els.cutsceneStage?.classList.remove("visible")
+	try {
+		await playGenerationCutscene({ keepCamera: true, pan: true, buildMs: cutsceneBuildMs })
+	} finally {
+		showCutsceneStage() // back for another take
+	}
 })
 
 els.downloadPrims?.addEventListener("click", downloadPrimitives)

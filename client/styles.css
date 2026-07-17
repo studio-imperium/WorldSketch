@@ -2068,3 +2068,38 @@ body.is-cam-playing #canvas canvas {
 body.hide-ui > :not(#canvas) {
 	display: none !important;
 }
+
+/* Staged-cutscene bar (build-time slider + Play, renderer.js showCutsceneStage).
+   It only ever appears WITH the UI hidden, so it must out-rank the hide-ui rule
+   above; dropping hide-ui (press O) dismisses it too. */
+#cutscene_stage { display: none; }
+body.hide-ui > #cutscene_stage.visible {
+	display: flex !important;
+	position: absolute;
+	left: 50%;
+	top: 1.5rem;
+	transform: translateX(-50%);
+	align-items: center;
+	gap: 0.7rem;
+	padding: 0.55rem 1rem;
+	background: var(--white);
+	border: 1px solid rgba(20, 20, 15, 0.08);
+	border-radius: 9999px;
+	box-shadow: 0 0.45rem 1.4rem rgba(20, 20, 15, 0.16), 0 0.08rem 0.18rem rgba(20, 20, 15, 0.12);
+	font-size: 0.85rem;
+	color: var(--ink-faint);
+}
+#cutscene_stage input[type="range"] { width: 10rem; }
+.cutscene-stage-secs {
+	min-width: 2.9rem;
+	text-align: right;
+	font-variant-numeric: tabular-nums;
+}
+.cutscene-stage-play {
+	border: 0;
+	cursor: pointer;
+	padding: 0.35rem 1rem;
+	border-radius: 9999px;
+	background: var(--accent-fill);
+	font-weight: 600;
+}

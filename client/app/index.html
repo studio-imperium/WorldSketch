@@ -11,7 +11,7 @@
 	<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400..700&family=Newsreader:opsz,wght@6..72,400..600&display=swap" rel="stylesheet">
 	<link href="https://cdn.jsdelivr.net/npm/daisyui@5" rel="stylesheet" type="text/css">
 	<script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
-	<link rel="stylesheet" href="/styles.css?v=cam-key-1">
+	<link rel="stylesheet" href="/styles.css?v=stage-2">
 	<script type="importmap">
 	{
 		"imports": {
@@ -134,12 +134,12 @@
 				<label class="settings-item" id="upload_scene_splat_label" title="Upload one complete-scene .splat/.ply file and fit it to the current block-out">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2 -2v-2"></path><path d="M7 9l5 -5l5 5"></path><path d="M12 4l0 12"></path></svg>
 					<span>Upload + fit scene</span>
-					<input type="file" id="upload_scene_splat_input" accept=".splat,.ply" hidden>
+					<input type="file" id="upload_scene_splat_input" accept=".splat,.ply,.zip" hidden>
 				</label>
-				<label class="settings-item" id="cutscene_splat_label" title="Upload one complete-scene .splat/.ply file, fit it to the current block-out, then hide all UI and play the generation reveal (press O to bring the UI back)">
+				<label class="settings-item" id="cutscene_splat_label" title="Upload a complete-scene .splat/.ply — or a .zip with the blocks JSON and the splat together — fit it to the block-out, then hide all UI and play the generation reveal (press O to bring the UI back)">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 4h16a1 1 0 0 1 1 1v14a1 1 0 0 1 -1 1h-16a1 1 0 0 1 -1 -1v-14a1 1 0 0 1 1 -1"></path><path d="M8 4v16"></path><path d="M16 4v16"></path><path d="M4 8h4"></path><path d="M4 16h4"></path><path d="M16 8h4"></path><path d="M16 16h4"></path></svg>
 					<span>Cutscene splat</span>
-					<input type="file" id="cutscene_splat_input" accept=".splat,.ply" hidden>
+					<input type="file" id="cutscene_splat_input" accept=".splat,.ply,.zip" hidden>
 				</label>
 				<button class="settings-item" id="download_prims_btn" title="Save the block-out primitives to a JSON file">
 					<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 4h10l4 4v10a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2v-12a2 2 0 0 1 2 -2"></path><path d="M12 14m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0"></path><path d="M14 4l0 4l-6 0l0 -4"></path></svg>
@@ -244,6 +244,12 @@
 		<div class="fly-hint hidden" id="play_hint">WASD move &middot; Space jump &middot; Shift sprint &middot; drag look &middot; scroll zoom &middot; Esc exit</div>
 		<p class="status-toast hidden" id="status" role="alert" title="Dismiss"></p>
 	</div>
-	<script type="module" src="/scripts/editor-entry.js?v=cam-key-1"></script>
+	<div class="cutscene-stage" id="cutscene_stage" aria-label="Cutscene staging">
+		<span class="cutscene-stage-label">Build time</span>
+		<input type="range" id="cutscene_build_range" min="500" max="15000" step="250" value="3000" aria-label="Cutscene build time">
+		<span class="cutscene-stage-secs" id="cutscene_build_secs">3.0s</span>
+		<button class="cutscene-stage-play" id="cutscene_play_btn" type="button" title="Play the build-up reveal">Play</button>
+	</div>
+	<script type="module" src="/scripts/editor-entry.js?v=stage-2"></script>
 </body>
 </html>

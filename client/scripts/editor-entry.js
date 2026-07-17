@@ -5,7 +5,7 @@ try {
 	const runtimeConfig = await getConfig()
 	configureHuggingFaceAuth(runtimeConfig?.generation)
 	if (!getHuggingFaceAuth().signedIn) location.replace("/")
-	else await import("/scripts/renderer.js?v=cam-key-1")
+	else await import("/scripts/renderer.js?v=stage-2")
 } catch (error) {
 	console.error("Editor startup failed:", error)
 	location.replace("/")
