@@ -230,11 +230,13 @@ function photoFromCloud(points) {
 	return { grid: [...grid], cover: [...cover], size: G }
 }
 
-// Mirror-symmetric geometry, asymmetric colours: red pillar at +Z, blue at −Z. Only
+// Mirror-symmetric geometry, asymmetric colours: a neutral slab (fills the photo grid
+// like a real scene's ground does) with a red pillar at +Z and a blue one at −Z. Only
 // colour evidence can tell the mirrored seating from the straight one.
 const MIRROR_BLOCKS = [
-	{ pos: [0, 1, 8], scale: [2, 2, 2], hex: "c82828" },
-	{ pos: [0, 1, -8], scale: [2, 2, 2], hex: "2828c8" },
+	{ pos: [0, 0.25, 0], scale: [10, 0.5, 20], hex: "909090" },
+	{ pos: [0, 1.5, 8], scale: [3, 3, 3], hex: "c82828" },
+	{ pos: [0, 1.5, -8], scale: [3, 3, 3], hex: "2828c8" },
 ]
 const bakeMirrorZ = points => points.map(([x, y, z, r, g, b]) => [x, y, -z, r, g, b])
 
