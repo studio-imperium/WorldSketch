@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<title>Walking Fortress Blockout</title>
+	<style>
+		html, body { margin: 0; width: 1024px; height: 1024px; overflow: hidden; background: #000; }
+		canvas { display: block; width: 1024px; height: 1024px; }
+	</style>
+</head>
+<body>
+	<script type="module">
+		import * as THREE from "/client/lib/three.module.min.js"
+
+		const response = await fetch("./walking-fortress.json")
+		const data = await response.json()
+		const scene = new THREE.Scene()
+		scene.background = new THREE.Color(0x000000)
+
+		const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true })
+		renderer.setPixelRatio(1)
+		renderer.setSize(1024, 1024, false)
+		renderer.outputColorSpace = THREE.SRGBColorSpace
+		renderer.toneMapping = THREE.ACESFilmicToneMapping
+		renderer.toneMappingExposure = 1.25
+		document.body.append(renderer.domElement)
+
+		scene.add(new THREE.HemisphereLight(0xffffff, 0x26323a, 2.3))
+		const sun = new THREE.DirectionalLight(0xffffff, 3.7)
+		sun.position.set(10, 18, 12)
+		scene.add(sun)
+		const warm = new THREE.DirectionalLight(0xf3b96f, 1.2)
+		warm.position.set(-8, 9, 10)
+		scene.add(warm)
+
+		const world = new THREE.Group()
+		scene.add(world)
+		const geometry = new THREE.BoxGeometry(1, 1, 1)
+		for (const primitive of data.primitives) {
+			const material = new THREE.MeshStandardMaterial({
+				color: primitive.color,
+				roughness: 0.82,
+				metalness: 0.03,
+				polygonOffset: true,
+				polygonOffsetFactor: 1,
+				polygonOffsetUnits: 1,
+			})
+			const mesh = new THREE.Mesh(geometry, material)
+			mesh.position.fromArray(primitive.position)
+			mesh.rotation.fromArray(primitive.rotation)
+			mesh.scale.fromArray(primitive.scale)
+			const edge = new THREE.LineSegments(
+				new THREE.EdgesGeometry(geometry, 1),
+				new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.78 }),
+			)
+			mesh.add(edge)
+			world.add(mesh)
+		}
+
+		const bounds = new THREE.Box3().setFromObject(world)
+		const center = bounds.getCenter(new THREE.Vector3())
+		const size = bounds.getSize(new THREE.Vector3())
+		const radius = Math.max(0.3, 0.5 * Math.hypot(size.x, size.y, size.z))
+		const distance = Math.max(8, radius * 6)
+		const theta = Math.PI / 4
+		const phi = Math.acos(1 / Math.sqrt(3))
+		const camera = new THREE.OrthographicCamera(-radius, radius, radius, -radius, Math.max(0.01, distance - radius * 4), distance + radius * 4)
+		camera.position.copy(center).add(new THREE.Vector3().setFromSpherical(new THREE.Spherical(distance, phi, theta)))
+		camera.lookAt(center)
+		camera.updateMatrixWorld(true)
+
+		const corner = new THREE.Vector3()
+		let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+		for (let i = 0; i < 8; i++) {
+			corner.set(
+				i & 1 ? bounds.max.x : bounds.min.x,
+				i & 2 ? bounds.max.y : bounds.min.y,
+				i & 4 ? bounds.max.z : bounds.min.z,
+			).applyMatrix4(camera.matrixWorldInverse)
+			minX = Math.min(minX, corner.x)
+			maxX = Math.max(maxX, corner.x)
+			minY = Math.min(minY, corner.y)
+			maxY = Math.max(maxY, corner.y)
+		}
+		const half = 0.5 * Math.max(maxX - minX, maxY - minY) * 1.06
+		const cx = (minX + maxX) / 2
+		const cy = (minY + maxY) / 2
+		camera.left = cx - half
+		camera.right = cx + half
+		camera.top = cy + half
+		camera.bottom = cy - half
+		camera.updateProjectionMatrix()
+
+		renderer.render(scene, camera)
+		document.documentElement.dataset.ready = "true"
+	</script>
+</body>
+</html>

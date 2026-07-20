@@ -172,7 +172,6 @@ try {
 } catch {}
 
 const els = {
-	status: document.getElementById("status"),
 	chatDock: document.querySelector(".chat-dock"),
 	progress: document.getElementById("progress"),
 	progressTrack: document.getElementById("progress_track"),
@@ -237,6 +236,9 @@ const els = {
 	trimScaleVal: document.getElementById("trim_scale_val"),
 	trimY: document.getElementById("trim_y_range"),
 	trimYVal: document.getElementById("trim_y_val"),
+	trimFlipX: document.getElementById("trim_flip_x"),
+	trimFlipY: document.getElementById("trim_flip_y"),
+	trimFlipZ: document.getElementById("trim_flip_z"),
 	downloadPrims: document.getElementById("download_prims_btn"),
 	uploadPrims: document.getElementById("upload_prims_input"),
 	downloadZip: document.getElementById("download_zip_btn"),
@@ -1228,8 +1230,6 @@ function bindPickerDrag(el, apply) {
 // move existing splats (regenerate to reflect them), and View has its own lasso/group
 // transform workflow that acts on the splat meshes alone.
 
-const emptyViewHint = "Nothing generated yet — hit Generate and the View tab fills in"
-
 function setUiTab(tab) {
 	if (tab === uiTab) return
 	if (tab === "play" && rawSplatPreview) return // raw inspection is orbit-only, like fly
@@ -1237,8 +1237,6 @@ function setUiTab(tab) {
 	uiTab = tab
 	if (tab !== "build") selectPrimitive(null) // View has no block-out selection / gizmo
 	if (tab !== "view") deselectSplat() // splat selection is a View-only thing
-	if (tab === "view" && !world.generated.length) setStatus(emptyViewHint)
-	else if (els.status.textContent === emptyViewHint) setStatus("")
 	if (tab === "play") enterPlay()
 	else if (wasPlay) exitPlay()
 	applyUiTab()
@@ -3054,10 +3052,10 @@ async function restoreFramesState() {
 // --- Generation -------------------------------------------------------------
 
 function setStatus(message) {
-	const text = String(message ?? "")
-	// Server errors can be whole HTML pages — keep the toast a toast.
-	els.status.textContent = text.length > 220 ? text.slice(0, 220) + "…" : text
-	els.status.classList.toggle("hidden", !text)
+	// Status updates stay available for diagnostics without interrupting the canvas
+	// with transient notification popups.
+	const text = String(message ?? "").trim()
+	if (text) console.info("[status]", text)
 }
 
 function showProgress(done, total, label) {
@@ -3521,21 +3519,41 @@ function startCutscenePan() {
 	requestAnimationFrame(frame)
 }
 
-// Trim sliders (side panel): a shared yaw/scale/height nudge about the scene
+// Trim controls (side panel): a shared yaw/scale/height nudge about the scene
 // centre, baked into every generated piece's own transform — the reveal's
 // grounding rig reads mesh matrices, so it stays aligned with what's on screen.
-const cutsceneTrim = { yawDeg: 0, scale: 1, y: 0, pivot: null, bases: [] }
+const cutsceneTrim = {
+	yawDeg: 0,
+	scale: 1,
+	y: 0,
+	flips: { x: false, y: false, z: false },
+	pivot: null,
+	bases: [],
+}
+let cutsceneFlipBusy = false
+
+function snapshotCutsceneTrimMeshes() {
+	return world.generated.map(({ mesh }) => {
+		mesh.updateMatrix()
+		return { mesh, matrix: mesh.matrix.clone() }
+	})
+}
 
 function captureCutsceneTrimBase() {
 	const box = wholeSceneBox()
 	cutsceneTrim.yawDeg = 0
 	cutsceneTrim.scale = 1
 	cutsceneTrim.y = 0
+	cutsceneTrim.flips = { x: false, y: false, z: false }
 	cutsceneTrim.pivot = new THREE.Vector3((box.min.x + box.max.x) / 2, groundTopY, (box.min.z + box.max.z) / 2)
-	cutsceneTrim.bases = world.generated.map(({ mesh }) => {
-		mesh.updateMatrix()
-		return { mesh, matrix: mesh.matrix.clone() }
-	})
+	cutsceneTrim.bases = snapshotCutsceneTrimMeshes()
+}
+
+function restoreCutsceneTrimBaseTransforms() {
+	for (const { mesh, matrix } of cutsceneTrim.bases) {
+		if (!mesh.parent) continue
+		matrix.decompose(mesh.position, mesh.quaternion, mesh.scale)
+	}
 }
 
 function applyCutsceneTrim() {
@@ -3571,6 +3589,9 @@ function showCutsceneStage() {
 	if (els.trimYaw) els.trimYaw.value = String(cutsceneTrim.yawDeg)
 	if (els.trimScale) els.trimScale.value = String(cutsceneTrim.scale)
 	if (els.trimY) els.trimY.value = String(cutsceneTrim.y)
+	if (els.trimFlipX) els.trimFlipX.checked = cutsceneTrim.flips.x
+	if (els.trimFlipY) els.trimFlipY.checked = cutsceneTrim.flips.y
+	if (els.trimFlipZ) els.trimFlipZ.checked = cutsceneTrim.flips.z
 	syncCutsceneTrimLabels()
 	els.cutsceneStage.classList.add("visible")
 	els.cutsceneTrimPanel?.classList.add("visible")
@@ -3748,7 +3769,7 @@ function scheduleSegmentationRetune() {
 	segmentationTuneTimer = window.setTimeout(() => { retuneCurrentSceneSegmentation() }, 350)
 }
 
-// Dev-panel scene flips: mirror the fitted splat pieces about the seat centre
+// Scene flips (developer panel and cutscene trim): mirror the fitted splat pieces about the seat centre
 // to eyeball orientation problems (Tripo's random mirroring) without a re-fit.
 // Spark drops the mirror sign of a negative mesh scale (the seating pipeline
 // bakes mirrorZ into the gaussians for the same reason), so each flip REBUILDS
@@ -3760,26 +3781,36 @@ async function applySceneFlip(axis) {
 	if (!world.generated.length) return
 	deselectSplat() // the rebuild replaces mesh identities
 	const center = wholeSceneBox().getCenter(new THREE.Vector3())
-	const local = new THREE.Vector3()
-	const p = new THREE.Vector3()
-	const q = new THREE.Quaternion()
-	for (const record of [...world.generated]) {
-		const old = record.mesh
-		if (!old.packedSplats?.forEachSplat) continue
-		old.updateMatrix()
-		local.copy(center).applyMatrix4(old.matrix.clone().invert()) // mirror plane in the mesh's own frame
-		const mirrored = new SplatMesh({
-			constructSplats: splats => {
-				old.packedSplats.forEachSplat((_i, ctr, scales, quaternion, opacity, color) => {
-					p.copy(ctr)
-					if (axis === "x") { p.x = 2 * local.x - p.x; q.set(quaternion.x, -quaternion.y, -quaternion.z, quaternion.w) }
-					else if (axis === "y") { p.y = 2 * local.y - p.y; q.set(-quaternion.x, quaternion.y, -quaternion.z, quaternion.w) }
-					else { p.z = 2 * local.z - p.z; q.set(-quaternion.x, -quaternion.y, quaternion.z, quaternion.w) }
-					splats.pushSplat(p, scales, q, opacity, color)
-				})
-			},
-		})
-		await mirrored.initialized
+	const replacements = []
+	// Build every replacement before swapping any live mesh so a failed checkbox
+	// toggle cannot leave only part of a segmented scene reflected.
+	try {
+		for (const record of [...world.generated]) {
+			const old = record.mesh
+			if (!old.packedSplats?.forEachSplat) continue
+			old.updateMatrix()
+			const local = center.clone().applyMatrix4(old.matrix.clone().invert()) // mirror plane in the mesh's own frame
+			const p = new THREE.Vector3()
+			const q = new THREE.Quaternion()
+			const mirrored = new SplatMesh({
+				constructSplats: splats => {
+					old.packedSplats.forEachSplat((_i, ctr, scales, quaternion, opacity, color) => {
+						p.copy(ctr)
+						if (axis === "x") { p.x = 2 * local.x - p.x; q.set(quaternion.x, -quaternion.y, -quaternion.z, quaternion.w) }
+						else if (axis === "y") { p.y = 2 * local.y - p.y; q.set(-quaternion.x, quaternion.y, -quaternion.z, quaternion.w) }
+						else { p.z = 2 * local.z - p.z; q.set(-quaternion.x, -quaternion.y, quaternion.z, quaternion.w) }
+						splats.pushSplat(p, scales, q, opacity, color)
+					})
+				},
+			})
+			replacements.push({ record, old, mirrored })
+			await mirrored.initialized
+		}
+	} catch (error) {
+		for (const { mirrored } of replacements) mirrored.dispose?.()
+		throw error
+	}
+	for (const { record, old, mirrored } of replacements) {
 		mirrored.position.copy(old.position)
 		mirrored.quaternion.copy(old.quaternion)
 		mirrored.scale.copy(old.scale)
@@ -7271,7 +7302,6 @@ els.shotAdd?.addEventListener("click", addCamShot)
 els.shotPlay?.addEventListener("click", playCamPath)
 els.shotExport?.addEventListener("click", exportCamPath)
 
-els.status?.addEventListener("click", () => setStatus("")) // the error toast dismisses on click
 renderPalette()
 els.brushSlider.addEventListener("input", () => applyBrushScale(Number(els.brushSlider.value)))
 
@@ -7339,7 +7369,7 @@ els.cutsceneFadeRange?.addEventListener("input", () => {
 })
 
 els.cutscenePlay?.addEventListener("click", async () => {
-	if (generating || !world.generated.length) return
+	if (generating || cutsceneFlipBusy || !world.generated.length) return
 	els.cutsceneStage?.classList.remove("visible")
 	els.cutsceneTrimPanel?.classList.remove("visible")
 	try {
@@ -7354,6 +7384,35 @@ for (const [input, key] of [[els.trimYaw, "yawDeg"], [els.trimScale, "scale"], [
 		cutsceneTrim[key] = Number(input.value)
 		syncCutsceneTrimLabels()
 		applyCutsceneTrim()
+	})
+}
+
+const cutsceneFlipInputs = [[els.trimFlipX, "x"], [els.trimFlipY, "y"], [els.trimFlipZ, "z"]]
+for (const [input, axis] of cutsceneFlipInputs) {
+	input?.addEventListener("change", async () => {
+		if (cutsceneFlipBusy || input.checked === cutsceneTrim.flips[axis]) return
+		const previous = cutsceneTrim.flips[axis]
+		const next = input.checked
+		cutsceneFlipBusy = true
+		for (const [other] of cutsceneFlipInputs) if (other) other.disabled = true
+		if (els.cutscenePlay) els.cutscenePlay.disabled = true
+		try {
+			// Reflect the untrimmed splat data, then reapply the live trim so flipping
+			// an axis never resets the staged yaw, scale, or height.
+			restoreCutsceneTrimBaseTransforms()
+			await applySceneFlip(axis)
+			cutsceneTrim.flips[axis] = next
+			cutsceneTrim.bases = snapshotCutsceneTrimMeshes()
+			applyCutsceneTrim()
+		} catch (error) {
+			input.checked = previous
+			applyCutsceneTrim()
+			console.warn(`cutscene ${axis.toUpperCase()} flip failed:`, error)
+		} finally {
+			cutsceneFlipBusy = false
+			for (const [other] of cutsceneFlipInputs) if (other) other.disabled = false
+			if (els.cutscenePlay) els.cutscenePlay.disabled = false
+		}
 	})
 }
 

@@ -320,26 +320,6 @@ body.tab-view canvas.is-splat-rotate {
 	stroke-width: 2;
 }
 
-/* Errors DO need a surface (a failed generation used to die silently into the console):
-   the status line floats as a dismissable toast under the tabs, outside the prompt bar.
-   NOTE: not named `.status` — daisyUI v5 ships a Status-dot component on that class. */
-.status-toast {
-	position: absolute;
-	top: 4.4rem;
-	left: 50%;
-	transform: translateX(-50%);
-	margin: 0;
-	padding: 0.5rem 1rem;
-	border-radius: 0.85rem;
-	background: rgba(20, 20, 15, 0.85);
-	color: #fff;
-	font-size: 0.82rem;
-	max-width: min(46rem, 80vw);
-	text-align: center;
-	cursor: pointer;
-	z-index: 5;
-}
-
 /* Build and View keep independent frame lists in one compact DaisyUI navigator. */
 .frames-panel {
 	position: absolute;
@@ -2104,7 +2084,7 @@ body.hide-ui > #cutscene_stage.visible {
 	font-weight: 600;
 }
 
-/* Trim panel (yaw / scale / height of the seated splat) — same hide-ui exception
+/* Trim panel (yaw / scale / height / axis flips of the seated splat) — same hide-ui exception
    and dismissal rules as the staging bar above. */
 #cutscene_trim { display: none; }
 body.hide-ui > #cutscene_trim.visible {
@@ -2135,3 +2115,10 @@ body.hide-ui > #cutscene_trim.visible {
 	text-align: right;
 	font-variant-numeric: tabular-nums;
 }
+#cutscene_trim .trim-flips {
+	display: flex;
+	align-items: center;
+	gap: 0.65rem;
+	padding-top: 0.1rem;
+}
+#cutscene_trim .trim-flips label { gap: 0.25rem; }

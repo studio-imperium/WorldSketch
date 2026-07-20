@@ -242,7 +242,6 @@
 		</div>
 		<div class="fly-hint hidden" id="fly_hint">WASD move &middot; mouse look &middot; Space / Q&ndash;E up-down &middot; Shift boost &middot; scroll speed &middot; Esc exit</div>
 		<div class="fly-hint hidden" id="play_hint">WASD move &middot; Space jump &middot; Shift sprint &middot; drag look &middot; scroll zoom &middot; Esc exit</div>
-		<p class="status-toast hidden" id="status" role="alert" title="Dismiss"></p>
 	</div>
 	<div class="cutscene-stage" id="cutscene_stage" aria-label="Cutscene staging">
 		<span class="cutscene-stage-label">Build time</span>
@@ -257,6 +256,12 @@
 		<label><span class="trim-name">Yaw</span><input type="range" id="trim_yaw_range" min="-180" max="180" step="1" value="0" aria-label="Splat yaw"><span class="trim-val" id="trim_yaw_val">0&deg;</span></label>
 		<label><span class="trim-name">Scale</span><input type="range" id="trim_scale_range" min="0.5" max="1.5" step="0.01" value="1" aria-label="Splat scale"><span class="trim-val" id="trim_scale_val">1.00&times;</span></label>
 		<label><span class="trim-name">Height</span><input type="range" id="trim_y_range" min="-5" max="5" step="0.05" value="0" aria-label="Splat height"><span class="trim-val" id="trim_y_val">0.0</span></label>
+		<div class="trim-flips" role="group" aria-label="Flip splat axes">
+			<span class="trim-name">Flip</span>
+			<label><input type="checkbox" id="trim_flip_x"> X</label>
+			<label><input type="checkbox" id="trim_flip_y"> Y</label>
+			<label><input type="checkbox" id="trim_flip_z"> Z</label>
+		</div>
 	</div>
 	<script type="module" src="/scripts/editor-entry.js?v=stage-3"></script>
 </body>
